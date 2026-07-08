@@ -1,0 +1,17 @@
+# Virtual environment
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Generated state & outputs (regenerated from a run)
+cull.db
+cull.csv
+*.xmp
+
+# Source photos / personal library — large and private, never publish
+images/
+
+# OS cruft
+.DS_Store

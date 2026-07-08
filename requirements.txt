@@ -1,0 +1,10 @@
+# Local vision-model photo culling. Install into the venv:
+#   ./venv/bin/pip install -r requirements.txt
+# Also requires a running Ollama with the qwen3.5:9b and qwen3.5:4b models:
+#   ollama pull qwen3.5:9b && ollama pull qwen3.5:4b
+ollama>=0.6
+Pillow>=11
+numpy>=2
+rawpy>=0.24        # LibRaw bindings: reads ARW/CR3/NEF/RAF/... embedded previews
+imagehash>=4.3     # perceptual hash for near-duplicate / burst detection
+ExifRead>=3.0      # capture time + lens read straight from RAW (for burst grouping)
