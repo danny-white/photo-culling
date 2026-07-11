@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Culling Bay</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span> Culling&nbsp;Bay <small id="scope"></small></div>
+    <nav class="tabs" id="tabs">
+      <button class="tab on" data-view="review">Review</button>
+      <button class="tab" data-view="bursts">Bursts</button>
+      <button class="tab" data-view="feedback">Feedback</button>
+      <button class="tab" data-view="tune">Tune</button>
+      <button class="tab" data-view="monitor">Monitor</button>
+    </nav>
+    <div class="monitor dead" id="monitor" title="Live run monitor">
+      <span class="dotlive"></span>
+      <div class="mon-prog">
+        <div class="row"><span id="mon-label">run</span><b id="mon-count">-- / --</b></div>
+        <div class="bar"><i id="mon-bar"></i></div>
+      </div>
+      <div class="mon-stat">
+        <div><b id="mon-rate">--</b> img/hr</div>
+        <div><span class="e" id="mon-err">0 err</span> &middot; <span id="mon-eta">--</span></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- REVIEW -->
+  <section class="view on" id="view-review">
+    <div class="toolbar" id="review-tools">
+      <div class="filters" id="filters"></div>
+      <span class="spacer"></span>
+      <select class="sel" id="scene"><option value="">all scenes</option></select>
+      <select class="sel" id="sort">
+        <option value="capture">capture time</option>
+        <option value="sharpness">sharpness</option>
+        <option value="aesthetic">aesthetic</option>
+        <option value="stars">stars</option>
+        <option value="filename">filename</option>
+      </select>
+      <button class="btn" id="order" data-order="asc" title="Toggle sort direction">&uarr; asc</button>
+      <input class="search" id="search" placeholder="search filename / subject / caption" autocomplete="off">
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="load-more"><button class="btn" id="more">Load more</button></div>
+    <div id="loupe" style="display:none"></div>
+  </section>
+
+  <!-- BURSTS -->
+  <section class="view" id="view-bursts">
+    <div id="bursts-index"></div>
+    <div id="bursts-compare" style="display:none"></div>
+  </section>
+
+  <!-- FEEDBACK -->
+  <section class="view" id="view-feedback"><div class="panel" id="feedback-body">Loading&hellip;</div></section>
+
+  <!-- TUNE -->
+  <section class="view" id="view-tune"><div class="panel" id="tune-body"></div></section>
+
+  <!-- MONITOR -->
+  <section class="view" id="view-monitor"><div id="monitor-body"></div></section>
+
+  <div class="keybar" id="keybar">
+    <span><kbd>K</kbd>/<kbd>U</kbd>/<kbd>X</kbd> verdict</span>
+    <span><kbd>1</kbd>&ndash;<kbd>5</kbd> stars</span>
+    <span><kbd>&larr;</kbd><kbd>&rarr;</kbd> prev/next</span>
+    <span><kbd>Enter</kbd> agree + next</span>
+    <span><kbd>Z</kbd> 100% zoom</span>
+    <span><kbd>Esc</kbd> back to grid</span>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
