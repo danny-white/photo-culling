@@ -32,6 +32,7 @@ regenerated any time.
 ./venv/bin/pip install -r requirements.txt
 ollama pull qwen3.5:9b       # primary (best quality)
 ollama pull qwen3.5:4b       # fallback / --fast
+sudo apt-get install -y libimage-exiftool-perl   # optional: EXIF for CR3 / other non-TIFF raws
 ```
 
 ## Usage
@@ -51,8 +52,14 @@ ollama pull qwen3.5:4b       # fallback / --fast
 ./venv/bin/python photo_cull.py export --xmp
 ```
 
-Useful flags on `run`: `--fast` (use the 4B model), `--limit N` (stop after N images —
-good for a trial), `--force` (reprocess already-done images), `--no-recursive`.
+`run` accepts **multiple folders** (`run /lib/2024 /lib/2025`). Useful flags: `--fast` (4B
+model), `--limit N` (stop after N — good for a trial), `--ext arw` (only these extensions),
+`--force` (reprocess done), `--no-recursive`, `--pidfile` (defaults to `<db>.pid`, so you can
+`kill -INT $(cat <db>.pid)`).
+
+EXIF (capture time / camera / lens) is read via `exifread`/PIL for ARW, CR2, NEF, JPEG, etc.;
+CR3 (and other non-TIFF raws) fall back to `exiftool` if it's installed. Capture time drives
+burst grouping, so formats without readable EXIF are left ungrouped rather than mis-grouped.
 
 ### Getting the results into Lightroom Classic
 
@@ -68,11 +75,14 @@ default label set, so the colors show up without extra configuration.
 
 **Safety:** sidecars are only written where none exists, so an existing Lightroom sidecar
 (with your develop settings) is never clobbered. Use `--force-xmp` to overwrite. Nothing is
-ever written *into* your RAW files.
+ever written *into* your RAW files. If your RAWs live on a read-only / network volume, use
+`export --xmp-dir DIR` to write sidecars into a local mirror of the source tree instead.
 
 ## Managing a multi-night run
 
 - Runs are resumable: re-running `run` continues where it left off.
+- The DB uses **WAL** mode, so `status` / `export` / ad-hoc queries work **while a run is in progress**.
+- The run writes its PID to `<db>.pid` — stop it any time with `kill -INT $(cat cull.db.pid)` (safe: state commits after every image).
 - `cull.db` is a normal SQLite file — inspect it directly:
 
   ```bash

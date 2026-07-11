@@ -9,6 +9,7 @@ __pycache__/
 cull.db
 cull.csv
 *.xmp
+trial_out/
 
 # Source photos / personal library — large and private, never publish
 images/

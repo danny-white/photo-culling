@@ -35,8 +35,12 @@ Then in Lightroom Classic: select the photos -> Metadata > Read Metadata from Fi
 import argparse
 import io
 import json
+import logging
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -45,6 +49,10 @@ from xml.sax.saxutils import escape as xml_escape
 
 import numpy as np
 from PIL import Image, ImageOps
+
+# exifread logs "File format not recognized." for ISO-BMFF raws (e.g. CR3); we fall back to
+# exiftool for those, so silence that noisy per-file warning.
+logging.getLogger("exifread").setLevel(logging.CRITICAL)
 
 # ----------------------------------------------------------------------------
 # Configuration (tunable)
@@ -137,17 +145,23 @@ CREATE INDEX IF NOT EXISTS idx_capture ON images(capture_ts);
 def connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")   # readers (status/export/sqlite3) never block the running writer
+    conn.execute("PRAGMA busy_timeout=5000")  # wait, don't error, on the rare commit collision
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
 
 
-def register_targets(conn: sqlite3.Connection, folder: Path, recursive: bool) -> int:
-    """Insert any new/changed files as 'pending'. Returns count of newly-queued files."""
+def register_targets(conn: sqlite3.Connection, folder: Path, recursive: bool, exts=ALL_EXTENSIONS) -> int:
+    """Insert any new/changed files as 'pending'. Returns count of newly-queued files.
+
+    `exts` restricts which file extensions are queued (default: all supported raw/image types)."""
     walker = folder.rglob("*") if recursive else folder.glob("*")
     queued = 0
     for p in walker:
-        if not p.is_file() or p.suffix.lower() not in ALL_EXTENSIONS:
+        if p.name.startswith("."):        # skip dotfiles: macOS AppleDouble (._*), .DS_Store, etc.
+            continue
+        if not p.is_file() or p.suffix.lower() not in exts:
             continue
         st = p.stat()
         row = conn.execute("SELECT mtime, size, status FROM images WHERE path=?", (str(p),)).fetchone()
@@ -217,6 +231,56 @@ def load_source(path: Path) -> Image.Image:
         raise LoadError(_exc_text(e)) from e
 
 
+_EXIFTOOL_PATH = None
+
+
+def _exiftool_available() -> str:
+    """Cached path to the exiftool binary ('' if not installed)."""
+    global _EXIFTOOL_PATH
+    if _EXIFTOOL_PATH is None:
+        _EXIFTOOL_PATH = shutil.which("exiftool") or ""
+    return _EXIFTOOL_PATH
+
+
+def _exif_via_exiftool(path: Path) -> dict:
+    """Capture time / camera / lens via exiftool — the one parser that reads CR3 (ISO-BMFF) as
+    well as CR2/NEF/JPEG/ARW. Returns {} if exiftool is unavailable or fails. Used only as a
+    fallback for files our TIFF/JPEG parsers can't read, so it costs nothing on the common path."""
+    exe = _exiftool_available()
+    if not exe:
+        return {}
+    try:
+        proc = subprocess.run(
+            [exe, "-j", "-m",
+             "-SubSecDateTimeOriginal", "-DateTimeOriginal", "-CreateDate",
+             "-Make", "-Model", "-LensModel", "-LensType", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        data = json.loads(proc.stdout or "[]")
+    except Exception:  # noqa: BLE001 - metadata is best-effort
+        return {}
+    if not data:
+        return {}
+    d = data[0]
+    res = {"capture_ts": None, "camera": None, "lens": None}
+    dt = d.get("SubSecDateTimeOriginal") or d.get("DateTimeOriginal") or d.get("CreateDate")
+    if dt:
+        m = re.match(r"\s*(\d{4}):(\d\d):(\d\d)[ T](\d\d):(\d\d):(\d\d)(\.\d+)?", str(dt))
+        if m:
+            y, mo, da, h, mi, s = (int(m.group(i)) for i in range(1, 7))
+            frac = float(m.group(7)) if m.group(7) else 0.0
+            try:
+                res["capture_ts"] = datetime(y, mo, da, h, mi, s).timestamp() + frac
+            except ValueError:
+                pass
+    make = str(d.get("Make") or "").strip()
+    model = str(d.get("Model") or "").strip()
+    res["camera"] = f"{make} {model}".strip() or None
+    lens = d.get("LensModel") or d.get("LensType")
+    res["lens"] = str(lens).strip() if lens else None
+    return res
+
+
 def read_exif(path: Path) -> dict:
     """Best-effort capture time + camera/lens. Falls back to file mtime for ordering.
 
@@ -256,6 +320,12 @@ def read_exif(path: Path) -> dict:
             out["capture_ts"] = ts.timestamp() + frac
     except Exception:
         pass
+    # For files our TIFF/JPEG parsers can't read (notably CR3), fill any gaps with exiftool.
+    if out["capture_ts"] is None or out["camera"] is None:
+        alt = _exif_via_exiftool(path)
+        for k in ("capture_ts", "camera", "lens"):
+            if out.get(k) is None and alt.get(k) is not None:
+                out[k] = alt[k]
     # Normalize camera/lens: drop empties and Sony's "----" manual-lens placeholder.
     for k in ("camera", "lens"):
         v = str(out[k]).strip() if out[k] is not None else ""
@@ -588,8 +658,12 @@ def cluster_bursts(conn: sqlite3.Connection, burst_gap: float):
     for r in rows:
         r = dict(r)
         ts = r["capture_ts"]
+        # Only cluster frames with reliable EXIF (a known camera + capture time). Formats whose
+        # EXIF we can't read (e.g. CR3 -> camera is NULL, capture_ts fell back to file mtime) are
+        # left as singletons rather than falsely grouped by copy-time.
         same_burst = (
             prev_ts is not None and ts is not None
+            and r["camera"] is not None and prev_cam is not None
             and (ts - prev_ts) <= burst_gap
             and r["camera"] == prev_cam
         )
@@ -675,15 +749,25 @@ def build_keywords(row: dict) -> tuple[list, list]:
     return flat_u, hier
 
 
-def write_xmp_sidecars(conn: sqlite3.Connection, force: bool) -> dict:
+def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | None" = None) -> dict:
     stats = {"written": 0, "skipped_exists": 0, "skipped_notok": 0}
-    rows = conn.execute("SELECT * FROM images").fetchall()
-    for r in rows:
-        row = dict(r)
+    rows = [dict(r) for r in conn.execute("SELECT * FROM images").fetchall()]
+    if xmp_dir is not None:
+        xmp_dir = Path(xmp_dir)
+
+    for row in rows:
         if row["status"] != "ok":
             stats["skipped_notok"] += 1
             continue
-        sidecar = Path(row["path"]).with_suffix(".xmp")
+        src = Path(row["path"])
+        if xmp_dir is not None:
+            # Mirror the full source path (minus the leading '/') under xmp_dir, so every
+            # sidecar maps 1:1 to its RAW and can later be rsync'd back next to it.
+            rel = Path(*src.parts[1:]) if src.is_absolute() else src
+            sidecar = xmp_dir / rel.with_suffix(".xmp")
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            sidecar = src.with_suffix(".xmp")
         if sidecar.exists() and not force:
             stats["skipped_exists"] += 1
             continue
@@ -714,62 +798,83 @@ def _fmt_eta(seconds: float) -> str:
 
 
 def cmd_run(args):
-    folder = args.folder
-    if not folder.is_dir():
-        sys.exit(f"Not a folder: {folder}")
+    folders = [Path(f) for f in args.folder]
+    for folder in folders:
+        if not folder.is_dir():
+            sys.exit(f"Not a folder: {folder}")
     import ollama
 
-    conn = connect(args.db)
-    newly = register_targets(conn, folder, recursive=not args.no_recursive)
-
-    statuses = ["pending"] + (["error"] if args.redrive else [])
-    if args.force:
-        statuses.append("ok")
-    placeholders = ",".join("?" * len(statuses))
-    todo = conn.execute(
-        f"SELECT path FROM images WHERE status IN ({placeholders}) ORDER BY filename",
-        statuses,
-    ).fetchall()
-    todo = [Path(r["path"]) for r in todo]
-    if args.limit:
-        todo = todo[: args.limit]
-
-    total_all = conn.execute("SELECT COUNT(*) c FROM images").fetchone()["c"]
-    print(f"Library: {total_all} images tracked ({newly} newly queued). "
-          f"Processing {len(todo)} now with {'4b (fast)' if args.fast else '9b'} "
-          f"at {MAX_EDGE}px.\n")
-    if not todo:
-        print("Nothing to do. (Use --redrive to retry errors, --force to reprocess.)")
-        return
-
-    client = ollama.Client(timeout=CALL_TIMEOUT)
-    done = 0
-    t_start = time.time()
+    # Emit our PID so the run can be stopped even if you forgot to capture $! at launch.
+    pidfile = args.pidfile or Path(str(args.db) + ".pid")
     try:
-        for i, path in enumerate(todo, 1):
-            prev = conn.execute("SELECT attempts FROM images WHERE path=?", (str(path),)).fetchone()
-            attempts = (prev["attempts"] if prev else 0) + 1
-            t0 = time.time()
-            result = process_one(client, path, args.fast)
-            result["attempts"] = attempts
-            upsert_result(conn, str(path), result)
-            done += 1
-            dt = time.time() - t0
-            avg = (time.time() - t_start) / done
-            eta = avg * (len(todo) - i)
-            if result["status"] == "ok":
-                msg = (f"{result['verdict'].upper():6s} {result['quality_stars']}* "
-                       f"sharp={result['sharpness']:.0f} exp={result['exposure_flag']:5s} "
-                       f"{result['subject'][:32]}")
-            else:
-                msg = f"ERROR [{result['error_class']}] {result['error_msg'][:60]}"
-            print(f"[{i}/{len(todo)}] {path.name:24s} -> {msg}  ({dt:.1f}s, ETA {_fmt_eta(eta)})")
-    except KeyboardInterrupt:
-        print("\nInterrupted — progress saved. Re-run to resume.")
+        pidfile.write_text(str(os.getpid()))
+    except OSError:
+        pidfile = None
 
-    print(f"\nProcessed {done} image(s) in {_fmt_eta(time.time() - t_start)}.")
-    _print_summary(conn)
-    print("\nNext: `photo_cull.py export --xmp` to write cull.csv + XMP sidecars.")
+    try:
+        conn = connect(args.db)
+        exts = {"." + e.lower().lstrip(".") for e in args.ext} if args.ext else ALL_EXTENSIONS
+        newly = 0
+        for folder in folders:
+            newly += register_targets(conn, folder, recursive=not args.no_recursive, exts=exts)
+
+        statuses = ["pending"] + (["error"] if args.redrive else [])
+        if args.force:
+            statuses.append("ok")
+        placeholders = ",".join("?" * len(statuses))
+        todo = conn.execute(
+            f"SELECT path FROM images WHERE status IN ({placeholders}) ORDER BY filename",
+            statuses,
+        ).fetchall()
+        todo = [Path(r["path"]) for r in todo]
+        if args.limit:
+            todo = todo[: args.limit]
+
+        total_all = conn.execute("SELECT COUNT(*) c FROM images").fetchone()["c"]
+        print(f"Library: {total_all} images tracked ({newly} newly queued). "
+              f"Processing {len(todo)} now with {'4b (fast)' if args.fast else '9b'} "
+              f"at {MAX_EDGE}px.")
+        if pidfile:
+            print(f"PID {os.getpid()} written to {pidfile}  (stop with: kill -INT $(cat {pidfile}))")
+        print()
+        if not todo:
+            print("Nothing to do. (Use --redrive to retry errors, --force to reprocess.)")
+            return
+
+        client = ollama.Client(timeout=CALL_TIMEOUT)
+        done = 0
+        t_start = time.time()
+        try:
+            for i, path in enumerate(todo, 1):
+                prev = conn.execute("SELECT attempts FROM images WHERE path=?", (str(path),)).fetchone()
+                attempts = (prev["attempts"] if prev else 0) + 1
+                t0 = time.time()
+                result = process_one(client, path, args.fast)
+                result["attempts"] = attempts
+                upsert_result(conn, str(path), result)
+                done += 1
+                dt = time.time() - t0
+                avg = (time.time() - t_start) / done
+                eta = avg * (len(todo) - i)
+                if result["status"] == "ok":
+                    msg = (f"{result['verdict'].upper():6s} {result['quality_stars']}* "
+                           f"sharp={result['sharpness']:.0f} exp={result['exposure_flag']:5s} "
+                           f"{result['subject'][:32]}")
+                else:
+                    msg = f"ERROR [{result['error_class']}] {result['error_msg'][:60]}"
+                print(f"[{i}/{len(todo)}] {path.name:24s} -> {msg}  ({dt:.1f}s, ETA {_fmt_eta(eta)})")
+        except KeyboardInterrupt:
+            print("\nInterrupted — progress saved. Re-run to resume.")
+
+        print(f"\nProcessed {done} image(s) in {_fmt_eta(time.time() - t_start)}.")
+        _print_summary(conn)
+        print("\nNext: `photo_cull.py export --xmp` to write cull.csv + XMP sidecars.")
+    finally:
+        if pidfile:
+            try:
+                pidfile.unlink()
+            except OSError:
+                pass
 
 
 def _print_summary(conn: sqlite3.Connection):
@@ -814,12 +919,14 @@ def cmd_export(args):
     cluster_bursts(conn, args.burst_gap)
     n = export_csv(conn, args.csv)
     print(f"Wrote {n} rows to {args.csv}")
-    if args.xmp:
-        stats = write_xmp_sidecars(conn, force=args.force_xmp)
-        print(f"XMP sidecars: {stats['written']} written, "
+    if args.xmp or args.xmp_dir:
+        stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir)
+        dest = f" into {args.xmp_dir}/ (mirroring the source tree)" if args.xmp_dir else " next to each photo"
+        print(f"XMP sidecars{dest}: {stats['written']} written, "
               f"{stats['skipped_exists']} skipped (already exist; use --force-xmp), "
               f"{stats['skipped_notok']} skipped (not ok).")
-        print("In Lightroom Classic: select photos -> Metadata > Read Metadata from File.")
+        if not args.xmp_dir:
+            print("In Lightroom Classic: select photos -> Metadata > Read Metadata from File.")
 
 
 # ----------------------------------------------------------------------------
@@ -830,14 +937,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("run", help="Process a folder (resumable).")
-    r.add_argument("folder", type=Path)
+    r = sub.add_parser("run", help="Process one or more folders (resumable).")
+    r.add_argument("folder", type=Path, nargs="+", help="One or more folders to scan recursively.")
     r.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
     r.add_argument("--fast", action="store_true", help=f"Use {MODEL_FALLBACK} instead of {MODEL_PRIMARY}.")
     r.add_argument("--limit", type=int, help="Process at most N images this run.")
+    r.add_argument("--ext", nargs="+", metavar="EXT",
+                   help="Only queue these file extensions (e.g. --ext arw). Default: all supported types.")
     r.add_argument("--redrive", action="store_true", help="Also retry rows that previously errored.")
     r.add_argument("--force", action="store_true", help="Reprocess even images already marked ok.")
     r.add_argument("--no-recursive", action="store_true", help="Do not descend into subfolders.")
+    r.add_argument("--pidfile", type=Path, default=None,
+                   help="Write this process's PID here at start (default: <db>.pid) so you can stop it later.")
     r.set_defaults(func=cmd_run)
 
     s = sub.add_parser("status", help="Show counts and error breakdown.")
@@ -849,6 +960,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
     e.add_argument("--csv", type=Path, default=Path(CSV_DEFAULT))
     e.add_argument("--xmp", action="store_true", help="Also write .xmp sidecars next to each photo.")
+    e.add_argument("--xmp-dir", type=Path, default=None,
+                   help="Write .xmp sidecars into this local directory (mirroring the source tree) instead "
+                        "of next to each RAW — e.g. when the RAWs live on a read-only network share.")
     e.add_argument("--force-xmp", action="store_true", help="Overwrite existing .xmp sidecars.")
     e.add_argument("--burst-gap", type=float, default=BURST_GAP_S, help="Seconds between frames to group as a burst.")
     e.set_defaults(func=cmd_export)
