@@ -8,3 +8,4 @@ numpy>=2
 rawpy>=0.24        # LibRaw bindings: reads ARW/CR3/NEF/RAF/... embedded previews
 imagehash>=4.3     # perceptual hash for near-duplicate / burst detection
 ExifRead>=3.0      # capture time + lens read straight from RAW (for burst grouping)
+Flask>=3.0         # local review + run-monitor web app (review/server.py)
