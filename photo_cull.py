@@ -538,7 +538,7 @@ def derive(cv: dict, vlm: dict) -> dict:
     portrait = vlm["people_count"] > 0
     closed = portrait and vlm["eyes_closed"]
 
-    stars = round(vlm["aesthetic"] / 2)
+    stars = (vlm["aesthetic"] + 1) // 2   # 9-10->5, 7-8->4, 5-6->3, 3-4->2, 1-2->1
     stars -= 1 if blurry else 0
     stars -= 1 if bad_exp else 0
     stars -= 1 if closed else 0
