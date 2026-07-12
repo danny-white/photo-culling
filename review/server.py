@@ -399,20 +399,27 @@ def api_monitor():
     con = db_ro()
     by_status = {r["status"]: r["c"] for r in con.execute("SELECT status,COUNT(*) c FROM images GROUP BY 1")}
     total = sum(by_status.values())
-    rate = con.execute(
-        "SELECT COUNT(*) n, MIN(processed_at) a, MAX(processed_at) b FROM images WHERE status='ok'").fetchone()
     errclasses = [dict(r) for r in con.execute(
         "SELECT COALESCE(error_class,'?') error_class, COUNT(*) c FROM images WHERE status='error' GROUP BY 1 ORDER BY c DESC")]
     con.close()
     ok = by_status.get("ok", 0)
+    running = _pid_alive() is not None
+    # Throughput + ETA from the RUN's own recent per-frame times and [i/N] position — accurate
+    # during a --force reprocess, where the DB pending count understates the remaining work.
+    recent = _tail(CFG["log"], 60)
+    run_pos, frame_secs = None, []
+    for line in recent:
+        m = re.search(r"\[(\d+)/(\d+)\].*?\(([\d.]+)s,", line)
+        if m:
+            run_pos = {"i": int(m.group(1)), "n": int(m.group(2))}
+            frame_secs.append(float(m.group(3)))
     img_per_hr = eta_h = None
-    if rate["n"] and rate["a"] and rate["b"] and rate["a"] != rate["b"]:
-        import datetime as dt
-        span = (dt.datetime.fromisoformat(rate["b"]) - dt.datetime.fromisoformat(rate["a"])).total_seconds()
-        if span > 0:
-            img_per_hr = round(rate["n"] / (span / 3600))
-            pending = by_status.get("pending", 0)
-            eta_h = round(pending / img_per_hr, 1) if img_per_hr else None
+    if frame_secs and running:
+        avg = sum(frame_secs[-20:]) / len(frame_secs[-20:])
+        if avg > 0:
+            img_per_hr = round(3600 / avg)
+            if run_pos:
+                eta_h = round(max(0, run_pos["n"] - run_pos["i"]) * avg / 3600, 1)
     gpu = None
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
@@ -421,17 +428,8 @@ def api_monitor():
         gpu = {"used_mb": int(used), "total_mb": int(tot), "util": int(util)}
     except Exception:
         pass
-    # The run's own [i/N] counter is the true progress — the ok/pending DB counts don't move
-    # while --force re-runs already-ok frames in place.
-    recent = _tail(CFG["log"], 40)
-    run_pos = None
-    for line in reversed(recent):
-        m = re.search(r"\[(\d+)/(\d+)\]", line)
-        if m:
-            run_pos = {"i": int(m.group(1)), "n": int(m.group(2))}
-            break
     return jsonify({
-        "running": _pid_alive() is not None,
+        "running": running,
         "counts": {"ok": ok, "pending": by_status.get("pending", 0),
                    "error": by_status.get("error", 0), "total": total},
         "img_per_hr": img_per_hr, "eta_hours": eta_h,

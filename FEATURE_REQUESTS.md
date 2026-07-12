@@ -35,8 +35,8 @@ without the exact word).
 
 ---
 
-## Star-tier remap (pending decision)
+## Star-tier remap — SHIPPED
 
-Make 5★ reachable. See the discussion; proposed base mapping `stars = (aesthetic + 1) // 2`
-(9–10→5, 7–8→4, 5–6→3, 3–4→2, 1–2→1), keeping the −1 penalties for soft / bad-exposure /
-eyes-closed. Apply during the full reprocess so the whole library is consistent.
+`stars = (aesthetic + 1) // 2` (9–10→5, 7–8→4, 5–6→3, 3–4→2, 1–2→1), keeping the −1 penalties
+for soft / bad-exposure / eyes-closed. Committed and applied in the full reprocess, so 5★ is
+now reachable.
