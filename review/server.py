@@ -263,7 +263,8 @@ def burst_index():
         groups.append(cur)
     by_row, multi = {}, []
     for g in groups:
-        best = max(g, key=lambda x: (x["aesthetic"] or 0, x["sharpness"] or 0))
+        keepers = [x for x in g if x["base_verdict"] == "keep"]
+        best = max(keepers or g, key=lambda x: (x["aesthetic"] or 0, x["sharpness"] or 0))
         for x in g:
             x["is_best"] = x["id"] == best["id"]
             x["burst_size"] = len(g)

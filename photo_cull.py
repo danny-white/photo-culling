@@ -640,8 +640,10 @@ def cluster_bursts(conn: sqlite3.Connection, burst_gap: float):
     def flush(group):
         if not group:
             return
-        # best = highest aesthetic, tie-broken by sharpness
-        best = max(group, key=lambda r: (r["aesthetic"] or 0, r["sharpness"] or 0))
+        # best = the top *keeper* (so a burst with any keeper always retains exactly one keep);
+        # fall back to overall best only when no frame in the burst was judged keep.
+        keepers = [r for r in group if r["base_verdict"] == "keep"]
+        best = max(keepers or group, key=lambda r: (r["aesthetic"] or 0, r["sharpness"] or 0))
         size = len(group)
         for r in group:
             is_best = 1 if r["path"] == best["path"] else 0
