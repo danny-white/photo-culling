@@ -33,6 +33,7 @@ Then in Lightroom Classic: select the photos -> Metadata > Read Metadata from Fi
 """
 
 import argparse
+import hashlib
 import io
 import json
 import logging
@@ -106,6 +107,8 @@ CREATE TABLE IF NOT EXISTS images (
     error_msg       TEXT,
     model_used      TEXT,
     processed_at    TEXT,
+    prompt_version  TEXT,                      -- sha256(VLM_PROMPT)[:12]; joins to prompts table
+    harness_version TEXT,                      -- git short SHA (+ -dirty) of the code that ran
 
     capture_ts      REAL,                      -- epoch seconds, for burst grouping
     camera          TEXT,
@@ -139,6 +142,13 @@ CREATE TABLE IF NOT EXISTS images (
 );
 CREATE INDEX IF NOT EXISTS idx_status ON images(status);
 CREATE INDEX IF NOT EXISTS idx_capture ON images(capture_ts);
+
+-- Reconstructable registry: map a prompt_version hash back to the exact prompt text.
+CREATE TABLE IF NOT EXISTS prompts (
+    prompt_version  TEXT PRIMARY KEY,   -- sha256(prompt text)[:12], = images.prompt_version
+    prompt          TEXT NOT NULL,      -- the exact VLM_PROMPT string, for reconstruction
+    first_seen      TEXT                -- ISO-8601 UTC when this prompt was first registered
+);
 """
 
 
@@ -148,6 +158,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")   # readers (status/export/sqlite3) never block the running writer
     conn.execute("PRAGMA busy_timeout=5000")  # wait, don't error, on the rare commit collision
     conn.executescript(SCHEMA)
+    # Upgrade DBs created before these columns were added: SCHEMA's CREATE TABLE IF NOT EXISTS
+    # defines them for fresh DBs, but won't add them to an already-existing images table.
+    for col in ("prompt_version", "harness_version"):
+        try:
+            conn.execute(f"ALTER TABLE images ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
     conn.commit()
     return conn
 
@@ -186,6 +203,37 @@ def upsert_result(conn: sqlite3.Connection, path: str, fields: dict):
     cols = ", ".join(f"{k}=?" for k in fields)
     conn.execute(f"UPDATE images SET {cols} WHERE path=?", (*fields.values(), path))
     conn.commit()
+
+
+def register_prompt(conn: sqlite3.Connection, version: str, text: str):
+    """Persist the (prompt_version -> exact prompt text) pair once, so any row's prompt_version is
+    reconstructable later. No-op if this version is already recorded."""
+    conn.execute(
+        "INSERT OR IGNORE INTO prompts(prompt_version, prompt, first_seen) VALUES(?,?,?)",
+        (version, text, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+    )
+    conn.commit()
+
+
+def harness_version() -> str:
+    """Identity of the *code* that produced a row — derive(), the CV thresholds and the model
+    params all affect outputs, not just the prompt. Short git SHA of HEAD, plus '-dirty' if
+    photo_cull.py has uncommitted changes (a '-dirty' row isn't reproducible from the SHA alone).
+    Falls back to a hash of this file's bytes when not in a git checkout."""
+    here = Path(__file__).resolve().parent
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=here, text=True, stderr=subprocess.DEVNULL).strip()
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", str(Path(__file__).resolve())],
+            cwd=here, text=True).strip()
+        return sha + ("-dirty" if dirty else "")
+    except Exception:  # noqa: BLE001 - provenance must never crash a run
+        try:
+            return "nogit-" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+        except Exception:  # noqa: BLE001
+            return "unknown"
 
 
 # ----------------------------------------------------------------------------
@@ -431,6 +479,11 @@ VLM_PROMPT = (
     "- keep_hint: true if this looks worth keeping as a photograph.\n"
     "Return only JSON."
 )
+
+# Auto-derived prompt identity: changes exactly when the prompt text changes, so a row's
+# prompt_version can never silently drift from the text that produced it. The full text is also
+# saved to the `prompts` table (register_prompt) so any version is reconstructable.
+VLM_PROMPT_VERSION = hashlib.sha256(VLM_PROMPT.encode("utf-8")).hexdigest()[:12]
 
 
 def extract_json(raw: str) -> dict:
@@ -706,7 +759,8 @@ CSV_COLUMNS = [
     "sharpness", "exposure_flag", "blown_pct", "crushed_pct",
     "subject", "scene", "caption", "tags", "issues",
     "people_count", "eyes_closed", "is_best_in_burst", "burst_id",
-    "reason", "status", "error_class", "error_msg", "model_used", "path",
+    "reason", "status", "error_class", "error_msg", "model_used",
+    "prompt_version", "harness_version", "path",
 ]
 
 
@@ -924,6 +978,11 @@ def cmd_run(args):
             print("Nothing to do. (Use --redrive to retry errors, --force to reprocess.)")
             return
 
+        harness_ver = harness_version()
+        register_prompt(conn, VLM_PROMPT_VERSION, VLM_PROMPT)
+        print(f"Prompt {VLM_PROMPT_VERSION} · harness {harness_ver}  "
+              f"(stamped on every row; prompt text saved to the `prompts` table)")
+
         client = ollama.Client(timeout=CALL_TIMEOUT)
         done = 0
         t_start = time.time()
@@ -934,6 +993,8 @@ def cmd_run(args):
                 t0 = time.time()
                 result = process_one(client, path, args.fast)
                 result["attempts"] = attempts
+                result["prompt_version"] = VLM_PROMPT_VERSION
+                result["harness_version"] = harness_ver
                 upsert_result(conn, str(path), result)
                 done += 1
                 dt = time.time() - t0
