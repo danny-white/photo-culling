@@ -584,7 +584,10 @@ def main():
     ap.add_argument("--db", type=Path, default=Path("trial_out/trial.db"))
     ap.add_argument("--annotations", type=Path, default=None)
     ap.add_argument("--log", type=Path, default=Path("trial_out/run.log"))
-    ap.add_argument("--pidfile", type=Path, default=None)
+    ap.add_argument("--pidfile", type=Path, default=None,
+                    help="Path to the CULL's pidfile, for the monitor (default: <db>.pid).")
+    ap.add_argument("--server-pidfile", type=Path, default=None,
+                    help="Write THIS review server's own PID here at start, so it can be stopped later.")
     ap.add_argument("--folders", nargs="*", default=[], help="source folders, to enable resume/redrive from the UI")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
@@ -595,6 +598,9 @@ def main():
     CFG["pidfile"] = a.pidfile
     CFG["folders"] = a.folders
     anno().close()  # ensure the annotations table exists
+    if a.server_pidfile:
+        a.server_pidfile.write_text(str(os.getpid()))
+        print(f"Review server PID {os.getpid()} -> {a.server_pidfile}")
     print(f"Review UI on http://{a.host}:{a.port}  (db={a.db}, annotations={CFG['annotations']})")
     app.run(host=a.host, port=a.port, threaded=True)
 
