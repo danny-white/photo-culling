@@ -893,6 +893,14 @@ def cmd_run(args):
         for folder in folders:
             newly += register_targets(conn, folder, recursive=not args.no_recursive, exts=exts)
 
+        if args.reprocess:
+            ph = ",".join("?" * len(args.reprocess))
+            n = conn.execute(
+                f"UPDATE images SET status='pending' WHERE status='ok' AND base_verdict IN ({ph})",
+                args.reprocess).rowcount
+            conn.commit()
+            print(f"Reprocess: reset {n} row(s) with verdict {args.reprocess} back to pending.")
+
         statuses = ["pending"] + (["error"] if args.redrive else [])
         if args.force:
             statuses.append("ok")
@@ -1026,6 +1034,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Only queue these file extensions (e.g. --ext arw). Default: all supported types.")
     r.add_argument("--redrive", action="store_true", help="Also retry rows that previously errored.")
     r.add_argument("--force", action="store_true", help="Reprocess even images already marked ok.")
+    r.add_argument("--reprocess", nargs="+", metavar="VERDICT", choices=["keep", "review", "reject"],
+                   help="Reset already-done rows with these base verdicts back to pending and re-run them "
+                        "(e.g. --reprocess reject after a prompt/threshold change).")
     r.add_argument("--no-recursive", action="store_true", help="Do not descend into subfolders.")
     r.add_argument("--pidfile", type=Path, default=None,
                    help="Write this process's PID here at start (default: <db>.pid) so you can stop it later.")
