@@ -25,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -187,6 +188,8 @@ def api_summary():
 def api_list():
     filt = request.args.get("filter", "all")
     scene = request.args.get("scene", "")
+    stars = request.args.get("stars", "").strip()
+    exposure = request.args.get("exposure", "").strip()
     q = request.args.get("q", "").strip()
     sort = SORT_SQL.get(request.args.get("sort", "capture"), "capture_ts")
     order = "DESC" if request.args.get("order", "asc") == "desc" else "ASC"
@@ -197,9 +200,14 @@ def api_list():
     params = []
     if scene:
         where.append("scene=?"); params.append(scene)
+    if stars[:1].isdigit():
+        where.append("quality_stars >= ?" if stars.endswith("+") else "quality_stars = ?")
+        params.append(int(stars[0]))
+    if exposure in ("over", "under", "ok"):
+        where.append("exposure_flag=?"); params.append(exposure)
     if q:
-        where.append("(filename LIKE ? OR subject LIKE ? OR caption LIKE ?)")
-        params += [f"%{q}%"] * 3
+        where.append("(filename LIKE ? OR subject LIKE ? OR caption LIKE ? OR tags LIKE ? OR issues LIKE ?)")
+        params += [f"%{q}%"] * 5
     sql = (f"SELECT rowid AS id, path, filename, base_verdict, verdict, color_label, quality_stars, "
            f"aesthetic, sharpness, exposure_flag, scene, subject, people_count, eyes_closed, "
            f"burst_id, burst_size, is_best_in_burst, status, error_class, error_msg "
@@ -413,13 +421,23 @@ def api_monitor():
         gpu = {"used_mb": int(used), "total_mb": int(tot), "util": int(util)}
     except Exception:
         pass
+    # The run's own [i/N] counter is the true progress — the ok/pending DB counts don't move
+    # while --force re-runs already-ok frames in place.
+    recent = _tail(CFG["log"], 40)
+    run_pos = None
+    for line in reversed(recent):
+        m = re.search(r"\[(\d+)/(\d+)\]", line)
+        if m:
+            run_pos = {"i": int(m.group(1)), "n": int(m.group(2))}
+            break
     return jsonify({
         "running": _pid_alive() is not None,
         "counts": {"ok": ok, "pending": by_status.get("pending", 0),
                    "error": by_status.get("error", 0), "total": total},
         "img_per_hr": img_per_hr, "eta_hours": eta_h,
         "errors_by_class": errclasses, "gpu": gpu,
-        "recent": _tail(CFG["log"], 12),
+        "run_pos": run_pos,
+        "recent": recent[-12:],
     })
 
 

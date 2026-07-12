@@ -9,7 +9,7 @@ const dash = (s) => esc(s) || "&mdash;";
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 1700); }
 
-const S = { view: "review", filter: "all", scene: "", sort: "capture", order: "asc", q: "",
+const S = { view: "review", filter: "all", scene: "", stars: "", exposure: "", sort: "capture", order: "asc", q: "",
   offset: 0, limit: 120, items: [], loupeIdx: -1, current: null, summary: null };
 
 /* ------------------------------------------------ summary + filters */
@@ -33,7 +33,7 @@ function renderFilters() {
 /* ------------------------------------------------ grid */
 async function loadList(reset) {
   if (reset) { S.offset = 0; S.items = []; $("#grid").innerHTML = ""; }
-  const qs = new URLSearchParams({ filter: S.filter, scene: S.scene, q: S.q, sort: S.sort, order: S.order, limit: S.limit, offset: S.offset });
+  const qs = new URLSearchParams({ filter: S.filter, scene: S.scene, stars: S.stars, exposure: S.exposure, q: S.q, sort: S.sort, order: S.order, limit: S.limit, offset: S.offset });
   const d = await api("/api/list?" + qs);
   const start = S.items.length;
   S.items = S.items.concat(d.items);
@@ -269,7 +269,8 @@ function loadTune() {
 
 /* ------------------------------------------------ monitor view + poll */
 async function loadMonitor() {
-  const d = await api("/api/monitor"), c = d.counts, pct = c.total ? 100 * c.ok / c.total : 0;
+  const d = await api("/api/monitor"), c = d.counts, rp = d.run_pos;
+  const pct = (d.running && rp && rp.n) ? 100 * rp.i / rp.n : (c.total ? 100 * c.ok / c.total : 0);
   $("#monitor-body").innerHTML = `<div class="cols">
     <div class="panel"><h2 class="h">Run</h2>
       <div class="stat-row">
@@ -279,7 +280,7 @@ async function loadMonitor() {
         <div class="s"><div class="n">${d.img_per_hr || "&mdash;"}</div><div class="l">img/hr</div></div>
         <div class="s"><div class="n">${d.eta_hours == null ? "&mdash;" : d.eta_hours + "h"}</div><div class="l">eta</div></div></div>
       <div class="bar" style="height:9px"><i style="display:block;height:100%;width:${pct}%;background:linear-gradient(90deg,var(--accent),#6fd0e4)"></i></div>
-      <div class="muted" style="margin-top:8px">${d.running ? '<span style="color:var(--keep)">&#9679; running</span>' : "&#9675; not running"}${d.gpu ? " &middot; GPU " + d.gpu.used_mb + "/" + d.gpu.total_mb + "MB &middot; " + d.gpu.util + "%" : ""}</div>
+      <div class="muted" style="margin-top:8px">${d.running ? '<span style="color:var(--keep)">&#9679; running</span>' + (rp ? " &middot; frame " + rp.i.toLocaleString() + "/" + rp.n.toLocaleString() : "") : "&#9675; not running"}${d.gpu ? " &middot; GPU " + d.gpu.used_mb + "/" + d.gpu.total_mb + "MB &middot; " + d.gpu.util + "%" : ""}</div>
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
         <button class="btn warn" id="i-pause" ${d.running ? "" : "disabled"}>Pause run</button>
         <button class="btn" id="i-resume" ${d.running ? "disabled" : ""}>Resume</button>
@@ -300,8 +301,9 @@ async function pollMonitor() {
     const d = await api("/api/monitor"), c = d.counts;
     $("#monitor").classList.toggle("dead", !d.running);
     $("#mon-label").textContent = d.running ? "run · 9b" : "idle";
-    $("#mon-count").textContent = c.ok.toLocaleString() + " / " + c.total.toLocaleString();
-    $("#mon-bar").style.width = (c.total ? 100 * c.ok / c.total : 0) + "%";
+    const rp = d.run_pos, pi = (d.running && rp) ? rp.i : c.ok, pn = (d.running && rp) ? rp.n : c.total;
+    $("#mon-count").textContent = pi.toLocaleString() + " / " + pn.toLocaleString();
+    $("#mon-bar").style.width = (pn ? 100 * pi / pn : 0) + "%";
     $("#mon-rate").textContent = d.img_per_hr || "--";
     $("#mon-err").textContent = c.error + " err";
     $("#mon-eta").textContent = d.eta_hours == null ? "--" : "ETA " + d.eta_hours + "h";
@@ -337,6 +339,8 @@ $$("#tabs .tab").forEach(t => t.onclick = () => show(t.dataset.view));
 $("#grid").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openLoupe(+c.dataset.i); });
 $("#more").onclick = () => loadList(false);
 $("#scene").onchange = () => { S.scene = $("#scene").value; loadList(true); };
+$("#stars").onchange = () => { S.stars = $("#stars").value; loadList(true); };
+$("#exposure").onchange = () => { S.exposure = $("#exposure").value; loadList(true); };
 $("#sort").onchange = () => { S.sort = $("#sort").value; loadList(true); };
 $("#order").onclick = () => { S.order = S.order === "asc" ? "desc" : "asc"; $("#order").innerHTML = S.order === "asc" ? "&uarr; asc" : "&darr; desc"; loadList(true); };
 $("#search").oninput = debounce(() => { S.q = $("#search").value.trim(); loadList(true); }, 300);
