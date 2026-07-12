@@ -749,8 +749,47 @@ def build_keywords(row: dict) -> tuple[list, list]:
     return flat_u, hier
 
 
-def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | None" = None) -> dict:
-    stats = {"written": 0, "skipped_exists": 0, "skipped_notok": 0}
+def _read_xmp_fields(path: Path) -> dict:
+    """Read Rating/Label/Description already present in a sidecar (via exiftool)."""
+    exe = _exiftool_available()
+    if not exe:
+        return {}
+    try:
+        proc = subprocess.run([exe, "-j", "-XMP:Rating", "-XMP:Label", "-XMP-dc:Description", str(path)],
+                              capture_output=True, text=True, timeout=30)
+        data = json.loads(proc.stdout or "[]")
+    except Exception:  # noqa: BLE001 - best effort
+        return {}
+    return data[0] if data else {}
+
+
+def _merge_ai_into_sidecar(target: Path, row: dict) -> bool:
+    """Add AI caption/keywords/label/Cull-verdict to an existing sidecar WITHOUT overwriting a
+    rating/label/description the user already set (or their develop settings). Needs exiftool."""
+    exe = _exiftool_available()
+    if not exe:
+        return False
+    have = _read_xmp_fields(target)
+    flat, hier = build_keywords(row)
+    args = [exe, "-overwrite_original", "-m", "-P"]
+    args += [f"-XMP-dc:Subject+={k}" for k in flat]
+    args += [f"-XMP-lr:HierarchicalSubject+={k}" for k in hier]
+    if row.get("caption") and not have.get("Description"):
+        args.append(f"-XMP-dc:Description={row['caption']}")
+    if have.get("Rating") in (None, ""):
+        args.append(f"-XMP-xmp:Rating={row['quality_stars'] or 0}")
+    if have.get("Label") in (None, "") and row.get("color_label"):
+        args.append(f"-XMP-xmp:Label={row['color_label']}")
+    args.append(str(target))
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=60).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | None" = None,
+                       merge: bool = False) -> dict:
+    stats = {"written": 0, "merged": 0, "merge_failed": 0, "skipped_exists": 0, "skipped_notok": 0}
     rows = [dict(r) for r in conn.execute("SELECT * FROM images").fetchall()]
     if xmp_dir is not None:
         xmp_dir = Path(xmp_dir)
@@ -768,6 +807,23 @@ def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | N
             sidecar.parent.mkdir(parents=True, exist_ok=True)
         else:
             sidecar = src.with_suffix(".xmp")
+
+        # --merge: start from the user's existing sidecar (their rating/label/develop) and only
+        # ADD the AI fields, so nothing set by hand is lost.
+        existing = src.with_suffix(".xmp")
+        if merge and existing.exists():
+            if sidecar != existing and sidecar.exists() and not force:
+                stats["skipped_exists"] += 1
+                continue
+            try:
+                if sidecar != existing:
+                    shutil.copy2(existing, sidecar)
+            except OSError:
+                stats["merge_failed"] += 1
+                continue
+            stats["merged" if _merge_ai_into_sidecar(sidecar, row) else "merge_failed"] += 1
+            continue
+
         if sidecar.exists() and not force:
             stats["skipped_exists"] += 1
             continue
@@ -920,11 +976,16 @@ def cmd_export(args):
     n = export_csv(conn, args.csv)
     print(f"Wrote {n} rows to {args.csv}")
     if args.xmp or args.xmp_dir:
-        stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir)
+        stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir, merge=args.merge)
         dest = f" into {args.xmp_dir}/ (mirroring the source tree)" if args.xmp_dir else " next to each photo"
-        print(f"XMP sidecars{dest}: {stats['written']} written, "
-              f"{stats['skipped_exists']} skipped (already exist; use --force-xmp), "
-              f"{stats['skipped_notok']} skipped (not ok).")
+        parts = [f"{stats['written']} written"]
+        if stats["merged"]:
+            parts.append(f"{stats['merged']} merged into existing")
+        if stats["merge_failed"]:
+            parts.append(f"{stats['merge_failed']} merge failed")
+        parts += [f"{stats['skipped_exists']} skipped (exist; use --force-xmp)",
+                  f"{stats['skipped_notok']} skipped (not ok)"]
+        print(f"XMP sidecars{dest}: " + ", ".join(parts) + ".")
         if not args.xmp_dir:
             print("In Lightroom Classic: select photos -> Metadata > Read Metadata from File.")
 
@@ -963,6 +1024,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--xmp-dir", type=Path, default=None,
                    help="Write .xmp sidecars into this local directory (mirroring the source tree) instead "
                         "of next to each RAW — e.g. when the RAWs live on a read-only network share.")
+    e.add_argument("--merge", action="store_true",
+                   help="Merge AI caption/keywords/label into your existing sidecars, preserving any rating/"
+                        "label/description you already set (and develop settings). Requires exiftool.")
     e.add_argument("--force-xmp", action="store_true", help="Overwrite existing .xmp sidecars.")
     e.add_argument("--burst-gap", type=float, default=BURST_GAP_S, help="Seconds between frames to group as a burst.")
     e.set_defaults(func=cmd_export)

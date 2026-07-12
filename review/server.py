@@ -202,7 +202,7 @@ def api_list():
         params += [f"%{q}%"] * 3
     sql = (f"SELECT rowid AS id, path, filename, base_verdict, verdict, color_label, quality_stars, "
            f"aesthetic, sharpness, exposure_flag, scene, subject, people_count, eyes_closed, "
-           f"burst_id, burst_size, is_best_in_burst, status, error_class "
+           f"burst_id, burst_size, is_best_in_burst, status, error_class, error_msg "
            f"FROM images WHERE {' AND '.join(where)} ORDER BY {sort} {order}, filename LIMIT ? OFFSET ?")
     con = db_ro()
     rows = con.execute(sql, (*params, limit, offset)).fetchall()

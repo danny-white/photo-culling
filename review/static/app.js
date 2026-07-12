@@ -54,7 +54,9 @@ function card(it, i) {
     ${vv ? `<div class="rail-v" style="background:var(--${vv})"></div>` : ""}
     <div class="badges">${badges.join("")}</div><div class="corner">${stars}</div>
     <div class="thumb" style="background-image:url('/api/thumb/${it.id}?s=grid')"></div>
-    <div class="cap"><span class="fn">${esc(it.filename)}</span><span class="sub">${dash(it.subject)}</span></div>
+    <div class="cap"><span class="fn">${esc(it.filename)}</span>${it.status === "error"
+      ? `<span class="sub err">${esc((it.error_class || "error") + ": " + (it.error_msg || ""))}</span>`
+      : `<span class="sub">${dash(it.subject)}</span>`}</div>
   </div>`;
 }
 function refreshCard(i) {
@@ -103,7 +105,8 @@ function loupeHTML(it, i) {
       <div class="insp-head"><span class="fn">${esc(it.filename)}</span>
         <span class="pos">#${i + 1} / ${S.items.length}${it.burst_size > 1 ? " &middot; burst " + it.burst_size : ""}</span></div>
       <div class="insp-body">
-        <div class="sec"><div class="lbl">AI read</div>
+        ${it.status === "error" ? `<div class="sec"><div class="lbl">Load error</div><div class="errbox"><b>${esc(it.error_class || "error")}</b><br>${esc(it.error_msg || "(no message)")}</div></div>` : ""}
+        <div class="sec"${it.status === "error" ? ' style="display:none"' : ""}><div class="lbl">AI read</div>
           <p class="cap">${esc(it.caption || "")}</p>
           <dl class="kv" style="margin-top:9px">
             <dt>subject</dt><dd>${dash(it.subject)}</dd>
@@ -111,7 +114,7 @@ function loupeHTML(it, i) {
             <dt>people</dt><dd>${it.people_count || 0}${it.eyes_closed ? " &middot; eyes closed" : ""}</dd>
             <dt>aesthetic</dt><dd>${it.aesthetic == null ? "&mdash;" : it.aesthetic} / 10</dd></dl>
           <div class="tags" style="margin-top:9px">${tags}${issues}</div></div>
-        <div class="sec"><div class="lbl">Technical &middot; measured</div>
+        <div class="sec"${it.status === "error" ? ' style="display:none"' : ""}><div class="lbl">Technical &middot; measured</div>
           <dl class="kv">
             <dt>sharpness</dt><dd>${fmt(it.sharpness)}</dd>
             <dt>exposure</dt><dd class="${ok ? "ok" : "warn"}">${dash(it.exposure_flag)}</dd>
