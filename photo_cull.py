@@ -407,18 +407,27 @@ VLM_SCHEMA = {
 }
 
 VLM_PROMPT = (
-    "You are a photo-culling editor doing a first pass. Look at the image and return JSON.\n"
+    "You are a photo-culling editor doing a first pass. Return JSON.\n"
     "Do NOT judge exposure, focus or sharpness — those are measured separately.\n"
-    "Judge only what you can see about content and composition:\n"
-    "- caption: one natural sentence describing the photo.\n"
+    "Judge only what you can clearly see:\n"
+    "- caption: one sentence describing ONLY what is visibly present. Do NOT name a specific "
+    "city, landmark, brand, or art style unless text/signage in the image states it — stay "
+    "generic (say 'an old European town', not 'Granada').\n"
     "- subject: the single main subject (a few words).\n"
-    "- scene: one genre word (portrait, landscape, wildlife, street, macro, architecture, food, event, other).\n"
+    "- scene: one genre word (portrait, landscape, wildlife, street, macro, architecture, "
+    "food, event, sports, night, other).\n"
     "- people_count: number of people whose faces are visible.\n"
-    "- eyes_closed: true only if a person's eyes are clearly closed/blinking.\n"
-    "- aesthetic: 1-10 for composition, framing and overall appeal.\n"
-    "- tags: 4-8 short lowercase keywords (subject, setting, activity, mood).\n"
-    "- issues: composition problems you can see (e.g. 'tilted horizon', 'subject cut off', "
-    "'cluttered background', 'obstructed'); empty list if none.\n"
+    "- eyes_closed: true ONLY if the main subject's eyelids are clearly shut mid-blink. A "
+    "downward gaze, squinting from a smile or laugh, singing, or a face turned away is NOT "
+    "eyes_closed; do not set true just because someone in the background might be blinking.\n"
+    "- aesthetic: 1-10, and use the whole range: 1-3 throwaway, 4-6 competent but ordinary, "
+    "7-8 strong, 9-10 exceptional. Most frames are 4-6; reserve 8+ for genuinely strong "
+    "images. Weak composition scores low even if the subject is appealing.\n"
+    "- tags: 4-8 short lowercase keywords (subject, setting, activity, mood); no filler like "
+    "'photo', 'image', 'picture'.\n"
+    "- issues: every distracting element you can find, including easily-missed ones — cable or "
+    "power lines across the frame, poles, cranes, signs, a stray limb, a merge (a pole growing "
+    "out of a head), or a horizon line through a person. Empty list only if truly clean.\n"
     "- keep_hint: true if this looks worth keeping as a photograph.\n"
     "Return only JSON."
 )
@@ -535,7 +544,15 @@ def derive(cv: dict, vlm: dict) -> dict:
     stars -= 1 if closed else 0
     stars = max(1, min(5, stars))
 
-    if blurry or severe_exp or closed or vlm["aesthetic"] <= 3:
+    # A clearly strong frame (aesthetic >= 8) OR any night/astro frame is trusted over the CV
+    # gate: soft/exposure flags only demote it to review, never hard-reject. Night shots
+    # (auroras, low-light) legitimately read as "soft"/"dark" to the sharpness metric, and the
+    # stricter aesthetic rubric now scores them ~7, so scene is the reliable signal here.
+    # Eyes-closed and genuinely weak frames are still rejected.
+    strong = vlm["aesthetic"] >= 8 or vlm.get("scene") == "night"
+    if closed or vlm["aesthetic"] <= 3:
+        verdict = "reject"
+    elif (blurry or severe_exp) and not strong:
         verdict = "reject"
     elif (not blurry) and (not bad_exp) and vlm["aesthetic"] >= 7 and vlm["keep_hint"]:
         verdict = "keep"
