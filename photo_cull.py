@@ -139,7 +139,9 @@ CREATE TABLE IF NOT EXISTS images (
     quality_stars   INTEGER,
     verdict         TEXT,                      -- effective (after burst demotion)
     color_label     TEXT,
-    reason          TEXT
+    reason          TEXT,
+    user_rating     INTEGER,                   -- your final LR star rating, read back from XMP (feedback)
+    user_label      TEXT                       -- your final LR color label, read back from XMP (feedback)
 );
 CREATE INDEX IF NOT EXISTS idx_status ON images(status);
 CREATE INDEX IF NOT EXISTS idx_capture ON images(capture_ts);
@@ -162,7 +164,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # Upgrade DBs created before these columns were added: SCHEMA's CREATE TABLE IF NOT EXISTS
     # defines them for fresh DBs, but won't add them to an already-existing images table.
     for col, decl in (("prompt_version", "TEXT"), ("harness_version", "TEXT"),
-                      ("keep_hint", "INTEGER")):
+                      ("keep_hint", "INTEGER"), ("user_rating", "INTEGER"), ("user_label", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
@@ -764,7 +766,7 @@ CSV_COLUMNS = [
     "sharpness", "exposure_flag", "blown_pct", "crushed_pct",
     "subject", "scene", "caption", "tags", "issues",
     "people_count", "eyes_closed", "keep_hint", "is_best_in_burst", "burst_id",
-    "reason", "status", "error_class", "error_msg", "model_used",
+    "reason", "user_rating", "user_label", "status", "error_class", "error_msg", "model_used",
     "prompt_version", "harness_version", "path",
 ]
 
@@ -833,12 +835,31 @@ def _read_xmp_fields(path: Path) -> dict:
     if not exe:
         return {}
     try:
-        proc = subprocess.run([exe, "-j", "-XMP:Rating", "-XMP:Label", "-XMP-dc:Description", str(path)],
+        proc = subprocess.run([exe, "-j", "-XMP:Rating", "-XMP:Label", "-XMP-dc:Description",
+                               "-XMP-dc:Subject", "-XMP-lr:HierarchicalSubject", str(path)],
                               capture_output=True, text=True, timeout=30)
         data = json.loads(proc.stdout or "[]")
     except Exception:  # noqa: BLE001 - best effort
         return {}
     return data[0] if data else {}
+
+
+def _read_xmp_ratings(sidecars: "list[Path]") -> dict:
+    """Batch-read {sidecar-path-str -> exiftool dict (Rating/Label)} in one exiftool call per chunk."""
+    exe = _exiftool_available()
+    if not exe or not sidecars:
+        return {}
+    out = {}
+    for i in range(0, len(sidecars), 500):
+        chunk = [str(p) for p in sidecars[i:i + 500]]
+        try:
+            proc = subprocess.run([exe, "-j", "-XMP:Rating", "-XMP:Label", *chunk],
+                                  capture_output=True, text=True, timeout=300)
+            for d in json.loads(proc.stdout or "[]"):
+                out[d.get("SourceFile", "")] = d
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+    return out
 
 
 def _merge_ai_into_sidecar(target: Path, row: dict) -> bool:
@@ -849,15 +870,22 @@ def _merge_ai_into_sidecar(target: Path, row: dict) -> bool:
         return False
     have = _read_xmp_fields(target)
     flat, hier = build_keywords(row)
+
+    def _have_set(v):        # exiftool returns a str for one value, a list for many
+        return set() if v in (None, "") else ({v} if isinstance(v, str) else set(v))
+    have_subj, have_hier = _have_set(have.get("Subject")), _have_set(have.get("HierarchicalSubject"))
+
     args = [exe, "-overwrite_original", "-m", "-P"]
-    args += [f"-XMP-dc:Subject+={k}" for k in flat]
-    args += [f"-XMP-lr:HierarchicalSubject+={k}" for k in hier]
+    args += [f"-XMP-dc:Subject+={k}" for k in flat if k not in have_subj]            # add only new
+    args += [f"-XMP-lr:HierarchicalSubject+={k}" for k in hier if k not in have_hier]
     if row.get("caption") and not have.get("Description"):
         args.append(f"-XMP-dc:Description={row['caption']}")
     if have.get("Rating") in (None, ""):
         args.append(f"-XMP-xmp:Rating={row['quality_stars'] or 0}")
     if have.get("Label") in (None, "") and row.get("color_label"):
         args.append(f"-XMP-xmp:Label={row['color_label']}")
+    if len(args) == 4:       # nothing new to add (all present) -> idempotent no-op
+        return True
     args.append(str(target))
     try:
         return subprocess.run(args, capture_output=True, text=True, timeout=60).returncode == 0
@@ -865,18 +893,33 @@ def _merge_ai_into_sidecar(target: Path, row: dict) -> bool:
         return False
 
 
+def _is_under(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
 def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | None" = None,
-                       merge: bool = False) -> dict:
+                       merge: bool = False, folders: "list[Path] | None" = None) -> dict:
     stats = {"written": 0, "merged": 0, "merge_failed": 0, "skipped_exists": 0, "skipped_notok": 0}
+    if merge and not _exiftool_available():
+        print("  (exiftool not found -> falling back to non-merge: existing sidecars are left "
+              "untouched; only missing ones are written, so nothing you set is clobbered.)")
+        merge = False
     rows = [dict(r) for r in conn.execute("SELECT * FROM images").fetchall()]
     if xmp_dir is not None:
         xmp_dir = Path(xmp_dir)
+    folders = [Path(f).resolve() for f in folders] if folders else None
 
     for row in rows:
         if row["status"] != "ok":
             stats["skipped_notok"] += 1
             continue
         src = Path(row["path"])
+        if folders and not any(_is_under(src, f) for f in folders):
+            continue
         if xmp_dir is not None:
             # Mirror the full source path (minus the leading '/') under xmp_dir, so every
             # sidecar maps 1:1 to its RAW and can later be rsync'd back next to it.
@@ -1069,7 +1112,8 @@ def cmd_export(args):
     n = export_csv(conn, args.csv)
     print(f"Wrote {n} rows to {args.csv}")
     if args.xmp or args.xmp_dir:
-        stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir, merge=args.merge)
+        stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir,
+                                   merge=args.merge, folders=args.folder)
         dest = f" into {args.xmp_dir}/ (mirroring the source tree)" if args.xmp_dir else " next to each photo"
         parts = [f"{stats['written']} written"]
         if stats["merged"]:
@@ -1138,6 +1182,93 @@ def cmd_rederive(args):
     print("Next: `photo_cull.py export --xmp` to re-cluster bursts + regenerate CSV/sidecars.")
 
 
+def _pearson(xs: list, ys: list):
+    n = len(xs)
+    if n < 2:
+        return None
+    mx, my = sum(xs) / n, sum(ys) / n
+    sx = sum((x - mx) ** 2 for x in xs)
+    sy = sum((y - my) ** 2 for y in ys)
+    if sx == 0 or sy == 0:
+        return None
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    return cov / (sx ** 0.5 * sy ** 0.5)
+
+
+def _print_agreement(rows: list):
+    """rows: dicts with quality_stars, verdict, user_rating (>=1). Print AI-vs-you agreement."""
+    n = len(rows)
+    print(f"\nAI suggestion vs your ratings (n={n} rated):")
+    if not n:
+        return
+    ai = [r["quality_stars"] or 0 for r in rows]
+    us = [r["user_rating"] for r in rows]
+    exact = sum(1 for a, u in zip(ai, us) if a == u)
+    within1 = sum(1 for a, u in zip(ai, us) if abs(a - u) <= 1)
+    corr = _pearson(ai, us)
+    print(f"  stars exact match : {exact}/{n} ({100 * exact // n}%)")
+    print(f"  stars within +/-1 : {within1}/{n} ({100 * within1 // n}%)")
+    if corr is not None:
+        print(f"  star correlation  : {corr:+.2f}  (1.0 = perfect, 0 = none)")
+    # The costly error: AI rejected a frame you actually rated a keeper. Cheap error: the reverse.
+    false_reject = [r for r in rows if r["verdict"] == "reject" and r["user_rating"] >= 4]
+    false_keep = [r for r in rows if r["verdict"] == "keep" and r["user_rating"] <= 2]
+    print(f"  false REJECTS (AI reject, you rated >=4*): {len(false_reject)}   <- the costly misses")
+    for r in false_reject[:10]:
+        print(f"      {Path(r['path']).name:24s} you={r['user_rating']}*  ai={r['quality_stars']}*")
+    print(f"  false keeps   (AI keep,   you rated <=2*): {len(false_keep)}")
+
+
+def cmd_feedback(args):
+    """Read your final Lightroom star rating (+ color label) back from each photo's XMP sidecar into
+    the DB (user_rating/user_label), then report how well the AI's suggestion agreed with your call —
+    the objective signal for tuning derive()/the prompt."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    if not _exiftool_available():
+        sys.exit("feedback needs exiftool to read ratings from the .xmp sidecars.")
+    conn = connect(args.db)
+    folders = [Path(f).resolve() for f in args.folder] if args.folder else None
+
+    want = []
+    for r in conn.execute("SELECT path FROM images WHERE status='ok'"):
+        src = Path(r["path"])
+        if folders and not any(_is_under(src, f) for f in folders):
+            continue
+        side = src.with_suffix(".xmp")
+        if side.exists():
+            want.append((r["path"], side))
+    read = _read_xmp_ratings([side for _, side in want])
+
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    n_rated = 0
+    for path, side in want:
+        d = read.get(str(side), {})
+        ur = _int(d.get("Rating"))
+        ul = d.get("Label") or None
+        conn.execute("UPDATE images SET user_rating=?, user_label=? WHERE path=?", (ur, ul, path))
+        if ur and ur >= 1:
+            n_rated += 1
+    conn.commit()
+
+    print(f"Read {len(want)} sidecar(s) next to your RAWs; {n_rated} carry a star rating you set.")
+    if not n_rated:
+        print("No ratings found yet. In Lightroom: rate photos, then Metadata > Save Metadata to Files "
+              "(or enable auto-write to XMP), and re-run feedback.")
+        return
+    rows = [dict(r) for r in conn.execute(
+        "SELECT path, quality_stars, verdict, user_rating FROM images "
+        "WHERE status='ok' AND user_rating >= 1")]
+    if folders:
+        rows = [r for r in rows if any(_is_under(Path(r["path"]), f) for f in folders)]
+    _print_agreement(rows)
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -1175,10 +1306,16 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--xmp-dir", type=Path, default=None,
                    help="Write .xmp sidecars into this local directory (mirroring the source tree) instead "
                         "of next to each RAW — e.g. when the RAWs live on a read-only network share.")
-    e.add_argument("--merge", action="store_true",
-                   help="Merge AI caption/keywords/label into your existing sidecars, preserving any rating/"
-                        "label/description you already set (and develop settings). Requires exiftool.")
-    e.add_argument("--force-xmp", action="store_true", help="Overwrite existing .xmp sidecars.")
+    e.add_argument("--no-merge", dest="merge", action="store_false",
+                   help="Write fresh sidecars and skip any that already exist (unless --force-xmp). "
+                        "Default MERGES: preserves your rating/label/description, adds only the AI "
+                        "fields, and never duplicates keywords. Merge needs exiftool.")
+    e.add_argument("--force-xmp", action="store_true",
+                   help="With --no-merge, overwrite existing sidecars. (Ignored in the default merge "
+                        "mode, which never clobbers your fields.)")
+    e.add_argument("--folder", type=Path, nargs="+", metavar="DIR",
+                   help="Only write sidecars for photos under these folders (e.g. just the new shoot). "
+                        "Burst clustering + CSV still use the whole library.")
     e.add_argument("--burst-gap", type=float, default=BURST_GAP_S, help="Seconds between frames to group as a burst.")
     e.set_defaults(func=cmd_export)
 
@@ -1187,6 +1324,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "model calls). Use after a derive()/threshold change.")
     rd.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
     rd.set_defaults(func=cmd_rederive)
+
+    fb = sub.add_parser("feedback",
+                        help="Read your final LR ratings back from XMP and report AI-vs-you agreement.")
+    fb.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    fb.add_argument("--folder", type=Path, nargs="+", metavar="DIR",
+                    help="Only read/report photos under these folders.")
+    fb.set_defaults(func=cmd_feedback)
     return p
 
 

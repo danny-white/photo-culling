@@ -124,6 +124,24 @@ keeps are preserved and nothing is falsely promoted. Verified on a snapshot: kee
 3192→2751 (false-rejects rescued), stars corrected, idempotent. review→keep promotions still need a
 reprocess to capture real keep_hint.
 
+### Lightroom round-trip: safe export + feedback loop (2026-07-14)
+
+**Export is now merge-by-default** (`export --xmp`): preserves any Rating/Label/Description you set in
+LR, adds only the AI fields, and no longer duplicates keywords on re-runs (reads existing
+`dc:Subject`/`HierarchicalSubject`, adds only new). `--no-merge` restores fresh-write (skip existing).
+New **`--folder DIR…`** writes sidecars for just one shoot (bursts/CSV stay global). Falls back safely
+to non-merge if exiftool is missing.
+
+**New `feedback` command** closes the loop (the old "step 6"): reads your final LR star rating + color
+label back from each XMP sidecar into `user_rating` / `user_label`, then reports AI-vs-you agreement —
+star exact / within-1 / Pearson correlation, and crucially the **false-reject list** (frames the AI
+rejected that you rated a keeper — the costly misses). This is the objective quality metric the
+original "Option 1" wanted; every future `derive()`/prompt tweak now has a number to move.
+
+**Caveat (workflow):** it reads the `.xmp` sidecar, not LR's catalog — so enable LR's "automatically
+write changes into XMP" (or ⌘/Ctrl-S) before analysis/feedback, or catalog-only ratings won't be
+seen. Pick/reject flags are catalog-only in LR and never round-trip through XMP.
+
 ### Star-tier remap
 
 `stars = (aesthetic + 1) // 2` (9–10→5, 7–8→4, 5–6→3, 3–4→2, 1–2→1), keeping the −1 penalties for
