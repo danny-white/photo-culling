@@ -1,102 +1,130 @@
 # Feature requests / backlog
 
-## Semantic keyword search (parked — phase 2)
+Prioritized backlog first, **shipped** at the bottom. Priorities weigh value × cost × sequencing
+(some items gate others). Code references use symbol names to survive line drift; snapshot commit
+for context is `bc0bda2`.
 
-**Status:** parked. Build after the library is fully reprocessed on the new prompt, so
-embeddings reflect the improved captions.
+**Order:** P2 `--reprocess-stale` · P3 prompt-wording pass · P4 semantic search ·
+P5 prompt→version changelog · P6 DB reconciliation.
+**Shipped:** prompt+harness versioning · star-tier remap · derive() fix + `rederive`.
 
-**Goal:** find photos by *concept*, not exact string — e.g. "church interiors", "beach at
-sunset", or "more like this" from a given photo (finds *cathedral / chapel / nave* even
-without the exact word).
+---
 
-**Design (fully local, no external services):**
-- Embed each photo's text (caption + tags + subject) with a local Ollama embedding model
-  (`nomic-embed-text`, 768-dim, ~10–30 ms/image, CPU-light). Store vectors in an
-  `embeddings` table keyed by `path`.
-- Search by cosine similarity: brute-force in NumPy over ~15k vectors (<10 ms) — **no vector
-  DB needed** at this scale.
-- Modes: **text query** (embed the query → top-K) and **"more like this"** (a photo's vector
-  → nearest neighbours).
+## P2 — `--reprocess-stale`   ← next up
+
+**Value: medium. Cost: low.** Mirror the existing `--reprocess VERDICT` flag: reset rows where
+`prompt_version` / `harness_version` != current back to `pending`, so a prompt/code change redrives
+exactly the drifted rows. Optionally have plain `run` *warn* when stale rows exist. Not urgent now
+(post-run the library is uniformly prompt `99ac55d6`), but it's the tool you'll want the instant you
+touch the prompt — so build it immediately before P3.
+
+---
+
+## P3 — Prompt-wording fixes (audit Fix 2), then one reprocess   [newly tracked]
+
+**Value: medium. Cost: high — a prompt edit bumps `prompt_version` → full reprocess of ~15k.**
+
+From the audit (`review/adversarial-review-findings.md`, Fix 2): tighten the `VLM_PROMPT` bullets for
+- **people_count** consistency (missed a face-visible subject; miscounts vs the "faces only" rule),
+- **gesture / gender over-assertion** ("thumbs-up" for a snowball throw; "a man" for an ambiguous
+  back-turned figure),
+- **tag drift** ("indoor" for an outdoor field; unverifiable season).
+
+Because every prompt edit forces a reprocess, **batch all wording changes into one revision** and run
+it once (via `run --force`, or P2's `--reprocess-stale`). Do this as the lead-in to P4 so embeddings
+reflect the final captions.
+
+---
+
+## P4 — Semantic keyword search (phase 2)
+
+**Gated:** build after P3, so embeddings reflect the final prompt's captions.
+
+**Goal:** find photos by *concept*, not exact string — "church interiors", "beach at sunset", or
+"more like this" from a photo (finds cathedral / chapel / nave without the exact word).
+
+**Design (fully local):**
+- Embed each photo's text (caption + tags + subject) with a local Ollama model (`nomic-embed-text`,
+  768-dim, ~10–30 ms/img). Store vectors in an `embeddings` table keyed by `path`.
+- Cosine similarity brute-force in NumPy over ~15k vectors (<10 ms) — no vector DB at this scale.
+- Modes: text query → top-K; "more like this" → nearest neighbours.
 - UI: a semantic search box in the Review toolbar + a "more like this" button on the loupe.
 
-**Steps when built:**
-1. `ollama pull nomic-embed-text`
-2. `photo_cull.py embed --db …` subcommand → populate the `embeddings` table for `ok` rows.
-   Run **after** the final prompt-consistent reprocess.
-3. `review/server.py`: `/api/similar?q=…` and `/api/similar_to/<id>` (cosine in NumPy).
-4. Frontend: semantic search box + "more like this".
+**Steps:** `ollama pull nomic-embed-text` → `photo_cull.py embed` subcommand (populate `embeddings`
+for `ok` rows) → `review/server.py` `/api/similar?q=…` and `/api/similar_to/<id>` (cosine in NumPy)
+→ frontend.
 
-**Caveats / notes:**
-- Semantic over the **text qwen wrote**, not pixels — quality rides on caption quality.
-- For true **visual** similarity (same-looking scene regardless of words), embed the
-  **images** with a local CLIP-style model — heavier, separate pass. Ship text-first; add
-  visual later if wanted.
-- Complementary to the perceptual hash (`phash`), which is for near-**duplicates** / bursts.
+**Notes:** semantic over the *text qwen wrote*, not pixels — quality rides on caption quality (hence
+after P3). For true *visual* similarity, embed the images with a local CLIP-style model — heavier,
+separate pass; ship text-first. Complementary to `phash` (near-duplicates / bursts).
 
 ---
 
-## Prompt + harness versioning in the DB — SHIPPED (2026-07-12)
+## P5 — Prompt→version changelog
 
-Motivated by today's reprocess: after refining `VLM_PROMPT` I had to *manually* reset every
-old-prompt row to `pending` because nothing recorded which prompt produced a row. That's now a
-`WHERE prompt_version != <current>` query.
-
-**What shipped:**
-- **`prompt_version`** — `sha256(VLM_PROMPT)[:12]`, a module constant next to `VLM_PROMPT`. Auto-
-  derived, so it changes exactly when the prompt text changes and can never silently drift.
-- **`harness_version`** — short git SHA of `photo_cull.py` (+ `-dirty` if uncommitted), via
-  `harness_version()`. Captures the *code* identity: `derive()`, the CV thresholds and model params
-  affect outputs too, so two rows are only truly comparable when prompt **and** harness match.
-- Both are stamped on **every** processed row (ok and error) in the `run` loop, and both are in the
-  CSV export.
-- **`prompts(prompt_version, prompt, first_seen)`** table — `register_prompt()` upserts the exact
-  prompt text (INSERT OR IGNORE) at run start, so any `prompt_version` is fully reconstructable
-  (`SELECT prompt FROM prompts …` / `JOIN … USING(prompt_version)`). Harness is reconstructed via
-  git (`git checkout <sha>`); a `-dirty` row isn't perfectly reproducible — the documented gap.
-- New columns are in `SCHEMA` for fresh DBs and added by an **idempotent `ALTER` migration** in
-  `connect()` for existing ones (there was no migration path before).
-
-**Applies to future runs.** Rows already in `trial.db` carry NULL versions (= unknown/old), the
-intended back-fill case. The current in-flight run holds old code in memory, so its rows are NULL
-too — but we know they used prompt `99ac55d6` / harness `c5e2958`, so they can be back-filled once
-it finishes (register the prompt, then stamp the `ok` rows).
-
-**Still open (nice-to-haves, not built):**
-- **`--reprocess-stale`** — reset rows where `prompt_version`/`harness_version` != current back to
-  `pending`; mirrors the existing `--reprocess VERDICT` (photo_cull.py:1037). Optionally have plain
-  `run` *warn* when stale rows exist so a prompt/code edit surfaces the drift.
-- **Persist `keep_hint` + a `--rederive` subcommand** so a `derive()` change replays from stored
-  columns with no VLM re-inference — see the adversarial-review findings; the exposure/sharpness
-  fixes are derive-only and would back-fill instantly.
-- Optional human changelog mapping each `prompt_version` hash → what changed and why (the `prompts`
-  table already keeps the text; this is just for readability/ordering).
+Trivial, do-whenever: a human-readable note mapping each `prompt_version` hash → what changed and why.
+The `prompts` table already stores the exact text; this is just for readability / ordering.
 
 ---
 
-## derive() CV-gate fix — parked (2026-07-12)
+## P6 — Reconcile to one DB
 
-From the 24-frame interactive audit (full patch + per-frame evidence in
-`review/adversarial-review-findings.md`): `derive()` demotes or rejects frames qwen scored
-*correctly*, because the CV gate is subject-blind. Recurring:
-- bright sky / snow → false `exposure=over` → −1★ + keep blocked (e.g. DSC02478, DSC00763)
-- flash-lit night portrait → false `exposure=under` → −1★ + keep blocked (DSC01586)
-- intentionally shallow-DoF macro → `sharp` below floor → **hard reject**, and aes 7 just misses
-  the `>=8` sharpness rescue (DSC01567)
+**Value: medium (clarity / less foot-gun). Cost: low.** Goal: **one** canonical cull DB — no
+`cull.db`-vs-`trial_out/trial.db` split. Today the code defaults (`DB_DEFAULT`/`CSV_DEFAULT` in
+`photo_cull.py`, the `--db` defaults in `review/server.py` + `sample_for_review.py`, `dbshell.sh`'s
+`DB=`) disagree with where the real run actually lives (`trial_out/trial.db`), and the README documents
+`cull.db` throughout — so newcomers (and future-me) can run against the wrong file.
 
-**Fix** (photo_cull.py:~541): treat a frame with `aesthetic>=7` (or `scene==night`) as *trusted*
-over the gate — never hard-rejected on CV — and let only a *severe* blowout dock a star. The patch
-is in the findings file and is regression-checked.
+Decide the single canonical path/name, then make every default + all docs point at it:
+- `photo_cull.py` (`DB_DEFAULT`, `CSV_DEFAULT`), `review/server.py`, `review/sample_for_review.py`,
+  `dbshell.sh`, and `README.md` / `review/README.md` all agree.
+- Drop the "trial" framing once it's the real pipeline (it's no longer a trial).
 
-**Build it with a cheap backfill, not a reprocess:** the fix is derive-only, computed from
-already-stored columns, so it can replay with no VLM re-inference. Blocker: `keep_hint` isn't
-persisted, so a bare re-derive can rescue reject→review and fix stars but can't re-promote to keep.
-So when built: (1) persist `keep_hint` as a column, (2) add a `--rederive` subcommand that
-recomputes verdict/stars/reason from stored columns, (3) apply to the whole library in seconds.
+**Open question — `annotations.db`:** it's *deliberately* a separate file (review corrections written
+without WAL write-contention against a live run — see `review/server.py` `--annotations`). "One DB in
+the limit" could mean either (a) keep it separate but make its *default path* derive cleanly from the
+one canonical DB, or (b) fold annotations into a table in the main DB and rely on WAL to avoid
+contention. Prefer (a) — the separation earns its keep during multi-night runs; revisit (b) only if the
+two-file story still feels like clutter afterward.
 
 ---
 
-## Star-tier remap — SHIPPED
+## Shipped
 
-`stars = (aesthetic + 1) // 2` (9–10→5, 7–8→4, 5–6→3, 3–4→2, 1–2→1), keeping the −1 penalties
-for soft / bad-exposure / eyes-closed. Committed and applied in the full reprocess, so 5★ is
-now reachable.
+### Prompt + harness versioning — `bc0bda2` (2026-07-12)
+
+Every processed row is stamped with **`prompt_version`** (`sha256(VLM_PROMPT)[:12]`, auto-derived so
+it can't silently drift) and **`harness_version`** (git short SHA of `photo_cull.py`, `-dirty` if
+uncommitted). A **`prompts(prompt_version, prompt, first_seen)`** table stores each prompt's exact
+text (`register_prompt()`, `INSERT OR IGNORE` at run start) so any version is reconstructable; harness
+is reconstructed via git. New columns are in `SCHEMA` for fresh DBs and added by an idempotent `ALTER`
+migration in `connect()` for existing ones; both are also in the CSV export.
+
+**Rollout state:** the run was restarted on `bc0bda2` (no `--force`) and is stamping the ~7.9k
+`pending` rows as it goes. The ~7k older `ok` rows predate the columns and read NULL — back-fill them
+with prompt `99ac55d6344e` / harness `c5e2958` (the `c5e2958` run that produced them; verified same
+prompt text, so analysis-equivalent to `bc0bda2`):
+```sql
+UPDATE images SET prompt_version='99ac55d6344e', harness_version='c5e2958'
+WHERE status='ok' AND prompt_version IS NULL;
+```
+
+### derive() CV-gate fix + `keep_hint` + `rederive` (2026-07-14)
+
+`derive()` now trusts `aesthetic>=7` (or `scene=="night"`) over the CV gate — never hard-rejected on
+CV — and docks a star only on a *severe* blowout, fixing the false over/under demotions and shallow-DoF
+false-rejects from the audit. `keep_hint` is now a persisted column (SCHEMA + migration + stamped on
+write + in CSV). New **`rederive`** subcommand recomputes base_verdict / quality_stars / verdict /
+color_label / reason for `ok` rows from stored columns — no model calls, idempotent; clustering stays
+in `export`.
+
+**Safe on the pre-P1 library:** rows lacking a stored `keep_hint` infer it from the existing verdict
+(a `keep` implies the hint was set, and the new keep rule is strictly more permissive), so existing
+keeps are preserved and nothing is falsely promoted. Verified on a snapshot: keep 3326→3326, reject
+3192→2751 (false-rejects rescued), stars corrected, idempotent. review→keep promotions still need a
+reprocess to capture real keep_hint.
+
+### Star-tier remap
+
+`stars = (aesthetic + 1) // 2` (9–10→5, 7–8→4, 5–6→3, 3–4→2, 1–2→1), keeping the −1 penalties for
+soft / bad-exposure / eyes-closed. Live in `derive()`; 5★ is reachable.

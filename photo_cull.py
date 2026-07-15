@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS images (
     people_count    INTEGER,
     eyes_closed     INTEGER,
     aesthetic       INTEGER,
+    keep_hint       INTEGER,                   -- qwen's boolean "worth keeping?"; a derive() input
     tags            TEXT,                      -- JSON array
     issues          TEXT,                      -- JSON array
 
@@ -160,9 +161,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     # Upgrade DBs created before these columns were added: SCHEMA's CREATE TABLE IF NOT EXISTS
     # defines them for fresh DBs, but won't add them to an already-existing images table.
-    for col in ("prompt_version", "harness_version"):
+    for col, decl in (("prompt_version", "TEXT"), ("harness_version", "TEXT"),
+                      ("keep_hint", "INTEGER")):
         try:
-            conn.execute(f"ALTER TABLE images ADD COLUMN {col} TEXT")
+            conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
             pass  # column already present
     conn.commit()
@@ -591,23 +593,25 @@ def derive(cv: dict, vlm: dict) -> dict:
     portrait = vlm["people_count"] > 0
     closed = portrait and vlm["eyes_closed"]
 
+    # A frame qwen rates a keeper (aesthetic >= 7) OR any night frame is "trusted" over the CV
+    # gate: its soft/over/under flags are usually SCENE ARTIFACTS, not defects — a bright sky or
+    # snow field reads as "over", a flash-lit night portrait as "under", an intentionally
+    # shallow-DoF macro as "soft". A trusted frame is never hard-rejected on CV, and only a
+    # *severe* blowout docks a star (mild over/under is too noisy to score). Eyes-closed and
+    # genuinely weak (aes<=3) frames still reject.
+    trusted = vlm["aesthetic"] >= 7 or vlm.get("scene") == "night"
+
     stars = (vlm["aesthetic"] + 1) // 2   # 9-10->5, 7-8->4, 5-6->3, 3-4->2, 1-2->1
-    stars -= 1 if blurry else 0
-    stars -= 1 if bad_exp else 0
+    stars -= 1 if (blurry and not trusted) else 0
+    stars -= 1 if severe_exp else 0
     stars -= 1 if closed else 0
     stars = max(1, min(5, stars))
 
-    # A clearly strong frame (aesthetic >= 8) OR any night/astro frame is trusted over the CV
-    # gate: soft/exposure flags only demote it to review, never hard-reject. Night shots
-    # (auroras, low-light) legitimately read as "soft"/"dark" to the sharpness metric, and the
-    # stricter aesthetic rubric now scores them ~7, so scene is the reliable signal here.
-    # Eyes-closed and genuinely weak frames are still rejected.
-    strong = vlm["aesthetic"] >= 8 or vlm.get("scene") == "night"
     if closed or vlm["aesthetic"] <= 3:
         verdict = "reject"
-    elif (blurry or severe_exp) and not strong:
+    elif (blurry or severe_exp) and not trusted:
         verdict = "reject"
-    elif (not blurry) and (not bad_exp) and vlm["aesthetic"] >= 7 and vlm["keep_hint"]:
+    elif vlm["keep_hint"] and vlm["aesthetic"] >= 7 and not blurry:
         verdict = "keep"
     else:
         verdict = "review"
@@ -685,6 +689,7 @@ def process_one(client, path: Path, fast: bool) -> dict:
         "people_count": vlm["people_count"],
         "eyes_closed": int(vlm["eyes_closed"]),
         "aesthetic": vlm["aesthetic"],
+        "keep_hint": int(vlm["keep_hint"]),
         "tags": json.dumps(vlm["tags"]),
         "issues": json.dumps(vlm["issues"]),
         "phash": phash,
@@ -758,7 +763,7 @@ CSV_COLUMNS = [
     "filename", "verdict", "quality_stars", "color_label", "aesthetic",
     "sharpness", "exposure_flag", "blown_pct", "crushed_pct",
     "subject", "scene", "caption", "tags", "issues",
-    "people_count", "eyes_closed", "is_best_in_burst", "burst_id",
+    "people_count", "eyes_closed", "keep_hint", "is_best_in_burst", "burst_id",
     "reason", "status", "error_class", "error_msg", "model_used",
     "prompt_version", "harness_version", "path",
 ]
@@ -1078,6 +1083,61 @@ def cmd_export(args):
             print("In Lightroom Classic: select photos -> Metadata > Read Metadata from File.")
 
 
+def cmd_rederive(args):
+    """Recompute each ok row's judgment (base_verdict / quality_stars / verdict / color_label /
+    reason) from already-stored CV + VLM columns — no model calls. Use after a derive()/threshold
+    change to re-judge the whole library in seconds instead of reprocessing. Idempotent. Leaves
+    verdict == base_verdict (un-clustered), mirroring `run`; run `export` to re-cluster bursts."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    conn = connect(args.db)
+
+    def base_dist():
+        return {r["base_verdict"]: r["c"] for r in conn.execute(
+            "SELECT base_verdict, COUNT(*) c FROM images WHERE status='ok' GROUP BY base_verdict")}
+
+    before = base_dist()
+    rows = conn.execute(
+        "SELECT path, base_verdict, sharpness, exposure_flag, blown_pct, aesthetic, scene, "
+        "people_count, eyes_closed, keep_hint, issues, subject FROM images WHERE status='ok'"
+    ).fetchall()
+    for r in rows:
+        # keep_hint wasn't persisted before P1. If unknown, INFER it from the existing verdict:
+        # a row already judged `keep` must have had keep_hint=True (old logic required it), and the
+        # new keep rule is strictly more permissive — so preserving those is always safe. Unknowns
+        # on non-keep rows stay False, so nothing is newly promoted without real data.
+        keep_hint = bool(r["keep_hint"]) if r["keep_hint"] is not None else (r["base_verdict"] == "keep")
+        cv = {"sharpness": r["sharpness"], "exposure_flag": r["exposure_flag"],
+              "blown_pct": r["blown_pct"]}
+        vlm = {"aesthetic": r["aesthetic"], "scene": r["scene"],
+               "people_count": r["people_count"] or 0,
+               "eyes_closed": bool(r["eyes_closed"]),
+               "keep_hint": keep_hint,
+               "issues": json.loads(r["issues"]) if r["issues"] else [],
+               "subject": r["subject"] or ""}
+        d = derive(cv, vlm)
+        conn.execute(
+            "UPDATE images SET base_verdict=?, quality_stars=?, verdict=?, color_label=?, reason=? "
+            "WHERE path=?",
+            (d["base_verdict"], d["quality_stars"], d["verdict"], d["color_label"], d["reason"], r["path"]))
+    conn.commit()
+
+    after = base_dist()
+    print(f"Re-derived {len(rows)} ok row(s) from stored columns — no model calls, "
+          f"harness {harness_version()}. pending/error rows untouched.")
+    n_keephint = conn.execute(
+        "SELECT COUNT(*) c FROM images WHERE status='ok' AND keep_hint IS NULL").fetchone()["c"]
+    print("  base_verdict:")
+    for v in ("keep", "review", "reject"):
+        b, a = before.get(v, 0), after.get(v, 0)
+        delta = f"  ({a - b:+d})" if a != b else ""
+        print(f"    {v:7s} {b:6d} -> {a:6d}{delta}")
+    if n_keephint:
+        print(f"  note: {n_keephint} ok row(s) predate keep_hint -> existing keeps are preserved, "
+              f"but review->keep promotions need a reprocess to capture keep_hint.")
+    print("Next: `photo_cull.py export --xmp` to re-cluster bursts + regenerate CSV/sidecars.")
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -1121,6 +1181,12 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--force-xmp", action="store_true", help="Overwrite existing .xmp sidecars.")
     e.add_argument("--burst-gap", type=float, default=BURST_GAP_S, help="Seconds between frames to group as a burst.")
     e.set_defaults(func=cmd_export)
+
+    rd = sub.add_parser("rederive",
+                        help="Recompute verdict/stars/reason for ok rows from stored columns (no "
+                             "model calls). Use after a derive()/threshold change.")
+    rd.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    rd.set_defaults(func=cmd_rederive)
     return p
 
 
