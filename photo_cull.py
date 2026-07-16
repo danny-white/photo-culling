@@ -796,8 +796,9 @@ XMP_TEMPLATE = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
     xmlns:xmp="http://ns.adobe.com/xap/1.0/"
     xmlns:dc="http://purl.org/dc/elements/1.1/"
     xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
-    xmp:Rating="{rating}"
-    xmp:Label="{label}">
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+{rating_attr}    xmp:Label="{label}"
+    photoshop:Instructions="{instructions}">
    <dc:description><rdf:Alt><rdf:li xml:lang="x-default">{caption}</rdf:li></rdf:Alt></dc:description>
    <dc:subject><rdf:Bag>
 {subjects}   </rdf:Bag></dc:subject>
@@ -826,7 +827,21 @@ def build_keywords(row: dict) -> tuple[list, list]:
     hier = [f"Cull|{row['verdict']}"]
     if row["scene"]:
         hier.append(f"Scene|{row['scene']}")
+    if row.get("quality_stars"):
+        hier.append(f"Stars|{row['quality_stars']}")   # AI's star suggestion, OFF the Rating axis
     return flat_u, hier
+
+
+def _ai_note(row: dict) -> str:
+    """One-line AI readout for the Instructions field — a channel LR shows but you don't cull by:
+    'AI 3* review - soft/blurred'. Keeps the model's suggestion visible without touching Rating."""
+    stars = row.get("quality_stars") or 0
+    parts = [f"AI {stars}★", row.get("verdict") or "?"]
+    reason = row.get("reason") or ""
+    tail = reason.split(":", 1)[1].strip() if ":" in reason else ""
+    if tail:
+        parts.append(tail)
+    return " · ".join(parts)
 
 
 def _read_xmp_fields(path: Path) -> dict:
@@ -836,7 +851,8 @@ def _read_xmp_fields(path: Path) -> dict:
         return {}
     try:
         proc = subprocess.run([exe, "-j", "-XMP:Rating", "-XMP:Label", "-XMP-dc:Description",
-                               "-XMP-dc:Subject", "-XMP-lr:HierarchicalSubject", str(path)],
+                               "-XMP-dc:Subject", "-XMP-lr:HierarchicalSubject",
+                               "-XMP-photoshop:Instructions", str(path)],
                               capture_output=True, text=True, timeout=30)
         data = json.loads(proc.stdout or "[]")
     except Exception:  # noqa: BLE001 - best effort
@@ -862,9 +878,11 @@ def _read_xmp_ratings(sidecars: "list[Path]") -> dict:
     return out
 
 
-def _merge_ai_into_sidecar(target: Path, row: dict) -> bool:
-    """Add AI caption/keywords/label/Cull-verdict to an existing sidecar WITHOUT overwriting a
-    rating/label/description the user already set (or their develop settings). Needs exiftool."""
+def _merge_ai_into_sidecar(target: Path, row: dict, ai_rating: bool = False) -> bool:
+    """Add AI caption/keywords/label/Cull-verdict + a Stars|N keyword + an Instructions note to an
+    existing sidecar WITHOUT overwriting anything you set. xmp:Rating is written only when
+    ai_rating=True (and even then only into a blank), so your star distribution stays yours. Needs
+    exiftool."""
     exe = _exiftool_available()
     if not exe:
         return False
@@ -880,10 +898,13 @@ def _merge_ai_into_sidecar(target: Path, row: dict) -> bool:
     args += [f"-XMP-lr:HierarchicalSubject+={k}" for k in hier if k not in have_hier]
     if row.get("caption") and not have.get("Description"):
         args.append(f"-XMP-dc:Description={row['caption']}")
-    if have.get("Rating") in (None, ""):
+    if ai_rating and have.get("Rating") in (None, ""):
         args.append(f"-XMP-xmp:Rating={row['quality_stars'] or 0}")
     if have.get("Label") in (None, "") and row.get("color_label"):
         args.append(f"-XMP-xmp:Label={row['color_label']}")
+    note, cur = _ai_note(row), (have.get("Instructions") or "")
+    if note != cur and (cur == "" or cur.startswith("AI ")):    # AI-owned note; never clobber yours
+        args.append(f"-XMP-photoshop:Instructions={note}")
     if len(args) == 4:       # nothing new to add (all present) -> idempotent no-op
         return True
     args.append(str(target))
@@ -902,7 +923,8 @@ def _is_under(path: Path, base: Path) -> bool:
 
 
 def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | None" = None,
-                       merge: bool = False, folders: "list[Path] | None" = None) -> dict:
+                       merge: bool = False, folders: "list[Path] | None" = None,
+                       ai_rating: bool = False) -> dict:
     stats = {"written": 0, "merged": 0, "merge_failed": 0, "skipped_exists": 0, "skipped_notok": 0}
     if merge and not _exiftool_available():
         print("  (exiftool not found -> falling back to non-merge: existing sidecars are left "
@@ -942,7 +964,7 @@ def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | N
             except OSError:
                 stats["merge_failed"] += 1
                 continue
-            stats["merged" if _merge_ai_into_sidecar(sidecar, row) else "merge_failed"] += 1
+            stats["merged" if _merge_ai_into_sidecar(sidecar, row, ai_rating) else "merge_failed"] += 1
             continue
 
         if sidecar.exists() and not force:
@@ -951,9 +973,11 @@ def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | N
         flat, hier = build_keywords(row)
         subjects = "".join(f"    <rdf:li>{xml_escape(k)}</rdf:li>\n" for k in flat)
         hiers = "".join(f"    <rdf:li>{xml_escape(k)}</rdf:li>\n" for k in hier)
+        rating_attr = f'    xmp:Rating="{row["quality_stars"] or 0}"\n' if ai_rating else ""
         xml = XMP_TEMPLATE.format(
-            rating=row["quality_stars"] or 0,
+            rating_attr=rating_attr,
             label=xml_escape(row["color_label"] or ""),
+            instructions=xml_escape(_ai_note(row)),
             caption=xml_escape(row["caption"] or ""),
             subjects=subjects,
             hier=hiers,
@@ -1113,7 +1137,7 @@ def cmd_export(args):
     print(f"Wrote {n} rows to {args.csv}")
     if args.xmp or args.xmp_dir:
         stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir,
-                                   merge=args.merge, folders=args.folder)
+                                   merge=args.merge, folders=args.folder, ai_rating=args.ai_rating)
         dest = f" into {args.xmp_dir}/ (mirroring the source tree)" if args.xmp_dir else " next to each photo"
         parts = [f"{stats['written']} written"]
         if stats["merged"]:
@@ -1316,6 +1340,10 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--folder", type=Path, nargs="+", metavar="DIR",
                    help="Only write sidecars for photos under these folders (e.g. just the new shoot). "
                         "Burst clustering + CSV still use the whole library.")
+    e.add_argument("--ai-rating", action="store_true",
+                   help="Also write the AI's star suggestion to xmp:Rating (fills blanks only; merge "
+                        "still preserves any rating you set). OFF by default so your star distribution "
+                        "stays yours — the AI star always lands as a Stars|N keyword + Instructions note.")
     e.add_argument("--burst-gap", type=float, default=BURST_GAP_S, help="Seconds between frames to group as a burst.")
     e.set_defaults(func=cmd_export)
 
