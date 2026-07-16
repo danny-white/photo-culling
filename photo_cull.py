@@ -812,24 +812,28 @@ XMP_TEMPLATE = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
 
 
 def build_keywords(row: dict) -> tuple[list, list]:
+    """Flat keywords for BOTH dc:subject and lr:hierarchicalSubject. Everything must be flat and in
+    dc:subject: Lightroom Classic's "Read Metadata from File" builds its keyword list from dc:subject
+    and ignores hierarchical-only keywords, so the AI facets go in as flat, searchable tags
+    (Stars-3, Cull-review, Scene-sports) instead of a Cull|review hierarchy LrC would silently drop."""
     tags = json.loads(row["tags"]) if row["tags"] else []
-    flat = list(tags)
+    kws = list(tags)
     if row["subject"]:
-        flat.append(row["subject"].lower())
+        kws.append(row["subject"].lower())
+    if row["verdict"]:
+        kws.append(f"Cull-{row['verdict']}")            # e.g. Cull-review  (search "Cull" or "review")
+    if row["scene"]:
+        kws.append(f"Scene-{row['scene']}")             # e.g. Scene-sports
+    if row.get("quality_stars"):
+        kws.append(f"Stars-{row['quality_stars']}")     # e.g. Stars-3  (search "Stars")
     if row["is_best_in_burst"] and (row["burst_size"] or 1) > 1:
-        flat.append("pick:best")
-    # de-dup preserving order
-    seen, flat_u = set(), []
-    for t in flat:
+        kws.append("pick-best")
+    seen, out = set(), []                               # de-dup, preserve order
+    for t in kws:
         if t and t not in seen:
             seen.add(t)
-            flat_u.append(t)
-    hier = [f"Cull|{row['verdict']}"]
-    if row["scene"]:
-        hier.append(f"Scene|{row['scene']}")
-    if row.get("quality_stars"):
-        hier.append(f"Stars|{row['quality_stars']}")   # AI's star suggestion, OFF the Rating axis
-    return flat_u, hier
+            out.append(t)
+    return out, out
 
 
 def _ai_note(row: dict) -> str:
