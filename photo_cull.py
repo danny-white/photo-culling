@@ -619,6 +619,7 @@ def infer_openai(base_url: str, api_key: "str | None", model: str, jpeg: bytes,
     Works against vLLM, LM Studio, or Ollama's OpenAI endpoint (base_url like http://host:port/v1).
     Returns the raw assistant text (JSON per VLM_PROMPT); caller runs it through coerce_vlm."""
     import base64
+    import urllib.error
     import urllib.request
     b64 = base64.b64encode(jpeg).decode()
     body = {
@@ -635,8 +636,11 @@ def infer_openai(base_url: str, api_key: "str | None", model: str, jpeg: bytes,
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions",
                                  data=json.dumps(body).encode(), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:                       # surface the server's real message
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
     return data["choices"][0]["message"]["content"]
 
 
