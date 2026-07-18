@@ -152,6 +152,35 @@ CREATE TABLE IF NOT EXISTS prompts (
     prompt          TEXT NOT NULL,      -- the exact VLM_PROMPT string, for reconstruction
     first_seen      TEXT                -- ISO-8601 UTC when this prompt was first registered
 );
+
+-- Per-(photo x model x prompt) VLM outputs + derived verdict, for A/B model comparison. The
+-- model-INDEPENDENT facts (CV metrics, EXIF, bursts, your ratings) stay in `images`; `analyses`
+-- reuses that shared CV via a path join, so only the model's judgment varies.
+CREATE TABLE IF NOT EXISTS analyses (
+    path            TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    prompt_version  TEXT NOT NULL,
+    harness_version TEXT,
+    processed_at    TEXT,
+    status          TEXT DEFAULT 'ok',        -- ok | error
+    error_class     TEXT,
+    error_msg       TEXT,
+    caption         TEXT,
+    subject         TEXT,
+    scene           TEXT,
+    people_count    INTEGER,
+    eyes_closed     INTEGER,
+    aesthetic       INTEGER,
+    keep_hint       INTEGER,
+    tags            TEXT,
+    issues          TEXT,
+    base_verdict    TEXT,
+    quality_stars   INTEGER,
+    verdict         TEXT,
+    color_label     TEXT,
+    reason          TEXT,
+    PRIMARY KEY (path, model, prompt_version)
+);
 """
 
 
@@ -582,6 +611,33 @@ def analyze_vlm(client, work: Image.Image, fast: bool) -> tuple[dict, str]:
                 continue          # shrink / downshift and retry
             raise
     raise last_err
+
+
+def infer_openai(base_url: str, api_key: "str | None", model: str, jpeg: bytes,
+                 timeout: float = CALL_TIMEOUT) -> str:
+    """One OpenAI-compatible /chat/completions call with an inline image — the pluggable backend.
+    Works against vLLM, LM Studio, or Ollama's OpenAI endpoint (base_url like http://host:port/v1).
+    Returns the raw assistant text (JSON per VLM_PROMPT); caller runs it through coerce_vlm."""
+    import base64
+    import urllib.request
+    b64 = base64.b64encode(jpeg).decode()
+    body = {
+        "model": model,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": VLM_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]}],
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions",
+                                 data=json.dumps(body).encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode())
+    return data["choices"][0]["message"]["content"]
 
 
 # ----------------------------------------------------------------------------
@@ -1297,6 +1353,110 @@ def cmd_feedback(args):
     _print_agreement(rows)
 
 
+def cmd_analyze(args):
+    """Run a model over a folder's `ok` images via an OpenAI-compatible endpoint and store its
+    outputs in `analyses` (path, model, prompt_version) for A/B comparison. Reuses the CV metrics
+    already in `images` and the same VLM_PROMPT, so only the model's judgment varies. Idempotent."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    conn = connect(args.db)
+    api_key = args.api_key or os.environ.get("VLM_API_KEY")
+    register_prompt(conn, VLM_PROMPT_VERSION, VLM_PROMPT)
+    hv = harness_version()
+    folders = [Path(f).resolve() for f in args.folder] if args.folder else None
+
+    rows = [dict(r) for r in conn.execute(
+        "SELECT path, sharpness, exposure_flag, blown_pct FROM images WHERE status='ok'")]
+    if folders:
+        rows = [r for r in rows if any(_is_under(Path(r["path"]), f) for f in folders)]
+    if args.limit:
+        rows = rows[: args.limit]
+    if not rows:
+        sys.exit("No matching ok images (need `run` to have populated `images` first).")
+    print(f"Analyzing {len(rows)} image(s) with '{args.model}' via {args.base_url}  "
+          f"(prompt {VLM_PROMPT_VERSION}, harness {hv}) -> analyses.")
+
+    done = errs = 0
+    t0 = time.time()
+    for i, r in enumerate(rows, 1):
+        path = r["path"]
+        rec = {"path": path, "model": args.model, "prompt_version": VLM_PROMPT_VERSION,
+               "harness_version": hv,
+               "processed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        try:
+            work = to_working(load_source(Path(path)), MAX_EDGE)
+            raw = infer_openai(args.base_url, api_key, args.model, jpeg_bytes(work), CALL_TIMEOUT)
+            vlm = coerce_vlm(extract_json(raw))
+            cv = {"sharpness": r["sharpness"], "exposure_flag": r["exposure_flag"],
+                  "blown_pct": r["blown_pct"]}
+            d = derive(cv, vlm)
+            rec.update({"status": "ok", "caption": vlm["caption"], "subject": vlm["subject"],
+                        "scene": vlm["scene"], "people_count": vlm["people_count"],
+                        "eyes_closed": int(vlm["eyes_closed"]), "aesthetic": vlm["aesthetic"],
+                        "keep_hint": int(vlm["keep_hint"]), "tags": json.dumps(vlm["tags"]),
+                        "issues": json.dumps(vlm["issues"]), **d})
+            done += 1
+            tag = f"{d['verdict']:6s} {d['quality_stars']}* aes={vlm['aesthetic']} {vlm['subject'][:24]}"
+        except Exception as e:  # noqa: BLE001
+            rec.update({"status": "error", "error_class": "model", "error_msg": _exc_text(e)[:500]})
+            errs += 1
+            tag = f"ERROR {_exc_text(e)[:70]}"
+        cols = ", ".join(rec)
+        conn.execute(f"INSERT OR REPLACE INTO analyses({cols}) VALUES({', '.join('?' * len(rec))})",
+                     tuple(rec.values()))
+        conn.commit()
+        print(f"[{i}/{len(rows)}] {Path(path).name:24s} -> {tag}")
+    fol = (" --folder " + " ".join(str(f) for f in args.folder)) if args.folder else ""
+    print(f"\nDone: {done} ok / {errs} error in {_fmt_eta(time.time() - t0)}.  "
+          f"Next: photo_cull.py compare --model '{args.model}'{fol}")
+
+
+def cmd_compare(args):
+    """Compare a model in `analyses` against the images baseline — and, if you've culled in LR,
+    against your own ratings (the objective 'which model matches my taste' read)."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}.")
+    conn = connect(args.db)
+    folders = [Path(f).resolve() for f in args.folder] if args.folder else None
+    rows = [dict(r) for r in conn.execute(
+        "SELECT i.path, i.model_used base_model, i.verdict qv, i.quality_stars qs, i.aesthetic qa, "
+        "i.user_rating ur, a.verdict av, a.quality_stars as_, a.aesthetic aa "
+        "FROM images i JOIN analyses a USING(path) "
+        "WHERE i.status='ok' AND a.status='ok' AND a.model=? AND a.prompt_version=?",
+        (args.model, VLM_PROMPT_VERSION))]
+    if folders:
+        rows = [r for r in rows if any(_is_under(Path(r["path"]), f) for f in folders)]
+    n = len(rows)
+    if not n:
+        sys.exit(f"No overlapping analyses for '{args.model}'. Run `analyze --model {args.model}` first.")
+    base = rows[0]["base_model"] or "baseline"
+    print(f"Comparing {n} photo(s):  {base} (images)  vs  {args.model} (analyses)\n")
+
+    agree = sum(1 for r in rows if r["qv"] == r["av"])
+    print(f"Verdict agreement: {agree}/{n} ({100 * agree // n}%)")
+    from collections import Counter
+    for (qv, av), c in Counter((r["qv"], r["av"]) for r in rows if r["qv"] != r["av"]).most_common(6):
+        print(f"    {base}={qv:6s} -> {args.model}={av:6s}: {c}")
+
+    qa, aa = [r["qa"] or 0 for r in rows], [r["aa"] or 0 for r in rows]
+    corr = _pearson(qa, aa)
+    cstr = f"   (corr {corr:+.2f})" if corr is not None else ""
+    print(f"\nAesthetic mean: {base} {sum(qa) / n:.1f}  vs  {args.model} {sum(aa) / n:.1f}{cstr}")
+
+    rated = [r for r in rows if r["ur"] and r["ur"] >= 1]
+    if rated:
+        print(f"\nvs YOUR ratings (n={len(rated)} rated) — fewer false-rejects is better:")
+        for label, vk, sk in ((base, "qv", "qs"), (args.model, "av", "as_")):
+            fr = sum(1 for r in rated if r[vk] == "reject" and r["ur"] >= 4)
+            ex = sum(1 for r in rated if (r[sk] or 0) == r["ur"])
+            w1 = sum(1 for r in rated if abs((r[sk] or 0) - r["ur"]) <= 1)
+            c = _pearson([r[sk] or 0 for r in rated], [r["ur"] for r in rated])
+            print(f"    {label:18s} false-rejects={fr:<3d} stars_exact={ex}/{len(rated)} "
+                  f"within1={w1}/{len(rated)} corr={'%+.2f' % c if c is not None else 'n/a'}")
+    else:
+        print("\n(no LR ratings yet — cull this shoot + run `feedback` to score each model vs your taste)")
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -1363,6 +1523,24 @@ def build_parser() -> argparse.ArgumentParser:
     fb.add_argument("--folder", type=Path, nargs="+", metavar="DIR",
                     help="Only read/report photos under these folders.")
     fb.set_defaults(func=cmd_feedback)
+
+    an = sub.add_parser("analyze", help="Run a model via an OpenAI-compatible endpoint into the "
+                        "`analyses` table (for A/B model comparison).")
+    an.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    an.add_argument("--model", required=True, help="Model id the server expects, e.g. glm-4.6v-flash.")
+    an.add_argument("--base-url", default="http://localhost:11434/v1",
+                    help="OpenAI-compatible base URL (default: local Ollama). vLLM/LM Studio: their /v1.")
+    an.add_argument("--api-key", default=None, help="Bearer key if the endpoint needs one (else env VLM_API_KEY).")
+    an.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    an.add_argument("--limit", type=int, help="Analyze at most N images (handy for a quick trial).")
+    an.set_defaults(func=cmd_analyze)
+
+    cp = sub.add_parser("compare", help="Compare a model in `analyses` vs the images baseline (and "
+                        "vs your LR ratings).")
+    cp.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    cp.add_argument("--model", required=True, help="The analyses model to compare against the baseline.")
+    cp.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    cp.set_defaults(func=cmd_compare)
     return p
 
 

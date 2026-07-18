@@ -142,6 +142,22 @@ original "Option 1" wanted; every future `derive()`/prompt tweak now has a numbe
 write changes into XMP" (or ⌘/Ctrl-S) before analysis/feedback, or catalog-only ratings won't be
 seen. Pick/reject flags are catalog-only in LR and never round-trip through XMP.
 
+### Pluggable model backend + A/B comparison (2026-07-17)
+
+Vision inference can now run through an OpenAI-compatible backend (`infer_openai`), so any local
+server (Ollama / vLLM / LM Studio) or API works — selected by `--model` + `--base-url`. New
+**`analyses`** table (row per photo × model × prompt) stores an alternative model's outputs +
+derived verdict, reusing the shared CV from `images` via a path join (so only the model's judgment
+varies; same `VLM_PROMPT`). **`analyze`** runs a model into `analyses`; **`compare`** diffs it
+against the images baseline and — once you've culled + run `feedback` — scores *each* model against
+your LR ratings (false-rejects, star agreement, correlation). The objective "which model matches my
+taste" read.
+
+Proven end-to-end against Ollama+qwen. Caveat: Ollama's OpenAI endpoint ran ~47s/frame (8192 ctx,
+json-mode) vs 5.6s native — so the OpenAI path is meant for the *new* model; the qwen baseline
+already lives in `images`. To A/B: `analyze --model X --base-url http://host:port/v1 --folder …`
+then `compare --model X --folder …`.
+
 ### Star-tier remap
 
 `stars = (aesthetic + 1) // 2` (9–10→5, 7–8→4, 5–6→3, 3–4→2, 1–2→1), keeping the −1 penalties for
