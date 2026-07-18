@@ -1192,6 +1192,25 @@ def cmd_status(args):
             print(f"  {r['filename']:24s} [{r['error_class']}] {r['error_msg'][:80]}")
 
 
+def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
+                      folders: "list[Path] | None" = None) -> int:
+    """Write a TSV for the Lightroom 'AI Cull Sync' plugin — one ok photo per line:
+        <filename>\\t<colorLabel>\\t<kw1|kw2|...>
+    The plugin applies ONLY these (color label + keywords) to the catalog, never rating/flags, so
+    nothing you set is overwritten. Uses the flat keywords from build_keywords (Stars-N, Cull-*, …)."""
+    folders = [Path(f).resolve() for f in folders] if folders else None
+    lines = []
+    for row in (dict(r) for r in conn.execute("SELECT * FROM images WHERE status='ok'")):
+        if folders and not any(_is_under(Path(row["path"]), f) for f in folders):
+            continue
+        flat, _ = build_keywords(row)
+        kws = "|".join(k.replace("|", "/").replace("\t", " ") for k in flat)
+        label = (row["color_label"] or "").replace("\t", " ")
+        lines.append(f"{row['filename']}\t{label}\t{kws}")
+    Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(lines)
+
+
 def cmd_export(args):
     if not args.db.exists():
         sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
@@ -1199,6 +1218,9 @@ def cmd_export(args):
     cluster_bursts(conn, args.burst_gap)
     n = export_csv(conn, args.csv)
     print(f"Wrote {n} rows to {args.csv}")
+    if args.plugin_data:
+        m = write_plugin_data(conn, args.plugin_data, args.folder)
+        print(f"Wrote {m} row(s) to {args.plugin_data}  (for the Lightroom AI-Cull plugin).")
     if args.xmp or args.xmp_dir:
         stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir,
                                    merge=args.merge, folders=args.folder, ai_rating=args.ai_rating)
@@ -1508,6 +1530,10 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--folder", type=Path, nargs="+", metavar="DIR",
                    help="Only write sidecars for photos under these folders (e.g. just the new shoot). "
                         "Burst clustering + CSV still use the whole library.")
+    e.add_argument("--plugin-data", type=Path, default=None, metavar="TSV",
+                   help="Also write a TSV (filename, color label, keywords) for the Lightroom "
+                        "AI-Cull plugin, which merges those into your catalog WITHOUT touching your "
+                        "ratings/flags. Respects --folder.")
     e.add_argument("--ai-rating", action="store_true",
                    help="Also write the AI's star suggestion to xmp:Rating (fills blanks only; merge "
                         "still preserves any rating you set). OFF by default so your star distribution "

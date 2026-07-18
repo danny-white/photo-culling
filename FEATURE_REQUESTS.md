@@ -158,6 +158,18 @@ json-mode) vs 5.6s native — so the OpenAI path is meant for the *new* model; t
 already lives in `images`. To A/B: `analyze --model X --base-url http://host:port/v1 --folder …`
 then `compare --model X --folder …`.
 
+### Non-destructive LrC merge via a plugin (2026-07-18)
+
+"Read Metadata from File" is a whole-record overwrite (catalog ← file), so it wipes your rating +
+pick/reject flags — fatal for the hard requirement "AI must never touch my picks/stars", and
+unfixable at the XMP layer (the file simply has no rating/flag to offer). Solution lives at the
+**catalog** layer: a Lightroom Classic plugin (`lightroom-plugin/AICull.lrplugin`) that reads a TSV
+from `export --plugin-data` and applies **only** the color label + keywords via the SDK — it never
+calls the rating or flag setters. Axis split: color = AI verdict, `Stars-N` keyword = AI star; your
+star rating + flags are untouched. Re-runnable for the tuning loop, and it sidesteps the read-only-
+share XMP copy entirely (plugin reads a small TSV, no sidecars). Data export tested (227 rows for
+2024-07-22); the Lua is untested in LrC (no LrC here) — install + iterate.
+
 ### Star-tier remap
 
 `stars = (aesthetic + 1) // 2` (9–10→5, 7–8→4, 5–6→3, 3–4→2, 1–2→1), keeping the −1 penalties for
