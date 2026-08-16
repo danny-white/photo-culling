@@ -477,22 +477,36 @@ def api_monitor():
     if last_processed:
         last_processed["shoot_date"] = _shoot_date(last_processed["path"], last_processed["capture_ts"])
 
-    # Recently processed (newest first) and up-next (in the exact order `run` will actually pick
-    # them up -- filename ASC, matching cmd_run's own `todo` query) -- so this pane's "next 5"
-    # is a real preview, not a guess.
+    # Recently processed (newest first).
     recent5 = [dict(r) for r in con.execute(
         "SELECT rowid, filename, path, status, capture_ts, processed_at FROM images "
         "WHERE processed_at IS NOT NULL ORDER BY processed_at DESC LIMIT 5")]
     for r in recent5:
         r["shoot_date"] = _shoot_date(r["path"], r["capture_ts"])
-    next5 = [dict(r) for r in con.execute(
-        "SELECT rowid, filename, path, capture_ts FROM images "
-        "WHERE status='pending' ORDER BY filename ASC LIMIT 5")]
+
+    # Up-next: cmd_run snapshots its whole `todo` list ONCE at launch and works through it
+    # in-memory (filename ASC) -- it never notices rows registered *after* it started. So a
+    # global "pending ORDER BY filename" prediction can show a row (e.g. from a folder
+    # registered mid-run) that the actually-running process can't see yet and won't touch
+    # until a fresh invocation starts. Scope to the active source(s)' own folder args when
+    # something's running, to predict what THAT process will really do next; fall back to the
+    # global view when idle, since that's what the next fresh `run` would see.
+    runs = _active_runs()
+    active_folders = [f for r in runs for f in r["folders"]]
+    if active_folders:
+        clauses = " OR ".join(["path LIKE ?"] * len(active_folders))
+        params = [f"{f.rstrip('/')}/%" for f in active_folders]
+        next5 = [dict(r) for r in con.execute(
+            f"SELECT rowid, filename, path, capture_ts FROM images "
+            f"WHERE status='pending' AND ({clauses}) ORDER BY filename ASC LIMIT 5", params)]
+    else:
+        next5 = [dict(r) for r in con.execute(
+            "SELECT rowid, filename, path, capture_ts FROM images "
+            "WHERE status='pending' ORDER BY filename ASC LIMIT 5")]
     for r in next5:
         r["shoot_date"] = _shoot_date(r["path"], r["capture_ts"])
 
     con.close()
-    runs = _active_runs()
     gpu = None
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
