@@ -1,0 +1,8 @@
+[Unit]
+Description=Photo culling ingest watcher (one-shot poll)
+# Local project: /home/danny/photo-culling
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/danny/photo-culling
+ExecStart=/home/danny/photo-culling/ops/watch_ingest.sh

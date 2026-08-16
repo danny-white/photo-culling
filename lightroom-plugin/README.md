@@ -15,31 +15,39 @@ Axis split it relies on:
 | star rating | **you** — never touched |
 | pick / reject flags | **you** — never touched |
 
+Matching is by **(shoot folder name, file name)**, not file name alone — Sony resets its file
+counter across shoots, so `DSC03960.ARW` can exist in more than one folder. This means the TSV
+can safely cover the **whole library at once**; you don't have to select one shoot at a time.
+
 ## One-time install
 
-1. On the box that runs `photo_cull`, export the data for a shoot:
+1. On the box that runs `photo_cull`, export the data (omit `--folder` for the whole library):
    ```bash
-   photo_cull.py export --plugin-data /path/aicull.tsv \
-     --folder /mnt/passport/Pictures/2024/2024-07-22 --db trial_out/trial.db
+   photo_cull.py export --plugin-data /path/aicull.tsv --db trial_out/trial.db
    ```
-2. Copy `aicull.tsv` **and** the `AICull.lrplugin` folder to your Mac (scp/AirDrop/share).
+2. Copy `aicull.tsv` **and** the `AICull.lrplugin` folder to your Mac (scp/AirDrop/share). If
+   you drop the TSV into `~/AICullInbox/` on the Mac, the plugin's file picker opens there by
+   default.
 3. Lightroom Classic → **File → Plug-in Manager → Add** → select the `AICull.lrplugin` folder.
 
-## Each shoot
+## Each sync
 
-1. In the Library grid, **select the shoot's photos** (one shoot at a time — matching is by file
-   name, which can repeat across shoots).
+1. In the Library grid, **select the photos to update** — "All Photographs" for a full-library
+   sync, or a subset if you just want to touch a few shoots.
 2. **Library → Plug-in Extras → Sync AI Cull Data (keywords + color label)…**
-3. Pick the `aicull.tsv`. It reports how many matched and applies the color label + keywords +
-   caption.
+3. Pick the `aicull.tsv` (defaults to `~/AICullInbox/`). It reports how many matched and applies
+   the color label + keywords + caption.
 
 Your ratings and flags are never written, so cull however you like — before or after syncing.
 
 ## Notes / troubleshooting
 
-- **Nothing matched?** You probably didn't select the photos, or the TSV is for a different shoot.
-- **Keywords but no color?** Some catalogs restrict labels to a custom set; the AI uses the default
-  color *names* (`Green`/`Yellow`/`Red`). If your label set renamed those, edit the export or your
-  Label Set (Metadata → Color Label Set) to match.
-- Match is by file name via `photo:getFormattedMetadata('fileName')`; export per-shoot to keep it
-  unambiguous.
+- **Nothing matched?** You probably didn't select the photos, or the TSV doesn't cover them yet
+  (re-export after the next `photo_cull.py run`).
+- **Label set correctly but the color filter swatch doesn't find it?** Lightroom resolves the
+  Attribute-bar color filter by a **case-sensitive** match against the active Label Set's display
+  names (`Yellow`, not `yellow`). The TSV/plugin already use the capitalized form — if you ever
+  hand-edit a TSV, keep the casing.
+- Match is by `(shoot folder name, file name)` — the plugin reads the photo's own path via
+  `photo:getRawMetadata('path')` and takes its parent directory's name, so it works regardless of
+  where the library is mounted on this machine vs. the box that ran `photo_cull`.
