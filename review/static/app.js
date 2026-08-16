@@ -268,11 +268,28 @@ function loadTune() {
 }
 
 /* ------------------------------------------------ monitor view + poll */
+function timeAgo(iso) {
+  if (!iso) return "&mdash;";
+  // processed_at is written by Python's isoformat() and already carries an explicit UTC
+  // offset (e.g. "...+00:00") -- appending "Z" here would double up the offset and parse as NaN.
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 5) return "just now";
+  if (s < 90) return Math.round(s) + "s ago";
+  if (s < 5400) return Math.round(s / 60) + "m ago";
+  return Math.round(s / 3600) + "h ago";
+}
+function folderBar(done, total) {
+  const pct = total ? 100 * done / total : 0;
+  return `<span class="track" style="width:70px;display:inline-block;vertical-align:middle"><i style="width:${pct}%"></i></span>`;
+}
 async function loadMonitor() {
-  const d = await api("/api/monitor"), c = d.counts, rp = d.run_pos;
-  const pct = (d.running && rp && rp.n) ? 100 * rp.i / rp.n : (c.total ? 100 * c.ok / c.total : 0);
+  const d = await api("/api/monitor"), c = d.counts;
+  const pct = c.total ? 100 * c.ok / c.total : 0;
+  const srcLine = d.sources.length
+    ? d.sources.map(s => `<span style="color:var(--keep)">&#9679;</span> ${s.folders.map(f => esc(f.split("/").slice(-2).join("/"))).join(", ") || "pid " + s.pid} <span class="muted">(${Math.round(s.elapsed_s / 60)}m)</span>`).join(" &middot; ")
+    : '<span style="color:var(--ink-3)">&#9675; idle</span>';
   $("#monitor-body").innerHTML = `<div class="cols">
-    <div class="panel"><h2 class="h">Run</h2>
+    <div class="panel"><h2 class="h">Across the library</h2>
       <div class="stat-row">
         <div class="s"><div class="n">${c.ok.toLocaleString()}</div><div class="l">done</div></div>
         <div class="s"><div class="n">${c.pending.toLocaleString()}</div><div class="l">pending</div></div>
@@ -280,30 +297,60 @@ async function loadMonitor() {
         <div class="s"><div class="n">${d.img_per_hr || "&mdash;"}</div><div class="l">img/hr</div></div>
         <div class="s"><div class="n">${d.eta_hours == null ? "&mdash;" : d.eta_hours + "h"}</div><div class="l">eta</div></div></div>
       <div class="bar" style="height:9px"><i style="display:block;height:100%;width:${pct}%;background:linear-gradient(90deg,var(--accent),#6fd0e4)"></i></div>
-      <div class="muted" style="margin-top:8px">${d.running ? '<span style="color:var(--keep)">&#9679; running</span>' + (rp ? " &middot; frame " + rp.i.toLocaleString() + "/" + rp.n.toLocaleString() : "") : "&#9675; not running"}${d.gpu ? " &middot; GPU " + d.gpu.used_mb + "/" + d.gpu.total_mb + "MB &middot; " + d.gpu.util + "%" : ""}</div>
+      <div class="muted" style="margin-top:8px">${srcLine}${d.gpu ? " &middot; GPU " + d.gpu.used_mb + "/" + d.gpu.total_mb + "MB &middot; " + d.gpu.util + "%" : ""}</div>
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
-        <button class="btn warn" id="i-pause" ${d.running ? "" : "disabled"}>Pause run</button>
+        <button class="btn warn" id="i-pause" ${d.running ? "" : "disabled"}>Pause all (${d.sources.length})</button>
         <button class="btn" id="i-resume" ${d.running ? "disabled" : ""}>Resume</button>
         <button class="btn" id="i-redrive" ${d.running || !c.error ? "disabled" : ""}>Redrive ${c.error} errors</button>
         <button class="btn" id="i-export">Export snapshot</button></div></div>
+    <div class="panel"><h2 class="h">Last processed</h2>${lastProcessedHtml(d.last_processed)}</div>
+    </div>
+    <div class="cols" style="margin-top:14px">
+    <div class="panel"><h2 class="h">By year</h2>
+      <div class="foldertable-wrap"><table class="errtable foldertable"><tr><th>Year</th><th>Done</th><th></th><th>Pend.</th><th>Err</th></tr>
+      ${d.by_year.map(y => `<tr><td>${esc(y.year)}</td><td class="n">${y.ok}/${y.total}</td>` +
+        `<td>${folderBar(y.ok, y.total)}</td><td class="n">${y.pending || ""}</td>` +
+        `<td class="n" style="color:var(--reject)">${y.error || ""}</td></tr>`).join("")}</table></div></div>
     <div class="panel"><h2 class="h">Errors by class</h2>
       ${d.errors_by_class.length ? '<table class="errtable">' + d.errors_by_class.map(e => `<tr><td>${esc(e.error_class)}</td><td class="n">${e.c}</td></tr>`).join("") + "</table>" : '<div class="muted">none</div>'}</div>
     </div>
-    <div class="panel" style="margin-top:14px"><h2 class="h">Recent log</h2><div class="logbox">${d.recent.map(esc).join("\n")}</div></div>`;
+    <div class="panel" style="margin-top:14px"><h2 class="h">Needs attention <span class="muted">(folders not fully done)</span></h2>
+      ${d.attention.length ? '<div class="foldertable-wrap"><table class="errtable foldertable"><tr><th>Folder</th><th>Done</th><th></th><th>Pend.</th><th>Err</th><th>Last activity</th></tr>' +
+        d.attention.map(f => `<tr><td>${esc(f.folder)}</td><td class="n">${f.ok}/${f.total}</td>` +
+          `<td>${folderBar(f.ok, f.total)}</td><td class="n">${f.pending || ""}</td>` +
+          `<td class="n" style="color:var(--reject)">${f.error || ""}</td><td class="muted">${timeAgo(f.last)}</td></tr>`).join("") +
+        "</table></div>" + (d.attention_more ? `<div class="muted" style="margin-top:8px">+${d.attention_more} more folder(s) queued</div>` : "")
+        : '<div class="muted">nothing queued — everything the DB knows about is fully processed</div>'}</div>`;
   const act = async (a, confirmMsg) => { if (confirmMsg && !confirm(confirmMsg)) return; const r = await post("/api/intervene", { action: a }); toast(r.msg || (r.ok ? "ok" : "failed")); setTimeout(loadMonitor, 900); };
-  $("#i-pause").onclick = () => act("pause", "Stop the run? It's safe — resumes exactly where it left off.");
+  $("#i-pause").onclick = () => act("pause", "Stop all active runs? It's safe — resumes exactly where it left off.");
   $("#i-resume").onclick = () => act("resume");
   $("#i-redrive").onclick = () => act("redrive");
   $("#i-export").onclick = () => act("export");
+}
+function lastProcessedHtml(lp) {
+  if (!lp) return '<div class="muted">nothing processed yet</div>';
+  const when = timeAgo(lp.processed_at);
+  if (lp.status !== "ok") {
+    return `<div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:6px">${esc(lp.filename)} <span class="muted">${when}</span></div>
+      <div class="errbox">[${esc(lp.error_class || "?")}] ${esc(lp.error_msg || "")}</div>`;
+  }
+  return `<div style="display:flex;gap:12px">
+    <img src="/api/thumb/${lp.rowid}?s=grid" style="width:140px;height:auto;border-radius:var(--radius-sm);border:1px solid var(--line);flex:0 0 auto">
+    <div style="min-width:0">
+      <div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:4px">${esc(lp.filename)} <span class="muted">${when}</span></div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+        <span class="mini ${esc(lp.base_verdict)}">${esc(lp.base_verdict || "?")}</span>
+        <span class="stars-mini">${"&#9733;".repeat(lp.quality_stars || 0)}</span></div>
+      <div class="cap" style="font-size:12.5px">${esc(lp.caption || lp.subject || "")}</div>
+    </div></div>`;
 }
 async function pollMonitor() {
   try {
     const d = await api("/api/monitor"), c = d.counts;
     $("#monitor").classList.toggle("dead", !d.running);
-    $("#mon-label").textContent = d.running ? "run · 9b" : "idle";
-    const rp = d.run_pos, pi = (d.running && rp) ? rp.i : c.ok, pn = (d.running && rp) ? rp.n : c.total;
-    $("#mon-count").textContent = pi.toLocaleString() + " / " + pn.toLocaleString();
-    $("#mon-bar").style.width = (pn ? 100 * pi / pn : 0) + "%";
+    $("#mon-label").textContent = d.running ? d.sources.length + " active" : "idle";
+    $("#mon-count").textContent = c.ok.toLocaleString() + " / " + c.total.toLocaleString();
+    $("#mon-bar").style.width = (c.total ? 100 * c.ok / c.total : 0) + "%";
     $("#mon-rate").textContent = d.img_per_hr || "--";
     $("#mon-err").textContent = c.error + " err";
     $("#mon-eta").textContent = d.eta_hours == null ? "--" : "ETA " + d.eta_hours + "h";

@@ -31,6 +31,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
@@ -376,22 +378,44 @@ def api_annotate():
 
 
 # ---------------------------------------------------------------- monitor + intervene
-def _pid_alive():
-    pf = CFG["pidfile"] or Path(str(CFG["db"]) + ".pid")
+def _active_runs():
+    """Every live `photo_cull.py run` process on the box, wherever it was launched from --
+    this server's own Resume/Redrive button, a manual `nohup ... &`, or the ops/watch_ingest.sh
+    poller. Replaces the old single-pidfile check, since those three sources now run
+    interchangeably against the same DB."""
     try:
-        pid = int(Path(pf).read_text().strip())
-        os.kill(pid, 0)
-        return pid
-    except (OSError, ValueError, FileNotFoundError):
-        return None
-
-
-def _tail(path, n=12):
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
+        out = subprocess.run(["ps", "-eo", "pid,etimes,args"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
         return []
-    return data.decode("utf-8", "replace").splitlines()[-n:]
+    runs = []
+    for line in out.splitlines()[1:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, etimes, args = parts
+        if "photo_cull.py" not in args or "run" not in args.split() or "grep" in args:
+            continue
+        toks = args.split()
+        try:
+            ridx = toks.index("run")
+        except ValueError:
+            continue
+        folders = []
+        for t in toks[ridx + 1:]:
+            if t.startswith("--"):
+                break
+            folders.append(t)
+        runs.append({"pid": int(pid), "elapsed_s": int(etimes), "folders": folders})
+    return runs
+
+
+def _shoot_key(path):
+    """(year, 'YYYY/YYYY-MM-DD') for the standard library layout; falls back gracefully for
+    anything outside it (e.g. a manually-culled one-off folder) so grouping never crashes."""
+    p = Path(path).parent
+    year = p.parent.name if re.fullmatch(r"\d{4}", p.parent.name or "") else "other"
+    return year, f"{year}/{p.name}"
 
 
 @app.route("/api/monitor")
@@ -401,25 +425,43 @@ def api_monitor():
     total = sum(by_status.values())
     errclasses = [dict(r) for r in con.execute(
         "SELECT COALESCE(error_class,'?') error_class, COUNT(*) c FROM images WHERE status='error' GROUP BY 1 ORDER BY c DESC")]
+
+    # Throughput + ETA from the DB's own processed_at timestamps -- works no matter which
+    # process wrote the row (server-launched run, a manual nohup run, the ingest watcher),
+    # unlike the old approach of tailing one fixed --log file.
+    window_min = 15
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_min)).isoformat(timespec="seconds")
+    recent_n = con.execute("SELECT COUNT(*) c FROM images WHERE processed_at >= ?", (cutoff,)).fetchone()["c"]
+    img_per_hr = round(recent_n * 60 / window_min) if recent_n else None
+    pending = by_status.get("pending", 0)
+    eta_h = round(pending / img_per_hr, 1) if img_per_hr else None
+
+    # Per-shoot-folder breakdown, across the whole library the DB has ever seen -- grouped in
+    # Python since it's one cheap pass over a local SQLite file, not worth a path-parsing SQL trick.
+    by_year = defaultdict(lambda: {"total": 0, "ok": 0, "pending": 0, "error": 0, "last": None})
+    by_folder = defaultdict(lambda: {"total": 0, "ok": 0, "pending": 0, "error": 0, "last": None, "year": None})
+    for r in con.execute("SELECT path, status, processed_at FROM images"):
+        year, key = _shoot_key(r["path"])
+        for bucket in (by_year[year], by_folder[key]):
+            bucket["total"] += 1
+            bucket[r["status"]] = bucket.get(r["status"], 0) + 1
+            if r["processed_at"] and (bucket["last"] is None or r["processed_at"] > bucket["last"]):
+                bucket["last"] = r["processed_at"]
+        by_folder[key]["year"] = year
+    years = [{"year": y, **s} for y, s in sorted(by_year.items())]
+    # "Needs attention" = anything not fully done yet -- fully-'ok' folders are already reflected
+    # in the year rollup above and aren't actionable, so leave them out of this list.
+    attention = [{"folder": k, **s} for k, s in by_folder.items() if s["pending"] or s["error"]]
+    attention.sort(key=lambda f: f["last"] or "", reverse=True)
+
+    last = con.execute(
+        "SELECT rowid, filename, path, status, base_verdict, quality_stars, caption, subject, "
+        "error_class, error_msg, processed_at FROM images WHERE processed_at IS NOT NULL "
+        "ORDER BY processed_at DESC LIMIT 1").fetchone()
+    last_processed = dict(last) if last else None
+
     con.close()
-    ok = by_status.get("ok", 0)
-    running = _pid_alive() is not None
-    # Throughput + ETA from the RUN's own recent per-frame times and [i/N] position — accurate
-    # during a --force reprocess, where the DB pending count understates the remaining work.
-    recent = _tail(CFG["log"], 60)
-    run_pos, frame_secs = None, []
-    for line in recent:
-        m = re.search(r"\[(\d+)/(\d+)\].*?\(([\d.]+)s,", line)
-        if m:
-            run_pos = {"i": int(m.group(1)), "n": int(m.group(2))}
-            frame_secs.append(float(m.group(3)))
-    img_per_hr = eta_h = None
-    if frame_secs and running:
-        avg = sum(frame_secs[-20:]) / len(frame_secs[-20:])
-        if avg > 0:
-            img_per_hr = round(3600 / avg)
-            if run_pos:
-                eta_h = round(max(0, run_pos["n"] - run_pos["i"]) * avg / 3600, 1)
+    runs = _active_runs()
     gpu = None
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
@@ -429,13 +471,16 @@ def api_monitor():
     except Exception:
         pass
     return jsonify({
-        "running": running,
-        "counts": {"ok": ok, "pending": by_status.get("pending", 0),
+        "running": bool(runs),
+        "sources": runs,
+        "counts": {"ok": by_status.get("ok", 0), "pending": pending,
                    "error": by_status.get("error", 0), "total": total},
         "img_per_hr": img_per_hr, "eta_hours": eta_h,
         "errors_by_class": errclasses, "gpu": gpu,
-        "run_pos": run_pos,
-        "recent": recent[-12:],
+        "by_year": years,
+        "attention": attention[:40],
+        "attention_more": max(0, len(attention) - 40),
+        "last_processed": last_processed,
     })
 
 
@@ -446,13 +491,14 @@ def api_intervene():
     cull = str(HERE.parent / "photo_cull.py")
     db = str(CFG["db"])
     if action == "pause":
-        pid = _pid_alive()
-        if not pid:
+        runs = _active_runs()
+        if not runs:
             return jsonify({"ok": False, "msg": "no running process"}), 409
-        os.kill(pid, signal.SIGINT)
-        return jsonify({"ok": True, "msg": f"sent SIGINT to {pid}"})
+        for r in runs:
+            os.kill(r["pid"], signal.SIGINT)
+        return jsonify({"ok": True, "msg": f"sent SIGINT to {', '.join(str(r['pid']) for r in runs)}"})
     if action in ("resume", "redrive"):
-        if _pid_alive():
+        if _active_runs():
             return jsonify({"ok": False, "msg": "a run is already active"}), 409
         if not CFG["folders"]:
             return jsonify({"ok": False, "msg": "start the server with --folders to enable resume/redrive"}), 400
