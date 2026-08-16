@@ -22,7 +22,10 @@ cd "$PROJ" || exit 1
 log() { echo "[$(date -Is)] $*" >> "$LOG"; }
 
 shopt -s nullglob
-for folder in "$LIBRARY_ROOT"/*/*/; do
+# Scoped to YYYY/YYYY-MM-DD -- the date-organized library only. $LIBRARY_ROOT also has other
+# top-level folders (screenshots, $RECYCLE.BIN, one-off trip dumps, ...) that are NOT meant to
+# be auto-culled; a bare */*/ glob would silently wander into those.
+for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
     folder="${folder%/}"
     name="$(basename "$folder")"
     marker="$MARKERS/$name.done"
