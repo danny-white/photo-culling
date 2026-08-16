@@ -20,6 +20,7 @@ INBOX=/mnt/Passport_AICullInbox               # narrow rw mount, scoped to just 
 MARKERS="$PROJ/trial_out/ingest_markers"      # one file per shoot folder we've synced
 LOG="$PROJ/trial_out/ingest_watch.log"
 STABLE_MINUTES=15                             # a folder must be quiet this long before we touch it
+NOTIFY_EMAIL=97danny.white@gmail.com          # emailed via msmtp (~/.msmtprc) when a batch drains to 0
 
 mkdir -p "$MARKERS"
 cd "$PROJ" || exit 1
@@ -36,6 +37,13 @@ if ! grep -q "^//192.168.1.5/Passport/AICullInbox " /proc/mounts; then
     log "ABORT: $INBOX is mounted but not to the expected share path -- refusing to write."
     exit 1
 fi
+
+# Snapshot before/after this invocation's work, purely from DB status -- lets us detect "the
+# queue just fully drained" (steady-state: idle at 0, a new import bumps pending>0, this
+# eventually brings it back to 0) regardless of how many 15-min poll cycles it took, and
+# regardless of whether this script or a separate manual run did the actual processing.
+pending_before=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='pending'" 2>/dev/null || echo 0)
+ok_before=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='ok'" 2>/dev/null || echo 0)
 
 shopt -s nullglob
 # Scoped to YYYY/YYYY-MM-DD -- the date-organized library only. $LIBRARY_ROOT also has other
@@ -75,3 +83,25 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
     echo "$newest" > "$marker"
     log "done: $folder -> $tsv"
 done
+
+# Batch-complete notification: only fires on the exact poll that brings the queue from >0 back
+# to 0 -- silent on idle polls (pending_before=0) and on in-progress polls (pending_after>0),
+# whether draining took one cycle or many.
+pending_after=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='pending'" 2>/dev/null || echo 0)
+ok_after=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='ok'" 2>/dev/null || echo 0)
+if [ "$pending_before" -gt 0 ] && [ "$pending_after" -eq 0 ]; then
+    processed=$((ok_after - ok_before))
+    subject="Photo cull: batch complete ($processed processed)"
+    body="Batch finished. $processed image(s) processed this run; $ok_after total culled, $pending_after pending.
+
+Ready to sync in Lightroom: Library -> Plug-in Extras -> Sync AI Cull Data..."
+    if command -v msmtp >/dev/null 2>&1; then
+        if printf 'Subject: %s\nTo: %s\n\n%s\n' "$subject" "$NOTIFY_EMAIL" "$body" | msmtp "$NOTIFY_EMAIL"; then
+            log "sent batch-complete email ($processed processed)"
+        else
+            log "msmtp send FAILED (check ~/.msmtprc and ~/.msmtp.log) -- batch WAS complete ($processed processed)"
+        fi
+    else
+        log "batch complete ($processed processed) but msmtp isn't installed -- no email sent"
+    fi
+fi

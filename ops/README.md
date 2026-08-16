@@ -43,6 +43,32 @@ systemctl --user daemon-reload
 systemctl --user enable --now photo-cull-ingest.timer
 ```
 
+### Batch-complete email (optional but recommended)
+
+The watcher emails `NOTIFY_EMAIL` (set at the top of `watch_ingest.sh`) exactly once whenever
+the pending queue drains from >0 back to 0 -- i.e. "the batch you just imported is fully culled
+and ready to sync," whether that took one 15-minute poll or several. Idle polls (nothing pending)
+and in-progress polls (still >0 after this run) stay silent.
+
+Needs `msmtp` + a one-time Gmail App Password (not your normal Google password):
+
+```bash
+sudo apt install -y msmtp msmtp-mta
+```
+1. https://myaccount.google.com/apppasswords -> generate an app password (requires 2-Step
+   Verification on the Google account).
+2. Edit `~/.msmtprc` (already created with everything else filled in) and add the password line
+   inside the `account aicull` block:
+   ```
+   password    <the 16-char app password, no spaces>
+   ```
+3. `chmod 600 ~/.msmtprc` -- msmtp refuses to run otherwise.
+4. Test it: `echo "test" | msmtp your@email.com` (or just wait for a real batch to drain).
+
+If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine -- it just logs
+"batch complete... but msmtp isn't installed" instead of emailing. Failures show up in
+`~/.msmtp.log` and in `trial_out/ingest_watch.log`.
+
 ## Operating it
 
 - `journalctl --user -u photo-cull-ingest.service -f` — watch it fire.
