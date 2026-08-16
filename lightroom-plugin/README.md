@@ -26,10 +26,12 @@ can safely cover the **whole library at once**; you don't have to select one sho
    photo_cull.py export --plugin-data /path/aicull.tsv --db trial_out/trial.db
    ```
 2. Copy the `AICull.lrplugin` folder to your Mac (scp/AirDrop/share) — one-time, since it's just
-   code. The TSV itself lives on the passport drive (`/mnt/passport/AICullInbox/` from this
-   Linux box, `/Volumes/Passport/AICullInbox/` from the Mac), which the plugin's file picker
-   defaults into — no copying needed for each sync. [`ops/watch_ingest.sh`](../ops/watch_ingest.sh)
-   drops one TSV per shoot there automatically; see [`ops/README.md`](../ops/README.md).
+   code. The TSV itself lives on the passport drive (`/mnt/Passport_AICullInbox/` from this
+   Linux box — a narrow read-write mount scoped to just that subfolder, separate from the
+   read-only `/mnt/passport` used to scan the library — `/Volumes/Passport/AICullInbox/` from the
+   Mac), which the plugin's file picker defaults into — no copying needed for each sync.
+   [`ops/watch_ingest.sh`](../ops/watch_ingest.sh) drops one TSV per shoot there automatically;
+   see [`ops/README.md`](../ops/README.md).
 3. Lightroom Classic → **File → Plug-in Manager → Add** → select the `AICull.lrplugin` folder.
 
 ## Each sync
