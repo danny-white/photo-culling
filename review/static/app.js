@@ -9,7 +9,7 @@ const dash = (s) => esc(s) || "&mdash;";
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 1700); }
 
-const S = { view: "review", filter: "all", scene: "", stars: "", exposure: "", sort: "capture", order: "asc", q: "",
+const S = { view: "monitor", filter: "all", scene: "", stars: "", exposure: "", sort: "capture", order: "asc", q: "",
   offset: 0, limit: 120, items: [], loupeIdx: -1, current: null, summary: null };
 
 /* ------------------------------------------------ summary + filters */
@@ -393,6 +393,7 @@ $("#order").onclick = () => { S.order = S.order === "asc" ? "desc" : "asc"; $("#
 $("#search").oninput = debounce(() => { S.q = $("#search").value.trim(); loadList(true); }, 300);
 document.addEventListener("keydown", onKey);
 loadSummary().then(() => loadList(true));
+show("monitor");  // matches the HTML's default-visible tab; also fires loadMonitor() immediately
 pollMonitor();
 setInterval(pollMonitor, 5000);
 // The topbar widget above polls regardless of tab; the full Monitor-tab body (by-year table,

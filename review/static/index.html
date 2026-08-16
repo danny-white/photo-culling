@@ -11,11 +11,11 @@
   <header class="topbar">
     <div class="brand"><span class="dot"></span> Culling&nbsp;Bay <small id="scope"></small></div>
     <nav class="tabs" id="tabs">
-      <button class="tab on" data-view="review">Review</button>
+      <button class="tab" data-view="review">Review</button>
       <button class="tab" data-view="bursts">Bursts</button>
       <button class="tab" data-view="feedback">Feedback</button>
       <button class="tab" data-view="tune">Tune</button>
-      <button class="tab" data-view="monitor">Monitor</button>
+      <button class="tab on" data-view="monitor">Monitor</button>
     </nav>
     <div class="monitor dead" id="monitor" title="Live run monitor">
       <span class="dotlive"></span>
@@ -31,7 +31,7 @@
   </header>
 
   <!-- REVIEW -->
-  <section class="view on" id="view-review">
+  <section class="view" id="view-review">
     <div class="toolbar" id="review-tools">
       <div class="filters" id="filters"></div>
       <span class="spacer"></span>
@@ -64,7 +64,7 @@
   <section class="view" id="view-tune"><div class="panel" id="tune-body"></div></section>
 
   <!-- MONITOR -->
-  <section class="view" id="view-monitor"><div id="monitor-body"></div></section>
+  <section class="view on" id="view-monitor"><div id="monitor-body"></div></section>
 
   <div class="keybar" id="keybar">
     <span><kbd>K</kbd>/<kbd>U</kbd>/<kbd>X</kbd> verdict</span>
