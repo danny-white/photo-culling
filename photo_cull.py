@@ -1195,9 +1195,11 @@ def cmd_status(args):
 def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
                       folders: "list[Path] | None" = None) -> int:
     """Write a TSV for the Lightroom 'AI Cull Sync' plugin — one ok photo per line:
-        <filename>\\t<colorLabel>\\t<kw1|kw2|...>
-    The plugin applies ONLY these (color label + keywords) to the catalog, never rating/flags, so
-    nothing you set is overwritten. Uses the flat keywords from build_keywords (Stars-N, Cull-*, …)."""
+        <filename>\\t<colorLabel>\\t<kw1|kw2|...>\\t<caption>
+    The plugin applies ONLY these (color label + keywords + caption) to the catalog, never
+    rating/flags, so nothing you set is overwritten. Uses the flat keywords from build_keywords
+    (Stars-N, Cull-*, …). Caption goes into LrC's Caption field, IPTC-safe and independent of
+    your ratings/flags."""
     folders = [Path(f).resolve() for f in folders] if folders else None
     lines = []
     for row in (dict(r) for r in conn.execute("SELECT * FROM images WHERE status='ok'")):
@@ -1206,7 +1208,8 @@ def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
         flat, _ = build_keywords(row)
         kws = "|".join(k.replace("|", "/").replace("\t", " ") for k in flat)
         label = (row["color_label"] or "").replace("\t", " ")
-        lines.append(f"{row['filename']}\t{label}\t{kws}")
+        caption = (row["caption"] or "").replace("\t", " ").replace("\n", " ")
+        lines.append(f"{row['filename']}\t{label}\t{kws}\t{caption}")
     Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(lines)
 

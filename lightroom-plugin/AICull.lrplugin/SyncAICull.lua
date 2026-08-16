@@ -2,9 +2,9 @@
   Sync AI Cull Data.
 
   Reads the TSV from `photo_cull.py export --plugin-data …` and applies, to the SELECTED photos,
-  the AI color label + keywords. It only ever calls photo:setRawMetadata('label', …) and
-  photo:addKeyword(…) -- it NEVER writes 'rating' or the pick/reject flag, so your own picks and
-  star ratings are left exactly as they are.
+  the AI color label + keywords + caption. It only ever calls photo:setRawMetadata('label', …),
+  photo:setRawMetadata('caption', …), and photo:addKeyword(…) -- it NEVER writes 'rating' or the
+  pick/reject flag, so your own picks and star ratings are left exactly as they are.
 
   Match is by file name, so select one shoot at a time (file names can repeat across shoots).
 ]]
@@ -41,13 +41,13 @@ local function runSync()
     end
     for line in fh:lines() do
         line = line:gsub('\r$', '')  -- tolerate CRLF (file may have crossed from Windows/scp)
-        local fname, label, kwstr = line:match('^([^\t]*)\t([^\t]*)\t(.*)$')
+        local fname, label, kwstr, caption = line:match('^([^\t]*)\t([^\t]*)\t([^\t]*)\t?(.*)$')
         if fname and fname ~= '' then
             local kws = {}
             for kw in (kwstr or ''):gmatch('[^|]+') do
                 kws[#kws + 1] = kw
             end
-            byName[fname] = { label = label:lower(), keywords = kws }
+            byName[fname] = { label = label:lower(), keywords = kws, caption = caption or '' }
         end
     end
     fh:close()
@@ -83,6 +83,12 @@ local function runSync()
                         error(string.format('setRawMetadata(label=%q) on %s: %s', rec.label, fname, tostring(lerr)))
                     end
                 end
+                if rec.caption and rec.caption ~= '' then
+                    local cok, cerr = LrTasks.pcall(function() photo:setRawMetadata('caption', rec.caption) end)
+                    if not cok then
+                        error(string.format('setRawMetadata(caption) on %s: %s', fname, tostring(cerr)))
+                    end
+                end
                 for _, kw in ipairs(rec.keywords) do
                     if kw ~= '' then
                         local aok, aerr = LrTasks.pcall(function() photo:addKeyword(keywordFor(kw)) end)
@@ -99,7 +105,7 @@ local function runSync()
         'AI Cull Sync complete',
         string.format(
             '%d selected photo(s); %d matched the data file.\n' ..
-            'Applied AI color label + keywords. Your ratings and flags were not touched.',
+            'Applied AI color label + keywords + caption. Your ratings and flags were not touched.',
             #photos, matched))
 end
 

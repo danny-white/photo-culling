@@ -1,9 +1,9 @@
 # AI Cull Sync — Lightroom Classic plugin
 
-Merges `photo_cull`'s AI **keywords + color label** into your LrC catalog **without ever touching
-your star ratings or pick/reject flags**. It uses the Lightroom SDK to set only those two things,
-so — unlike "Read Metadata from File" — nothing you set by hand is overwritten. Re-run it as often
-as you like (after re-analysis); your picks/stars stay put.
+Merges `photo_cull`'s AI **keywords + color label + caption** into your LrC catalog **without
+ever touching your star ratings or pick/reject flags**. It uses the Lightroom SDK to set only
+those three things, so — unlike "Read Metadata from File" — nothing you set by hand is
+overwritten. Re-run it as often as you like (after re-analysis); your picks/stars stay put.
 
 Axis split it relies on:
 
@@ -11,6 +11,7 @@ Axis split it relies on:
 |---|---|
 | color label (green/yellow/red = keep/review/reject) | **AI** — set by this plugin |
 | `Stars-N`, `Cull-*`, `Scene-*`, tag keywords | **AI** — set by this plugin |
+| Caption field | **AI** — set by this plugin (one-sentence descriptor) |
 | star rating | **you** — never touched |
 | pick / reject flags | **you** — never touched |
 
@@ -29,7 +30,8 @@ Axis split it relies on:
 1. In the Library grid, **select the shoot's photos** (one shoot at a time — matching is by file
    name, which can repeat across shoots).
 2. **Library → Plug-in Extras → Sync AI Cull Data (keywords + color label)…**
-3. Pick the `aicull.tsv`. It reports how many matched and applies the color label + keywords.
+3. Pick the `aicull.tsv`. It reports how many matched and applies the color label + keywords +
+   caption.
 
 Your ratings and flags are never written, so cull however you like — before or after syncing.
 
