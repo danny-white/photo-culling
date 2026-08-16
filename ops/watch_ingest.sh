@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Ingest watcher: poll for new/updated shoot folders under $LIBRARY_ROOT, cull them, and export a
 # plugin-data TSV to $INBOX -- a folder on the passport drive itself, which the Mac already
-# mounts (as /Volumes/Passport), so no network push is needed. The Lightroom plugin's file
-# picker defaults there; applying it is still a manual click (Library -> Plug-in Extras -> Sync
-# AI Cull Data...).
+# mounts (as /Volumes/Passport/AICullInbox), so no network push is needed. The Lightroom plugin's
+# file picker defaults there; applying it is still a manual click (Library -> Plug-in Extras ->
+# Sync AI Cull Data...).
+#
+# $INBOX is mounted as its OWN narrow CIFS mount (//192.168.1.5/Passport/AICullInbox), not the
+# share root -- Pictures/ is structurally unreachable through it, so a bug here can't touch the
+# actual library. $LIBRARY_ROOT is a separate, read-only guest mount, used only for scanning.
 #
 # Run periodically by the `photo-cull-ingest.timer` systemd --user unit (see ops/README.md).
 # Safe to run concurrently with a manual `photo_cull.py run` -- both just resume the same DB.
@@ -12,14 +16,26 @@ set -uo pipefail
 PROJ=/home/danny/photo-culling
 DB="$PROJ/trial_out/trial.db"
 LIBRARY_ROOT=/mnt/passport/Pictures           # read-only guest mount -- fine, we only read here
-INBOX=/mnt/Passport_Writeable/AICullInbox     # rw mount of the same share; = /Volumes/Passport/AICullInbox on the Mac
+INBOX=/mnt/Passport_AICullInbox               # narrow rw mount, scoped to just this subfolder
 MARKERS="$PROJ/trial_out/ingest_markers"      # one file per shoot folder we've synced
 LOG="$PROJ/trial_out/ingest_watch.log"
 STABLE_MINUTES=15                             # a folder must be quiet this long before we touch it
 
-mkdir -p "$MARKERS" "$INBOX"
+mkdir -p "$MARKERS"
 cd "$PROJ" || exit 1
 log() { echo "[$(date -Is)] $*" >> "$LOG"; }
+
+# $INBOX is a transient CIFS mount (no fstab entry) -- it will NOT come back after a reboot on
+# its own. If it's not actually mounted, bail loudly instead of silently writing TSVs into an
+# empty local directory that the Mac never sees.
+if ! mountpoint -q "$INBOX"; then
+    log "ABORT: $INBOX is not mounted -- re-run the mount command and retry."
+    exit 1
+fi
+if ! grep -q "^//192.168.1.5/Passport/AICullInbox " /proc/mounts; then
+    log "ABORT: $INBOX is mounted but not to the expected share path -- refusing to write."
+    exit 1
+fi
 
 shopt -s nullglob
 # Scoped to YYYY/YYYY-MM-DD -- the date-organized library only. $LIBRARY_ROOT also has other
