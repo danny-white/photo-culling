@@ -47,7 +47,10 @@ local function runSync()
             for kw in (kwstr or ''):gmatch('[^|]+') do
                 kws[#kws + 1] = kw
             end
-            byName[fname] = { label = label:lower(), keywords = kws, caption = caption or '' }
+            -- Keep the TSV's capitalized name as-is (e.g. "Yellow") -- Lightroom resolves the
+            -- filterable color swatch by case-sensitive match against the active Label Set's
+            -- display names; a lowercase value stores fine as text but never resolves to a color.
+            byName[fname] = { label = label, keywords = kws, caption = caption or '' }
         end
     end
     fh:close()
