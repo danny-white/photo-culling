@@ -395,3 +395,7 @@ document.addEventListener("keydown", onKey);
 loadSummary().then(() => loadList(true));
 pollMonitor();
 setInterval(pollMonitor, 5000);
+// The topbar widget above polls regardless of tab; the full Monitor-tab body (by-year table,
+// needs-attention list, last-processed panel) only rendered once on tab-switch otherwise --
+// refresh it too while it's the active tab, a bit less often since it's a heavier re-render.
+setInterval(() => { if (S.view === "monitor") loadMonitor(); }, 8000);
