@@ -11,9 +11,15 @@
   "All Photographs" (or any subset you like) before running.
 ]]
 
-local LrApplication = import 'LrApplication'
-local LrDialogs     = import 'LrDialogs'
-local LrTasks       = import 'LrTasks'
+local LrApplication     = import 'LrApplication'
+local LrDialogs         = import 'LrDialogs'
+local LrTasks           = import 'LrTasks'
+local LrFunctionContext = import 'LrFunctionContext'
+local LrProgressScope   = import 'LrProgressScope'
+
+local BATCH_SIZE = 100  -- photos per write transaction; yield + update progress between batches
+                        -- (the SDK disallows yielding while holding write access, so a batch
+                        -- boundary is the only place progress can actually redraw)
 
 local function shootFolderOf(photo)
     local path = photo:getRawMetadata('path') or ''
@@ -21,7 +27,7 @@ local function shootFolderOf(photo)
     return folder or ''
 end
 
-local function runSync()
+local function runSync(context)
     local catalog = LrApplication.activeCatalog()
 
     -- 1. The photos to update = current selection ("All Photographs" for a full-library sync).
@@ -67,66 +73,93 @@ local function runSync()
     end
     fh:close()
 
-    -- 4. Apply in one write transaction. ONLY label + keywords + caption -- never rating or flags.
-    -- Keywords are created ONCE up front and cached by name -- calling catalog:createKeyword
-    -- repeatedly for the same name (once per photo) can hand back a stale/unusable reference
-    -- on the 2nd+ call within a single write transaction, which addKeyword then rejects.
-    local matched = 0
-    catalog:withWriteAccessDo('Sync AI Cull Data', function()
-        local keywordCache = {}
-        local function keywordFor(kw)
-            if not keywordCache[kw] then
-                local kok, keyword = LrTasks.pcall(function()
-                    return catalog:createKeyword(kw, {}, true, nil, true)
-                end)
-                if not kok then
-                    error(string.format('createKeyword(%q): %s', kw, tostring(keyword)))
-                end
-                keywordCache[kw] = keyword
-            end
-            return keywordCache[kw]
-        end
+    -- 4. Apply in batches. ONLY label + keywords + caption -- never rating or flags. Keywords
+    -- are created ONCE and cached by name -- calling catalog:createKeyword repeatedly for the
+    -- same name within a single write transaction can hand back a stale/unusable reference on
+    -- the 2nd+ call, which addKeyword then rejects; caching (and reusing across batches, which
+    -- is safe -- keyword objects are catalog-level, not transaction-scoped) avoids that.
+    local total = #photos
+    local progress = LrProgressScope { title = 'Syncing AI Cull Data', functionContext = context }
+    progress:setCancelable(true)
 
-        for _, photo in ipairs(photos) do
-            local fname = photo:getFormattedMetadata('fileName')
-            local key = shootFolderOf(photo) .. '/' .. fname
-            local rec = byKey[key]
-            if rec then
-                matched = matched + 1
-                if rec.label and rec.label ~= '' then
-                    local lok, lerr = LrTasks.pcall(function() photo:setRawMetadata('label', rec.label) end)
-                    if not lok then
-                        error(string.format('setRawMetadata(label=%q) on %s: %s', rec.label, key, tostring(lerr)))
+    local matched = 0
+    local keywordCache = {}
+    local function keywordFor(kw)
+        if not keywordCache[kw] then
+            local kok, keyword = LrTasks.pcall(function()
+                return catalog:createKeyword(kw, {}, true, nil, true)
+            end)
+            if not kok then
+                error(string.format('createKeyword(%q): %s', kw, tostring(keyword)))
+            end
+            keywordCache[kw] = keyword
+        end
+        return keywordCache[kw]
+    end
+
+    local i = 1
+    while i <= total do
+        if progress:isCanceled() then break end
+        local batchEnd = math.min(i + BATCH_SIZE - 1, total)
+
+        catalog:withWriteAccessDo('Sync AI Cull Data', function()
+            for idx = i, batchEnd do
+                local photo = photos[idx]
+                local fname = photo:getFormattedMetadata('fileName')
+                local key = shootFolderOf(photo) .. '/' .. fname
+                local rec = byKey[key]
+                if rec then
+                    matched = matched + 1
+                    if rec.label and rec.label ~= '' then
+                        local lok, lerr = LrTasks.pcall(function() photo:setRawMetadata('label', rec.label) end)
+                        if not lok then
+                            error(string.format('setRawMetadata(label=%q) on %s: %s', rec.label, key, tostring(lerr)))
+                        end
                     end
-                end
-                if rec.caption and rec.caption ~= '' then
-                    local cok, cerr = LrTasks.pcall(function() photo:setRawMetadata('caption', rec.caption) end)
-                    if not cok then
-                        error(string.format('setRawMetadata(caption) on %s: %s', key, tostring(cerr)))
+                    if rec.caption and rec.caption ~= '' then
+                        local cok, cerr = LrTasks.pcall(function() photo:setRawMetadata('caption', rec.caption) end)
+                        if not cok then
+                            error(string.format('setRawMetadata(caption) on %s: %s', key, tostring(cerr)))
+                        end
                     end
-                end
-                for _, kw in ipairs(rec.keywords) do
-                    if kw ~= '' then
-                        local aok, aerr = LrTasks.pcall(function() photo:addKeyword(keywordFor(kw)) end)
-                        if not aok then
-                            error(string.format('addKeyword(%q) on %s: %s', kw, key, tostring(aerr)))
+                    for _, kw in ipairs(rec.keywords) do
+                        if kw ~= '' then
+                            local aok, aerr = LrTasks.pcall(function() photo:addKeyword(keywordFor(kw)) end)
+                            if not aok then
+                                error(string.format('addKeyword(%q) on %s: %s', kw, key, tostring(aerr)))
+                            end
                         end
                     end
                 end
             end
-        end
-    end, { timeout = 300 })
+        end, { timeout = 60 })
 
-    LrDialogs.message(
-        'AI Cull Sync complete',
-        string.format(
-            '%d selected photo(s); %d matched the data file.\n' ..
-            'Applied AI color label + keywords + caption. Your ratings and flags were not touched.',
-            #photos, matched))
+        progress:setPortionComplete(batchEnd, total)
+        progress:setCaption(string.format('%d / %d photos (%d matched)', batchEnd, total, matched))
+        LrTasks.yield()  -- only safe between batches, outside write access
+
+        i = batchEnd + 1
+    end
+
+    progress:done()
+
+    if progress:isCanceled() then
+        LrDialogs.message(
+            'AI Cull Sync canceled',
+            string.format('Stopped after %d of %d photo(s); %d matched so far. Already-applied '
+                .. 'changes were kept -- re-run to pick up where this left off.', i - 1, total, matched))
+    else
+        LrDialogs.message(
+            'AI Cull Sync complete',
+            string.format(
+                '%d selected photo(s); %d matched the data file.\n' ..
+                'Applied AI color label + keywords + caption. Your ratings and flags were not touched.',
+                total, matched))
+    end
 end
 
-LrTasks.startAsyncTask(function()
-    local ok, errOrResult = LrTasks.pcall(runSync)
+LrFunctionContext.postAsyncTaskWithContext('AICullSync', function(context)
+    local ok, errOrResult = LrTasks.pcall(runSync, context)
     if not ok then
         LrDialogs.message('AI Cull Sync -- error', 'Something went wrong:\n\n' .. tostring(errOrResult), 'critical')
     end
