@@ -31,8 +31,9 @@ local function runSync()
         return
     end
 
-    -- 2. Choose the TSV produced by `export --plugin-data`. Defaults to the shared inbox folder.
-    local inbox = (os.getenv('HOME') or '') .. '/AICullInbox'
+    -- 2. Choose the TSV produced by `export --plugin-data`. Defaults to the shared inbox folder
+    -- on the passport drive itself (no network push needed -- the Mac mounts it directly).
+    local inbox = '/Volumes/Passport/AICullInbox'
     local chosen = LrDialogs.runOpenPanel {
         title                   = 'Choose AI cull data (.tsv)',
         canChooseFiles          = true,

@@ -25,9 +25,11 @@ can safely cover the **whole library at once**; you don't have to select one sho
    ```bash
    photo_cull.py export --plugin-data /path/aicull.tsv --db trial_out/trial.db
    ```
-2. Copy `aicull.tsv` **and** the `AICull.lrplugin` folder to your Mac (scp/AirDrop/share). If
-   you drop the TSV into `~/AICullInbox/` on the Mac, the plugin's file picker opens there by
-   default.
+2. Copy the `AICull.lrplugin` folder to your Mac (scp/AirDrop/share) — one-time, since it's just
+   code. The TSV itself lives on the passport drive (`/mnt/passport/AICullInbox/` from this
+   Linux box, `/Volumes/Passport/AICullInbox/` from the Mac), which the plugin's file picker
+   defaults into — no copying needed for each sync. [`ops/watch_ingest.sh`](../ops/watch_ingest.sh)
+   drops one TSV per shoot there automatically; see [`ops/README.md`](../ops/README.md).
 3. Lightroom Classic → **File → Plug-in Manager → Add** → select the `AICull.lrplugin` folder.
 
 ## Each sync
@@ -35,8 +37,8 @@ can safely cover the **whole library at once**; you don't have to select one sho
 1. In the Library grid, **select the photos to update** — "All Photographs" for a full-library
    sync, or a subset if you just want to touch a few shoots.
 2. **Library → Plug-in Extras → Sync AI Cull Data (keywords + color label)…**
-3. Pick the `aicull.tsv` (defaults to `~/AICullInbox/`). It reports how many matched and applies
-   the color label + keywords + caption.
+3. Pick a TSV from `/Volumes/Passport/AICullInbox/` (that's where the picker opens). It reports
+   how many matched and applies the color label + keywords + caption.
 
 Your ratings and flags are never written, so cull however you like — before or after syncing.
 
