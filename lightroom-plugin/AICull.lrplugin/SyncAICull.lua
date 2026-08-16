@@ -16,6 +16,31 @@ local LrDialogs         = import 'LrDialogs'
 local LrTasks           = import 'LrTasks'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrProgressScope   = import 'LrProgressScope'
+local LrFileUtils       = import 'LrFileUtils'
+local LrPathUtils       = import 'LrPathUtils'
+
+-- Move a fully-applied TSV into an 'applied/' sibling folder so it drops out of the file
+-- picker's default view -- keeps you from accidentally re-picking (harmless, but pointless)
+-- the same TSV next time, and keeps the inbox from growing unbounded as one-per-shoot TSVs
+-- pile up. Copy-then-delete via plain io, not a hypothetical LrFileUtils.move (no such call
+-- in the SDK) -- io.open/os.remove are already proven to work in this plugin (TSV reading).
+local function moveToApplied(path)
+    local dir = LrPathUtils.parent(path)
+    local appliedDir = LrPathUtils.child(dir, 'applied')
+    LrFileUtils.createDirectory(appliedDir)
+    local dest = LrPathUtils.child(appliedDir, LrPathUtils.leafName(path))
+    local src, rerr = io.open(path, 'rb')
+    if not src then return false, tostring(rerr) end
+    local data = src:read('*a')
+    src:close()
+    local out, werr = io.open(dest, 'wb')
+    if not out then return false, tostring(werr) end
+    out:write(data)
+    out:close()
+    local ok, remErr = os.remove(path)
+    if not ok then return false, tostring(remErr) end
+    return true, dest
+end
 
 local BATCH_SIZE = 100  -- photos per write transaction; yield + update progress between batches
                         -- (the SDK disallows yielding while holding write access, so a batch
@@ -147,14 +172,22 @@ local function runSync(context)
         LrDialogs.message(
             'AI Cull Sync canceled',
             string.format('Stopped after %d of %d photo(s); %d matched so far. Already-applied '
-                .. 'changes were kept -- re-run to pick up where this left off.', i - 1, total, matched))
+                .. 'changes were kept -- re-run to pick up where this left off.\n\n'
+                .. 'The source TSV was left in place (not moved to applied/) since this run '
+                .. 'didn\'t finish.', i - 1, total, matched))
     else
+        -- Only move on a full, uncanceled pass -- a canceled run may not have covered every
+        -- matching photo, so the TSV should stay available to re-run.
+        local moved, moveInfo = moveToApplied(chosen[1])
+        local moveNote = moved and ('\n\nSource TSV moved to applied/.')
+            or ('\n\n(Could not move the source TSV to applied/: ' .. tostring(moveInfo) .. ' -- '
+                .. 'the sync itself still succeeded.)')
         LrDialogs.message(
             'AI Cull Sync complete',
             string.format(
                 '%d selected photo(s); %d matched the data file.\n' ..
-                'Applied AI color label + keywords + caption. Your ratings and flags were not touched.',
-                total, matched))
+                'Applied AI color label + keywords + caption. Your ratings and flags were not touched.%s',
+                total, matched, moveNote))
     end
 end
 

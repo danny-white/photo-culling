@@ -41,6 +41,9 @@ can safely cover the **whole library at once**; you don't have to select one sho
 2. **Library → Plug-in Extras → Sync AI Cull Data (keywords + color label)…**
 3. Pick a TSV from `/Volumes/Passport/AICullInbox/` (that's where the picker opens). It reports
    how many matched and applies the color label + keywords + caption.
+4. On a full, uncanceled run, the TSV is moved into `AICullInbox/applied/` — so it drops out of
+   the picker's default view and you can't accidentally re-pick the same one next time. A
+   canceled run leaves its TSV in place, since it may not have covered every photo yet.
 
 Your ratings and flags are never written, so cull however you like — before or after syncing.
 
