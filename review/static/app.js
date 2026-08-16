@@ -278,6 +278,11 @@ function timeAgo(iso) {
   if (s < 5400) return Math.round(s / 60) + "m ago";
   return Math.round(s / 3600) + "h ago";
 }
+function mdY(isoDate) {
+  if (!isoDate) return "&mdash;";
+  const [y, m, d] = isoDate.split("-");
+  return `${m}/${d}/${y}`;
+}
 function folderBar(done, total) {
   const pct = total ? 100 * done / total : 0;
   return `<span class="track" style="width:70px;display:inline-block;vertical-align:middle"><i style="width:${pct}%"></i></span>`;
@@ -305,6 +310,7 @@ async function loadMonitor() {
         <button class="btn" id="i-export">Export snapshot</button></div></div>
     <div class="panel"><h2 class="h">Last processed</h2>${lastProcessedHtml(d.last_processed)}</div>
     </div>
+    <div class="panel" style="margin-top:14px"><h2 class="h">Timeline</h2>${timelineHtml(d.recent5, d.next5)}</div>
     <div class="cols" style="margin-top:14px">
     <div class="panel"><h2 class="h">By year</h2>
       <div class="foldertable-wrap"><table class="errtable foldertable"><tr><th>Year</th><th>Done</th><th></th><th>Pend.</th><th>Err</th></tr>
@@ -331,18 +337,32 @@ function lastProcessedHtml(lp) {
   if (!lp) return '<div class="muted">nothing processed yet</div>';
   const when = timeAgo(lp.processed_at);
   if (lp.status !== "ok") {
-    return `<div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:6px">${esc(lp.filename)} <span class="muted">${when}</span></div>
+    return `<div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:6px">${esc(lp.filename)} <span class="muted">${lp.shoot_date || ""} &middot; ${when}</span></div>
       <div class="errbox">[${esc(lp.error_class || "?")}] ${esc(lp.error_msg || "")}</div>`;
   }
   return `<div style="display:flex;gap:12px">
     <img src="/api/thumb/${lp.rowid}?s=grid" style="width:140px;height:auto;border-radius:var(--radius-sm);border:1px solid var(--line);flex:0 0 auto">
     <div style="min-width:0">
-      <div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:4px">${esc(lp.filename)} <span class="muted">${when}</span></div>
-      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+      <div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:4px">${esc(lp.filename)} <span class="muted">${esc(lp.shoot_date || "")} &middot; ${when}</span></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
         <span class="mini ${esc(lp.base_verdict)}">${esc(lp.base_verdict || "?")}</span>
-        <span class="stars-mini">${"&#9733;".repeat(lp.quality_stars || 0)}</span></div>
+        <span class="stars-mini">${"&#9733;".repeat(lp.quality_stars || 0)}</span>
+        <span class="muted">${esc(lp.reason || "")}</span></div>
       <div class="cap" style="font-size:12.5px">${esc(lp.caption || lp.subject || "")}</div>
     </div></div>`;
+}
+function timelineRow(r, muted) {
+  return `<div class="tl-row${muted ? " muted" : ""}"><span class="fn">${esc(r.filename)}</span><span class="tl-date">${mdY(r.shoot_date)}</span></div>`;
+}
+function timelineHtml(recent5, next5) {
+  const past = (recent5 || []).map(r => timelineRow(r, false)).join("")
+    || '<div class="muted" style="padding:4px 0">none yet</div>';
+  const next = (next5 || []).map(r => timelineRow(r, true)).join("")
+    || '<div class="muted" style="padding:4px 0">queue empty</div>';
+  const subhead = "font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--ink-3);margin-bottom:6px";
+  return `<div class="cols">
+    <div><div style="${subhead}">Recently processed</div>${past}</div>
+    <div><div style="${subhead}">Up next</div>${next}</div></div>`;
 }
 async function pollMonitor() {
   try {

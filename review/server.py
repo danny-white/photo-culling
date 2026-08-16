@@ -418,6 +418,21 @@ def _shoot_key(path):
     return year, f"{year}/{p.name}"
 
 
+def _shoot_date(path, capture_ts):
+    """YYYY-MM-DD the photo was actually shot. capture_ts is written via a NAIVE (local-time)
+    datetime.timestamp() at ingestion time (see process_one's EXIF parse), so it must be decoded
+    the same way -- fromtimestamp() without a tz, not utcfromtimestamp() -- or the date can shift
+    by a day. Falls back to the shoot folder's own YYYY-MM-DD name when EXIF capture time is
+    missing (e.g. a format photo_cull couldn't parse)."""
+    if capture_ts:
+        try:
+            return datetime.fromtimestamp(capture_ts).strftime("%Y-%m-%d")
+        except (OSError, OverflowError, ValueError):
+            pass
+    m = re.search(r"\d{4}-\d{2}-\d{2}", Path(path).parent.name)
+    return m.group(0) if m else None
+
+
 @app.route("/api/monitor")
 def api_monitor():
     con = db_ro()
@@ -456,9 +471,25 @@ def api_monitor():
 
     last = con.execute(
         "SELECT rowid, filename, path, status, base_verdict, quality_stars, caption, subject, "
-        "error_class, error_msg, processed_at FROM images WHERE processed_at IS NOT NULL "
-        "ORDER BY processed_at DESC LIMIT 1").fetchone()
+        "reason, capture_ts, error_class, error_msg, processed_at FROM images "
+        "WHERE processed_at IS NOT NULL ORDER BY processed_at DESC LIMIT 1").fetchone()
     last_processed = dict(last) if last else None
+    if last_processed:
+        last_processed["shoot_date"] = _shoot_date(last_processed["path"], last_processed["capture_ts"])
+
+    # Recently processed (newest first) and up-next (in the exact order `run` will actually pick
+    # them up -- filename ASC, matching cmd_run's own `todo` query) -- so this pane's "next 5"
+    # is a real preview, not a guess.
+    recent5 = [dict(r) for r in con.execute(
+        "SELECT rowid, filename, path, status, capture_ts, processed_at FROM images "
+        "WHERE processed_at IS NOT NULL ORDER BY processed_at DESC LIMIT 5")]
+    for r in recent5:
+        r["shoot_date"] = _shoot_date(r["path"], r["capture_ts"])
+    next5 = [dict(r) for r in con.execute(
+        "SELECT rowid, filename, path, capture_ts FROM images "
+        "WHERE status='pending' ORDER BY filename ASC LIMIT 5")]
+    for r in next5:
+        r["shoot_date"] = _shoot_date(r["path"], r["capture_ts"])
 
     con.close()
     runs = _active_runs()
@@ -481,6 +512,8 @@ def api_monitor():
         "attention": attention[:40],
         "attention_more": max(0, len(attention) - 40),
         "last_processed": last_processed,
+        "recent5": recent5,
+        "next5": next5,
     })
 
 
