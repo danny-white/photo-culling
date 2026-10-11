@@ -81,6 +81,67 @@ class MobileApi(unittest.TestCase):
         self.assertTrue(all(f["decision"] is None for s in st for f in s["frames"]))
         self.assertNotIn("path", st[0]["frames"][0])            # library paths stay on the server
 
+    H = {"X-Culling-Bay": "1"}
+
+    def frames(self):
+        body = self.client.get(f"/m/api/day/{DAY}").get_json()
+        return {f["file"]: f for s in body["stacks"] for f in s["frames"]}, body
+
+    def test_writes_need_the_header(self):
+        r = self.client.post("/m/api/decide", json={"action_id": "x", "day": DAY, "changes": []})
+        self.assertEqual(r.status_code, 403)
+        r = self.client.post("/m/api/decide", data="{}", headers=self.H)   # not JSON
+        self.assertEqual(r.status_code, 403)
+
+    def test_decide_replay_and_undo(self):
+        fr, _ = self.frames()
+        a, b = fr["DSC05049.ARW"]["id"], fr["DSC05050.ARW"]["id"]
+        note = "Burst reject \u00b7 kept DSC05050"
+        body = {"action_id": "t-keep", "day": DAY, "label": "Kept DSC05050",
+                "changes": [{"id": b, "flag": "pick", "via": "card"},
+                            {"id": a, "flag": "reject", "note": note, "via": "card"}]}
+        self.assertTrue(self.client.post("/m/api/decide", json=body, headers=self.H).get_json()["ok"])
+        self.assertTrue(self.client.post("/m/api/decide", json=body, headers=self.H).get_json()["replay"])
+        fr, _ = self.frames()
+        self.assertEqual(fr["DSC05049.ARW"]["decision"]["flag"], "reject")
+        self.assertEqual(fr["DSC05049.ARW"]["decision"]["note"], note)
+        self.assertEqual(fr["DSC05050.ARW"]["decision"]["state"], "draft")
+        # a second action over the first, then undo it: back to the first action's rows exactly
+        body2 = {"action_id": "t-rescue", "day": DAY, "label": "Rescued",
+                 "changes": [{"id": a, "flag": "pick", "via": "rescue"}]}
+        self.client.post("/m/api/decide", json=body2, headers=self.H)
+        self.assertEqual(self.frames()[0]["DSC05049.ARW"]["decision"]["flag"], "pick")
+        self.client.post("/m/api/undo", json={"action_id": "t-rescue"}, headers=self.H)
+        self.assertEqual(self.frames()[0]["DSC05049.ARW"]["decision"]["note"], note)
+        self.client.post("/m/api/undo", json={"action_id": "t-keep"}, headers=self.H)
+        fr, _ = self.frames()
+        self.assertIsNone(fr["DSC05049.ARW"]["decision"])
+        self.assertIsNone(fr["DSC05050.ARW"]["decision"])
+
+    def test_decide_rejects_bad_input(self):
+        fr, _ = self.frames()
+        x = fr["DSC05061.ARW"]["id"]
+        bad = [{"id": x, "flag": "maybe", "via": "card"}, {"id": x, "flag": "pick", "via": "nope"},
+               {"id": 10 ** 9, "flag": "pick", "via": "card"}]
+        for c in bad:
+            r = self.client.post("/m/api/decide", json={"action_id": "bad", "day": DAY, "changes": [c]}, headers=self.H)
+            self.assertEqual(r.status_code, 400, c)
+        r = self.client.post("/m/api/decide", json={"action_id": "bad2", "day": "2026/other", "changes": [
+            {"id": x, "flag": "pick", "via": "card"}]}, headers=self.H)
+        self.assertEqual(r.status_code, 400)
+
+    def test_progress(self):
+        r = self.client.put(f"/m/api/day/{DAY}/progress", json={"pass": 2, "cursor": 5}, headers=self.H)
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.frames()[1]["progress"], {"pass": 2, "cursor": 5})
+        self.assertEqual(self.client.put(f"/m/api/day/{DAY}/progress", json={"pass": 3, "cursor": 0},
+                                         headers=self.H).status_code, 400)
+
+    def test_details_for_the_sheet(self):
+        f = self.frames()[0]["DSC05036.ARW"]
+        self.assertTrue(f["caption"])
+        self.assertIn("lens", f)
+
     def test_unknown_day(self):
         self.assertEqual(self.client.get("/m/api/day/2026/nope").status_code, 404)
 

@@ -6,13 +6,14 @@ review server already owns. Stack rules live in stacks.py.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
 import sqlite3
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +56,24 @@ CREATE TABLE IF NOT EXISTS cull_days(
 
 ROW_COLS = ("rowid, path, filename, capture_ts, camera, sharpness, exposure_flag, mean_lum, "
             "blown_pct, phash")
+DETAIL_COLS = "rowid, lens, caption, blown_pct, mean_lum"
+FLAGS = ("pick", "reject", "none")
+VIAS = ("sweep", "card", "burst", "rescue")
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def guarded(fn):
+    """Writes need a JSON body and the X-Culling-Bay header. A cross-site page can send neither
+    without a CORS preflight, which this server never answers."""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        if request.headers.get("X-Culling-Bay") != "1" or not request.is_json:
+            return jsonify({"error": "missing X-Culling-Bay header or JSON body"}), 403
+        return fn(*a, **kw)
+    return wrapper
 
 
 def day_of(path: str) -> str | None:
@@ -213,6 +232,14 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             ds = con.execute("SELECT * FROM cull_days WHERE day=?", (day,)).fetchone()
         finally:
             con.close()
+        ids = [f["id"] for s in day_stacks for f in s["frames"]]
+        con = db_ro()
+        try:
+            q = ",".join("?" * len(ids))
+            details = {r["rowid"]: dict(r) for r in con.execute(
+                f"SELECT {DETAIL_COLS} FROM images WHERE rowid IN ({q})", ids)}
+        finally:
+            con.close()
         for i, s in enumerate(day_stacks):
             s["id"] = i
             s.pop("pano_candidate", None)
@@ -220,11 +247,113 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 d = dec.get(f.pop("path"))
                 f["decision"] = ({k: d[k] for k in ("flag", "stars", "note", "state", "outcome")}
                                  if d else None)
+                det = details.get(f["id"], {})
+                f["lens"] = det.get("lens")
+                f["caption"] = det.get("caption")
+                f["blown_pct"] = det.get("blown_pct")
+                f["mean_lum"] = det.get("mean_lum")
         return jsonify({
             "day": day, "folder": day.rsplit("/", 1)[-1], "date": day_date(day),
             "stacks": day_stacks,
             "progress": {"pass": ds["pass"], "cursor": ds["cursor"]} if ds else None,
         })
+
+    # ---------------------------------------------------------------- routes: writes
+    def paths_for(ids: list[int]) -> dict[int, str]:
+        con = db_ro()
+        try:
+            q = ",".join("?" * len(ids))
+            return {r["rowid"]: r["path"] for r in con.execute(
+                f"SELECT rowid, path FROM images WHERE rowid IN ({q})", ids)}
+        finally:
+            con.close()
+
+    @bp.route("/api/decide", methods=["POST"])
+    @guarded
+    def api_decide():
+        """One tap: {action_id, day, label, changes: [{id, flag, stars?, note?, via}]}. The
+        rows as they were go into cull_actions, so undo is exact. A repeated action_id (a retry
+        after a dropped response) is acknowledged and ignored."""
+        body = request.get_json()
+        action_id, day, changes = body.get("action_id"), body.get("day"), body.get("changes") or []
+        if not action_id or not day or not changes:
+            return jsonify({"error": "action_id, day and changes are required"}), 400
+        for c in changes:
+            if c.get("flag") not in FLAGS or c.get("via") not in VIAS or not isinstance(c.get("id"), int):
+                return jsonify({"error": f"bad change: {c}"}), 400
+        paths = paths_for([c["id"] for c in changes])
+        if len(paths) != len({c["id"] for c in changes}) or any(day_of(p) != day for p in paths.values()):
+            return jsonify({"error": "unknown frame, or a frame from another day"}), 400
+        with lock:
+            con = anno_db()
+            try:
+                if con.execute("SELECT 1 FROM cull_actions WHERE action_id=?", (action_id,)).fetchone():
+                    return jsonify({"ok": True, "replay": True})
+                q = ",".join("?" * len(paths))
+                before = {r["path"]: dict(r) for r in con.execute(
+                    f"SELECT * FROM cull_decisions WHERE path IN ({q})", list(paths.values()))}
+                at = now_iso()
+                con.execute("INSERT INTO cull_actions(action_id, day, at, label, before) VALUES (?,?,?,?,?)",
+                            (action_id, day, at, body.get("label") or "",
+                             json.dumps({p: before.get(p) for p in paths.values()})))
+                for c in changes:
+                    stars = c.get("stars") if c["flag"] == "pick" else None
+                    con.execute(
+                        """INSERT INTO cull_decisions(path, day, flag, stars, note, via, decided_at, state)
+                           VALUES (?,?,?,?,?,?,?,'draft')
+                           ON CONFLICT(path) DO UPDATE SET flag=excluded.flag, stars=excluded.stars,
+                             note=excluded.note, via=excluded.via, decided_at=excluded.decided_at,
+                             state='draft', outcome=NULL""",
+                        (paths[c["id"]], day, c["flag"], stars, c.get("note") or "", c["via"], at))
+                con.commit()
+            finally:
+                con.close()
+        return jsonify({"ok": True})
+
+    @bp.route("/api/undo", methods=["POST"])
+    @guarded
+    def api_undo():
+        action_id = (request.get_json() or {}).get("action_id")
+        with lock:
+            con = anno_db()
+            try:
+                a = con.execute("SELECT * FROM cull_actions WHERE action_id=?", (action_id,)).fetchone()
+                if not a:
+                    return jsonify({"error": "unknown action"}), 404
+                if a["undone"]:
+                    return jsonify({"ok": True, "replay": True})
+                for path, row in json.loads(a["before"]).items():
+                    if row is None:
+                        con.execute("DELETE FROM cull_decisions WHERE path=?", (path,))
+                    else:
+                        cols = list(row)
+                        con.execute(
+                            f"INSERT OR REPLACE INTO cull_decisions({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                            [row[c] for c in cols])
+                con.execute("UPDATE cull_actions SET undone=1 WHERE action_id=?", (action_id,))
+                con.commit()
+            finally:
+                con.close()
+        return jsonify({"ok": True})
+
+    @bp.route("/api/day/<path:day>/progress", methods=["PUT"])
+    @guarded
+    def api_progress(day):
+        body = request.get_json()
+        p, cur = body.get("pass"), body.get("cursor")
+        if p not in (1, 2) or not isinstance(cur, int):
+            return jsonify({"error": "pass (1 or 2) and cursor are required"}), 400
+        con = anno_db()
+        try:
+            con.execute(
+                """INSERT INTO cull_days(day, pass, cursor, finished_at) VALUES (?,?,?,?)
+                   ON CONFLICT(day) DO UPDATE SET pass=excluded.pass, cursor=excluded.cursor,
+                     finished_at=COALESCE(excluded.finished_at, cull_days.finished_at)""",
+                (day, p, cur, now_iso() if body.get("finished") else None))
+            con.commit()
+        finally:
+            con.close()
+        return jsonify({"ok": True})
 
     @bp.route("/api/img/<int:rowid>")
     def api_img(rowid):
