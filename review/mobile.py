@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import io
 import json
+import mimetypes
 import re
 import sqlite3
 import threading
@@ -17,13 +19,19 @@ from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
-from flask import Blueprint, abort, jsonify, request, send_file, send_from_directory
+from flask import Blueprint, Response, abort, jsonify, request, send_file, send_from_directory
+from PIL import Image, ImageOps
 
 import stacks
+
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 LIBRARY_ROOT = "/mnt/passport/Pictures"
 IMG_EDGE = {"thumb": 320, "view": 1616}   # 1616 = the embedded preview's full width
 DAYS_TTL_S = 30
+CROP_MAX = 2400          # longest side of a crop, in source pixels
+FULL_CACHE_FRAMES = 4    # full decodes kept in memory (~130 MB each for 42 MP)
+DECODES_AT_ONCE = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cull_decisions(
@@ -102,6 +110,31 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     pano_file = state_dir / "pano.json"
     lock = threading.Lock()
     cache = {"days": None, "days_at": 0.0, "days_key": None}
+    full_cache: dict[str, Image.Image] = {}          # path -> full-resolution decode, oldest first
+    full_lock = threading.Lock()
+    decode_slots = threading.Semaphore(DECODES_AT_ONCE)
+
+    def full_decode(path: str) -> Image.Image:
+        """The whole frame at full resolution, upright. RAWs go through a full rawpy decode
+        (about 1.2 s for a 42 MP ARW); anything else is opened directly."""
+        with full_lock:
+            im = full_cache.pop(path, None)
+            if im is not None:
+                full_cache[path] = im                 # most recently used goes last
+                return im
+        with decode_slots:
+            src = Path(path)
+            if src.suffix.lower() in stacks.RAW_EXTENSIONS:
+                import rawpy
+                with rawpy.imread(str(src)) as raw:
+                    im = Image.fromarray(raw.postprocess(use_camera_wb=True))
+            else:
+                im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
+        with full_lock:
+            full_cache[path] = im
+            while len(full_cache) > FULL_CACHE_FRAMES:
+                full_cache.pop(next(iter(full_cache)))
+        return im
 
     def anno_db() -> sqlite3.Connection:
         con = anno()
@@ -354,6 +387,40 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         finally:
             con.close()
         return jsonify({"ok": True})
+
+    @bp.route("/api/crop/<int:rowid>")
+    def api_crop(rowid):
+        """A 1:1 crop from the full RAW: centre (x, y) as fractions of the upright frame, size
+        (w, h) in source pixels, each at most CROP_MAX."""
+        try:
+            x, y = float(request.args["x"]), float(request.args["y"])
+            w = max(64, min(CROP_MAX, int(request.args.get("w", 1200))))
+            h = max(64, min(CROP_MAX, int(request.args.get("h", 1200))))
+        except (KeyError, ValueError):
+            return jsonify({"error": "x and y are required"}), 400
+        con = db_ro()
+        try:
+            r = con.execute("SELECT path FROM images WHERE rowid=?", (rowid,)).fetchone()
+        finally:
+            con.close()
+        if not r:
+            return jsonify({"error": "not found"}), 404
+        try:
+            im = full_decode(r["path"])
+        except Exception as e:
+            return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
+        W, H = im.size
+        w, h = min(w, W), min(h, H)
+        cx = min(max(x, 0.0), 1.0) * W
+        cy = min(max(y, 0.0), 1.0) * H
+        left = int(min(max(cx - w / 2, 0), W - w))
+        top_ = int(min(max(cy - h / 2, 0), H - h))
+        buf = io.BytesIO()
+        im.crop((left, top_, left + w, top_ + h)).save(buf, "JPEG", quality=88)
+        resp = Response(buf.getvalue(), mimetype="image/jpeg")
+        resp.headers["Cache-Control"] = "max-age=3600"
+        resp.headers["X-Crop-Box"] = f"{left},{top_},{w},{h} of {W}x{H}"
+        return resp
 
     @bp.route("/api/img/<int:rowid>")
     def api_img(rowid):

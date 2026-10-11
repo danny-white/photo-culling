@@ -142,6 +142,25 @@ class MobileApi(unittest.TestCase):
         self.assertTrue(f["caption"])
         self.assertIn("lens", f)
 
+    def test_crop(self):
+        import time
+        from PIL import Image
+        fid = self.frames()[0]["DSC05036.ARW"]["id"]
+        t = time.time()
+        r = self.client.get(f"/m/api/crop/{fid}?x=0.5&y=0.5&w=800&h=600")
+        first = time.time() - t
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(Image.open(io.BytesIO(r.data)).size, (800, 600))
+        self.assertTrue(r.headers["X-Crop-Box"].endswith("of 7968x5320"))
+        r.close()
+        t = time.time()
+        r = self.client.get(f"/m/api/crop/{fid}?x=1&y=0&w=5000&h=400")   # clamped to the corner
+        second = time.time() - t
+        self.assertTrue(r.headers["X-Crop-Box"].startswith("5568,0,2400,400"), r.headers["X-Crop-Box"])
+        r.close()
+        self.assertLess(second, first / 2, f"second crop should reuse the decode ({first:.2f}s, {second:.2f}s)")
+        self.assertEqual(self.client.get(f"/m/api/crop/{fid}").status_code, 400)
+
     def test_unknown_day(self):
         self.assertEqual(self.client.get("/m/api/day/2026/nope").status_code, 404)
 

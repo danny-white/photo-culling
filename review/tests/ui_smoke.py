@@ -173,6 +173,24 @@ def main():
         h = wd.js("return document.querySelector('.card').getBoundingClientRect().height")
         check(h > 150, f"card is laid out: {h:.0f} px tall")
         shot("3-card")
+        # double-tap: a 1:1 crop from the RAW, then back
+        r = wd.js("const b=document.querySelector('.card img').getBoundingClientRect(); return [b.x+b.width*0.3, b.y+b.height*0.6];")
+        tapx, tapy = int(r[0]), int(r[1])
+        tapping = [{"type": "pointerMove", "duration": 0, "x": tapx, "y": tapy}, {"type": "pointerDown", "button": 0},
+                   {"type": "pointerUp", "button": 0}, {"type": "pause", "duration": 80},
+                   {"type": "pointerDown", "button": 0}, {"type": "pointerUp", "button": 0}]
+        wd.s("POST", "/actions", {"actions": [{"type": "pointer", "id": "tapper", "parameters": {"pointerType": "mouse"}, "actions": tapping}]})
+        wd.wait("document.querySelector('#fz')")
+        t0 = time.time()
+        loaded("#fz img")
+        crop = wd.js("const i=document.querySelector('#fz img'); return [i.naturalWidth, i.naturalHeight, decodeURIComponent(i.src)];")
+        q = dict(kv.split("=") for kv in crop[2].split("?")[1].split("&"))
+        check(crop[0] > 400 and abs(float(q["x"]) - 0.3) < 0.02 and abs(float(q["y"]) - 0.6) < 0.02,
+              f"focus crop {crop[0]}x{crop[1]} at the tapped spot in {time.time() - t0:.1f}s: " + crop[2].split("?")[1])
+        shot("3b-focus")
+        wd.click('[data-act="close-focus"]')
+        wd.wait("document.querySelector('.card')")
+
         wd.click('[data-act="keep"]')
         wd.wait("document.querySelector('#toast').textContent.includes('Kept')")
         check("3 rejected with a note" in wd.text("#toast"), "keep frame: " + wd.text("#toast"))
@@ -226,6 +244,9 @@ def main():
         wd.click(".sm-th")
         wd.wait(f"document.querySelectorAll('.sm-th').length === {n - 1}")
         check(True, f"rescue: {n} -> {n - 1} rejects")
+        for asset, kind in (("manifest.webmanifest", "manifest+json"), ("sw.js", "javascript"), ("apple-touch-icon.png", "image/png")):
+            with urllib.request.urlopen(app + asset) as resp:
+                check(kind in resp.headers.get("Content-Type", ""), f"{asset} served as {resp.headers.get('Content-Type')}")
 
         # everything reached the server: reload and compare
         wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
