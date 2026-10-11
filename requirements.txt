@@ -10,3 +10,5 @@ rawpy>=0.24        # LibRaw bindings: reads ARW/CR3/NEF/RAF/... embedded preview
 imagehash>=4.3     # perceptual hash for near-duplicate / burst detection
 ExifRead>=3.0      # capture time + lens read straight from RAW (for burst grouping)
 Flask>=3.0         # local review + run-monitor web app (review/server.py)
+onnxruntime>=1.20  # CLIP picture embeddings on the CPU (photo_cull.py embed-images; model in models/, see CLIP_DIR)
+tokenizers>=0.20   # CLIP's text half, for typed searches against the pictures

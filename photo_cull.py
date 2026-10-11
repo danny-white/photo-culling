@@ -44,6 +44,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -789,6 +790,77 @@ def pack_vector(vec) -> bytes:
 
 def unpack_vector(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32)
+
+
+# ----------------------------------------------------------------------------
+# Picture search: CLIP embeddings of the images themselves, next to the caption vectors above.
+# Captions answer "what is it"; pictures answer "what does it look like" (framing, colour, light),
+# and a typed query lands in the same space, so the two can be ranked together.
+# ----------------------------------------------------------------------------
+
+CLIP_MODEL = "ViT-B-32__openai"   # Immich's ONNX export of OpenAI CLIP: huggingface.co/immich-app/ViT-B-32__openai
+CLIP_DIR = Path(__file__).resolve().parent / "models" / CLIP_MODEL   # visual/ and textual/, ~600 MB, not in git
+CLIP_VERSION = f"clip:{CLIP_MODEL}:v1"   # embed_version of its rows in `embeddings`
+
+
+class Clip:
+    """Both halves of CLIP on the CPU via onnxruntime: image() for a picture, text() for a typed
+    query, each a unit 512-d vector. A half loads on first use (~1 s); runs are thread-safe."""
+
+    def __init__(self, model_dir: Path = CLIP_DIR, threads: int = 0):
+        self.dir, self.threads = Path(model_dir), threads
+        self._vis = self._txt = None
+        self._lock = threading.Lock()
+
+    def _session(self, part: str):
+        import onnxruntime as ort
+        so = ort.SessionOptions()
+        if self.threads:
+            so.intra_op_num_threads = self.threads
+        return ort.InferenceSession(str(self.dir / part / "model.onnx"), so, providers=["CPUExecutionProvider"])
+
+    def _visual(self):
+        with self._lock:
+            if self._vis is None:
+                cfg = json.loads((self.dir / "visual" / "preprocess_cfg.json").read_text())
+                size = cfg["size"][0] if isinstance(cfg["size"], list) else cfg["size"]
+                self._vis = (self._session("visual"), size,
+                             np.array(cfg["mean"], np.float32), np.array(cfg["std"], np.float32))
+        return self._vis
+
+    def _textual(self):
+        with self._lock:
+            if self._txt is None:
+                from tokenizers import Tokenizer
+                cfg = json.loads((self.dir / "textual" / "tokenizer_config.json").read_text())
+                tok = Tokenizer.from_file(str(self.dir / "textual" / "tokenizer.json"))
+                n = cfg.get("model_max_length", 77)
+                tok.enable_truncation(max_length=n)
+                tok.enable_padding(length=n, pad_token=cfg["pad_token"], pad_id=tok.token_to_id(cfg["pad_token"]))
+                self._txt = (self._session("textual"), tok)
+        return self._txt
+
+    @staticmethod
+    def _unit(v) -> np.ndarray:
+        v = np.asarray(v, np.float32).reshape(-1)
+        return v / (np.linalg.norm(v) or 1)
+
+    def image(self, im: Image.Image) -> np.ndarray:
+        """CLIP's own preprocessing: shortest side to the model size, bicubic, centre crop."""
+        sess, size, mean, std = self._visual()
+        im = im.convert("RGB")
+        w, h = im.size
+        s = size / min(w, h)
+        im = im.resize((max(size, round(w * s)), max(size, round(h * s))), Image.BICUBIC)
+        w, h = im.size
+        left, top = (w - size) // 2, (h - size) // 2
+        a = (np.asarray(im.crop((left, top, left + size, top + size)), np.float32) / 255 - mean) / std
+        return self._unit(sess.run(None, {sess.get_inputs()[0].name: a.transpose(2, 0, 1)[None]})[0])
+
+    def text(self, query: str) -> np.ndarray:
+        sess, tok = self._textual()
+        ids = np.array([tok.encode(query).ids], np.int32)
+        return self._unit(sess.run(None, {sess.get_inputs()[0].name: ids})[0])
 
 
 # ----------------------------------------------------------------------------
@@ -1708,6 +1780,73 @@ def cmd_embed(args):
         sys.exit(1)
 
 
+def cmd_embed_images(args):
+    """CLIP picture embeddings for each `ok` image into `embeddings` (embed_version CLIP_VERSION),
+    for Culling Bay's More like this and typed searches matched against the pictures. Reads each
+    photo's embedded preview as `run` does, a few at a time (the NAS read is the slow part, ~0.1 s a
+    photo); the model takes ~30 ms on the CPU. Resumable: skips photos already embedded. Newest first."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    if not (CLIP_DIR / "visual" / "model.onnx").exists():
+        sys.exit(f"No CLIP model at {CLIP_DIR}. Download visual/ and textual/ from "
+                 f"https://huggingface.co/immich-app/{CLIP_MODEL}")
+    from concurrent.futures import ThreadPoolExecutor
+    conn = connect(args.db)
+    folders = [Path(f).resolve() for f in args.folder] if args.folder else None
+    done_paths = {r["path"] for r in conn.execute(
+        "SELECT path FROM embeddings WHERE embed_version=?", (CLIP_VERSION,))}
+    paths = [r["path"] for r in conn.execute("SELECT path FROM images WHERE status='ok' ORDER BY path DESC")
+             if r["path"] not in done_paths]
+    if folders:
+        paths = [p for p in paths if any(_is_under(Path(p), f) for f in folders)]
+    if args.limit:
+        paths = paths[: args.limit]
+    if not paths:
+        print(f"Nothing to embed (all ok images already at {CLIP_VERSION}).")
+        return
+    print(f"Embedding {len(paths)} picture(s) with CLIP {CLIP_MODEL} ({args.workers} readers) -> embeddings.")
+    clip = Clip(threads=args.threads)
+
+    def load(p):
+        try:
+            im = load_source(Path(p))
+            im.thumbnail((448, 448))   # CLIP sees 224 px; keep a margin for the centre crop
+            return p, im, None
+        except Exception as e:  # noqa: BLE001
+            return p, None, e
+
+    done = errs = 0
+    t0 = time.time()
+    chunk = 64   # read ahead a chunk at a time, so loaded previews never pile up in memory
+    with ThreadPoolExecutor(args.workers) as ex:
+        for start in range(0, len(paths), chunk):
+            for p, im, err in ex.map(load, paths[start:start + chunk]):
+                if err is None:
+                    try:
+                        vec = clip.image(im)
+                    except Exception as e:  # noqa: BLE001
+                        err = e
+                if err is not None:
+                    errs += 1
+                    print(f"{Path(p).name:24s} -> ERROR {_exc_text(err)[:70]}")
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO embeddings(path, embed_version, model, dims, vector, created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (p, CLIP_VERSION, CLIP_MODEL, len(vec), pack_vector(vec),
+                     datetime.now(timezone.utc).isoformat(timespec="seconds")))
+                done += 1
+            conn.commit()
+            n = min(start + chunk, len(paths))
+            if n % 1024 == 0 or n == len(paths):
+                elapsed = time.time() - t0
+                print(f"[{n}/{len(paths)}] embedded  ({elapsed / n * 1000:.0f}ms/img, "
+                      f"ETA {_fmt_eta(elapsed / n * (len(paths) - n))})", flush=True)
+    print(f"\nDone: {done} ok / {errs} error in {_fmt_eta(time.time() - t0)}.")
+    if errs:   # non-zero, so the ingest watcher logs "embed-images FAILED"
+        sys.exit(1)
+
+
 # ----------------------------------------------------------------------------
 # Geotags: GPS from EXIF, and an offline place name from GeoNames
 # ----------------------------------------------------------------------------
@@ -2084,6 +2223,15 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("--force", action="store_true",
                     help="Re-embed paths already at the current EMBED_VERSION too (default: skip them).")
     em.set_defaults(func=cmd_embed)
+
+    ei = sub.add_parser("embed-images", help="CLIP-embed each ok image's picture into `embeddings`, for "
+                        "Culling Bay's More like this and searches matched against the pictures.")
+    ei.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    ei.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    ei.add_argument("--limit", type=int, help="Embed at most N images.")
+    ei.add_argument("--workers", type=int, default=4, help="Photos read from disk at once (default 4).")
+    ei.add_argument("--threads", type=int, default=4, help="CPU threads for the model (default 4).")
+    ei.set_defaults(func=cmd_embed_images)
 
     gt = sub.add_parser("geotag", help="Read GPS from EXIF and name the nearest town (offline, "
                         "GeoNames) into gps_lat/gps_lon/place, for Culling Bay's places.")

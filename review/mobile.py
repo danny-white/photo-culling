@@ -25,6 +25,7 @@ import numpy as np
 from flask import Blueprint, Response, abort, jsonify, request, send_file, send_from_directory
 from PIL import Image, ImageOps
 
+import search
 import stacks
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
@@ -149,6 +150,15 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     full_cache: dict[str, Image.Image] = {}          # path -> full-resolution decode, oldest first
     full_lock = threading.Lock()
     decode_slots = threading.Semaphore(DECODES_AT_ONCE)
+    finder = search.Search(db_ro=db_ro, pc=pc, day_of=day_of, day_date=day_date, ollama_url=ollama_url,
+                           library_root=LIBRARY_ROOT)
+
+    def warm():   # the first search would otherwise wait a few seconds for the vectors to load
+        try:
+            finder.index()
+        except Exception:  # noqa: BLE001 - a search will try again, and report what is wrong
+            pass
+    threading.Thread(target=warm, daemon=True).start()
 
     def full_decode(path: str) -> Image.Image:
         """The whole frame at full resolution, upright. RAWs go through a full rawpy decode
@@ -465,6 +475,23 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                             finished=bool(ds.get("finished_at")), sent_at=ds.get("sent_at")))
         return jsonify({"days": out})
 
+    @bp.route("/api/search")
+    def api_search():
+        """Days to review for a query: by words, places, dates, caption meaning and picture
+        meaning (review/search.py). Each day comes with its matching photo ids."""
+        q = request.args.get("q", "").strip()[:200]
+        if not q:
+            return jsonify({"error": "missing q"}), 400
+        return jsonify(finder.search(q))
+
+    @bp.route("/api/like/<int:rowid>")
+    def api_like(rowid):
+        """More like this: other days with photos like this one."""
+        out = finder.like(rowid)
+        if out is None:
+            return jsonify({"error": "no such photo"}), 404
+        return jsonify(out)
+
     @bp.route("/api/day/<path:day>")
     def api_day(day):
         ingest_receipts()
@@ -766,6 +793,10 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 "SELECT COUNT(*) FROM images i WHERE status='ok' AND COALESCE(processed_at, '') < ? AND NOT EXISTS "
                 "(SELECT 1 FROM embeddings e WHERE e.path = i.path AND e.embed_version = ?)",
                 (cutoff, pc.EMBED_VERSION)).fetchone()[0]
+            nopic = con.execute(
+                "SELECT COUNT(*) FROM images i WHERE status='ok' AND COALESCE(processed_at, '') < ? AND NOT EXISTS "
+                "(SELECT 1 FROM embeddings e WHERE e.path = i.path AND e.embed_version = ?)",
+                (cutoff, pc.CLIP_VERSION)).fetchone()[0]
             ungeo = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND gps_checked IS NULL "
                                 "AND COALESCE(processed_at, '') < ?", (cutoff,)).fetchone()[0]
             folders: dict[str, str] = {}
@@ -796,6 +827,13 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             alert("bad" if unindexed >= 200 else "warn", f"{unindexed:,} photos not searchable",
                   "They have no search embedding.",
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py embed --db trial_out/trial.db")
+        if not (pc.CLIP_DIR / "visual" / "model.onnx").exists():
+            alert("warn", "Picture search model missing", f"No CLIP model in {pc.CLIP_DIR}, so More like this "
+                  "and searches by what's in a picture are off.",
+                  f"Download visual/ and textual/ from huggingface.co/immich-app/{pc.CLIP_MODEL}")
+        elif nopic:
+            alert("warn", f"{nopic:,} photos without picture search", "They have no picture embedding yet.",
+                  "cd ~/photo-culling && ./venv/bin/python photo_cull.py embed-images --db trial_out/trial.db")
         if ungeo:
             alert("warn", f"{ungeo:,} photos not geotagged", "Their GPS and nearest town were never read.",
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py geotag --db trial_out/trial.db")
@@ -840,7 +878,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             folder = (re.search(r" for (\S+)", msg) or [None, ""])[1]
             recent.append({"at": at.isoformat(timespec="seconds"), "step": step, "folder": folder, "what": msg[:160]})
         for r in recent:
-            r["resolved"] = {"embed": not unindexed, "geotag": not ungeo, "daysum": not unsummed,
+            r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "geotag": not ungeo, "daysum": not unsummed,
                              "inbox": check_mount and not mount}.get(
                 r["step"], bool(r["folder"]) and done_after.get(r["folder"], "") > r["at"])
         for step in ("run", "export"):
@@ -851,7 +889,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         status = "bad" if any(a["level"] == "bad" for a in alerts) else "warn" if alerts else "ok"
         return jsonify({
             "status": status, "alerts": alerts, "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "index": {"ok": ok, "unindexed": unindexed, "ungeotagged": ungeo, "unsummarised": len(unsummed),
+            "index": {"ok": ok, "unindexed": unindexed, "no_picture": nopic, "ungeotagged": ungeo, "unsummarised": len(unsummed),
                       "days": len(folders), "caption_errors": errored},
             "model": model, "last_ingest": last, "recent": recent[-8:],
         })

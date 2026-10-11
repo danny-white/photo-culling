@@ -19,3 +19,6 @@ review/cache/
 
 # OS cruft
 .DS_Store
+
+# CLIP model files (~600 MB), downloaded from huggingface.co/immich-app/ViT-B-32__openai
+models/

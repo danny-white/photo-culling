@@ -84,6 +84,12 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
         log "embed FAILED for $folder (non-fatal, continuing)"
     fi
 
+    # Best-effort picture embeddings (CLIP, CPU), for Culling Bay's More like this and searches
+    # by what is in a picture. Not fatal; `embed-images` with no --folder backfills.
+    if ! ./venv/bin/python photo_cull.py embed-images --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
+        log "embed-images FAILED for $folder (non-fatal, continuing)"
+    fi
+
     # Best-effort GPS + nearest town, for Culling Bay Mobile's places. Not fatal either.
     if ! ./venv/bin/python photo_cull.py geotag --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
         log "geotag FAILED for $folder (non-fatal, continuing)"

@@ -90,7 +90,7 @@ let progressT;
 function saveProgress(finished) {
   if (!S.day) return;
   clearTimeout(progressT);
-  const day = S.day.day, body = { pass: S.pass, cursor: S.cursor, finished: !!finished };
+  const st = S.stacks[S.cursor], day = S.day.day, body = { pass: S.pass, cursor: st ? st.id : 0, finished: !!finished };
   progressT = setTimeout(() => send('PUT', '/m/api/day/' + dayPath(day) + '/progress', body), finished ? 0 : 600);
 }
 window.addEventListener('online', pump);
@@ -258,6 +258,7 @@ function openSheet() {
     (d && d.note ? '<p class="sh-why">Lightroom note: ' + esc(d.note) + '</p>' : '') +
     (f.caption ? '<p class="sh-cap">“' + esc(f.caption) + '”</p>' : '') +
     '<p class="sh-muted">The AI’s caption. Its keep, review and reject verdicts stay off the phone.</p>' +
+    '<button class="pb2" data-act="like" data-id="' + f.id + '" data-name="' + esc(stem(f.file)) + '">More like this: days with similar photos</button>' +
     '<button class="pb2" data-act="close-sheet">Close</button></div>';
   const el = $('#sheet');
   el.innerHTML = html;
@@ -335,8 +336,8 @@ function stLine(s, st) {
 }
 
 /* ---------------------------------------------------------------- views */
-const top = (left, title, sub, right) =>
-  '<div class="top">' + left + '<div class="t">' + esc(title) + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</div>' + (right || '<span class="sp"></span>') + '</div>' +
+const top = (left, title, sub, right, subHtml) =>
+  '<div class="top">' + left + '<div class="t">' + esc(title) + (sub ? '<small>' + esc(sub) + '</small>' : subHtml ? '<small>' + subHtml + '</small>' : '') + '</div>' + (right || '<span class="sp"></span>') + '</div>' +
   '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>';
 const backBtn = (act, label) => '<button class="tbtn" data-act="' + act + '">' + IC.back + '<span>' + label + '</span></button>';
 
@@ -351,22 +352,29 @@ const town = p => (p ? p.split(', ').slice(0, 2).join(', ') : '');
 const regionOf = p => { const parts = p.split(', '); return parts.length > 1 ? parts.slice(1).join(', ') : p; };
 const lrCulled = d => !d.decided && !d.finished && d.stacks && d.lr_done >= d.stacks;
 
-function dayRow(d) {
+// A shoot under 48 hours old is marked as resting: a nudge to cull it with fresh eyes, never a block.
+const resting = d => !d.decided && !d.finished && d.last_ts && Date.now() / 1000 - d.last_ts < 48 * 3600;
+function dayRow(d, hit) {   // hit: a search result for the day, {why, ids}
+  if (!hit || typeof hit !== 'object') hit = null;
   const pct = d.frames ? Math.round(d.decided / d.frames * 100) : 0;
   const tag = d.conflicts ? '<span class="tag warn">' + d.conflicts + ' conflict' + (d.conflicts > 1 ? 's' : '') + '</span>'
     : d.landed ? '<span class="tag quiet">Synced</span>'
     : d.sent_at ? '<span class="tag quiet">Sent</span>'
     : d.finished ? '<span class="tag quiet">Done</span>'
     : lrCulled(d) ? '<span class="tag quiet">In Lightroom</span>'
-    : d.decided ? '<span class="tag">' + pct + '%</span>' : '';
+    : d.decided ? '<span class="tag">' + pct + '%</span>'
+    : resting(d) ? '<span class="tag quiet" title="Shot in the last two days">Resting</span>' : '';
   const meta = [d.frames + ' frames', d.stacks + ' stacks'];
   if (d.lr_done && d.lr_done < d.stacks) meta.push(d.lr_done + ' done in Lightroom');
   if (!d.date) meta.push(d.day);
+  // a search hit shows its matching photos first, topped up from the day's own
+  const thumbs = hit && hit.ids.length ? hit.ids.concat(d.thumbs.filter(id => !hit.ids.includes(id))).slice(0, 3) : d.thumbs;
   return '<button class="day" data-act="open-day" data-day="' + esc(d.day) + '"><span class="mos">' +
-    d.thumbs.map(id => '<img src="' + img(id, 'thumb') + '" alt="" loading="lazy">').join('') + '</span>' +
+    thumbs.map(id => '<img src="' + img(id, 'thumb') + '" alt="" loading="lazy">').join('') + '</span>' +
     '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + esc(meta.join(' · ')) + '</span>' +
     (d.place ? '<span class="place">' + esc(town(d.place)) + '</span>' : '') +
-    (d.summary ? '<span class="dsum">' + d.summary.split('\n').map(esc).join('<br>') + '</span>' : '') +
+    (hit && hit.why ? '<span class="why">' + esc(hit.why) + '</span>'
+      : d.summary ? '<span class="dsum">' + d.summary.split('\n').map(esc).join('<br>') + '</span>' : '') +
     (d.decided ? '<span class="day-bar"><i style="width:' + pct + '%"></i></span>' : '') + '</span>' + tag + '</button>';
 }
 
@@ -384,7 +392,7 @@ function daysByDate(list, searching) {
     for (const d of days) { const m = d.date ? MONTHS[+d.date.slice(5, 7) - 1] : 'Other folders'; if (!months.includes(m)) months.push(m); }
     return head + months.map(m => {
       const md = days.filter(d => (d.date ? MONTHS[+d.date.slice(5, 7) - 1] : 'Other folders') === m);
-      return '<p class="sec">' + m + ' · ' + md.length + '</p>' + md.map(dayRow).join('');
+      return '<p class="sec">' + m + ' · ' + md.length + '</p>' + md.map(d => dayRow(d)).join('');
     }).join('');
   }).join('');
 }
@@ -395,19 +403,95 @@ function daysByPlace(list) {
   const unplaced = list.length - placed.length;
   return regions.map(r => {
     const rd = placed.filter(d => regionOf(d.place) === r);
-    return '<p class="sec">' + esc(r) + ' · ' + rd.length + '</p>' + rd.map(dayRow).join('');
+    return '<p class="sec">' + esc(r) + ' · ' + rd.length + '</p>' + rd.map(d => dayRow(d)).join('');
   }).join('') + '<p class="note">' + (placed.length ? '' : 'No locations yet. ') + unplaced + ' day' + (unplaced === 1 ? '' : 's') +
     ' without a location: GPS comes only from the Sony when it is paired with your phone, and from iPhone shots.</p>';
 }
 
+// On this day: unculled days from this week in earlier years, so the backlog comes back a few
+// days at a time.
+function onThisDay() {
+  const now = new Date(), md = Date.UTC(2000, now.getMonth(), now.getDate()), year = 366 * 864e5;
+  return S.days.filter(d => {
+    if (!d.date || +d.date.slice(0, 4) >= now.getFullYear() || d.decided || d.finished || lrCulled(d)) return false;
+    const diff = Math.abs(Date.UTC(2000, +d.date.slice(5, 7) - 1, +d.date.slice(8, 10)) - md);
+    return Math.min(diff, year - diff) <= 3 * 864e5;
+  }).slice(0, 4);
+}
 function dayListHTML() {
-  const q = S.daySearch.trim().toLowerCase();
-  const list = !q ? S.days : S.days.filter(d => [dayTitle(d), d.folder, d.day, (d.places || []).join(' '), d.summary || ''].join(' ').toLowerCase().includes(q));
-  const going = list.filter(d => d.decided && !d.finished);
-  const rest = list.filter(d => !(d.decided && !d.finished));
-  if (!list.length) return '<p class="note">No days match “' + esc(S.daySearch) + '”.</p>';
-  return (going.length ? '<p class="sec">In progress</p>' + going.map(dayRow).join('') : '') +
-    (S.dayView === 'place' ? daysByPlace(rest) : daysByDate(rest, !!q));
+  if (S.like || S.daySearch.trim()) return resultsHTML();
+  const going = S.days.filter(d => d.decided && !d.finished);
+  const rest = S.days.filter(d => !(d.decided && !d.finished));
+  const lane = onThisDay();
+  return (going.length ? '<p class="sec">In progress</p>' + going.map(d => dayRow(d)).join('') : '') +
+    (lane.length ? '<p class="sec">On this day · earlier years</p>' + lane.map(d => dayRow(d)).join('') : '') +
+    (S.dayView === 'place' ? daysByPlace(rest) : daysByDate(rest, false));
+}
+
+/* ---------------------------------------------------------------- search */
+// The box asks the server (review/search.py): words, places and dates, plus meaning from the
+// captions and from the pictures. Results are days, each with its matching photos, which open
+// first. More like this, from a photo's details, lists days with similar pictures.
+S.found = null;   // the last search answered: {q, days: [{day, n, ids, match_ids, why}], photos, signals, notes}
+S.like = null;    // {id, name, found} while showing More like this
+let searchT = 0, searchSeq = 0;
+function runSearch() {
+  clearTimeout(searchT);
+  const q = S.daySearch.trim();
+  if (q) searchT = setTimeout(async () => {
+    const seq = ++searchSeq;
+    let r;
+    try { r = await getJSON('/m/api/search?q=' + encodeURIComponent(q)); }
+    catch (e) { r = { days: [], photos: 0, signals: [], notes: ['Search failed: ' + e.message] }; }
+    if (seq !== searchSeq || S.daySearch.trim() !== q) return;
+    S.found = Object.assign(r, { q });
+    refreshDays();
+  }, 280);
+  refreshDays();
+}
+function refreshDays() {
+  const el = $('#days-list');
+  if (el) el.innerHTML = dayListHTML();
+  const x = $('#search-x');
+  if (x) x.hidden = !(S.daySearch || S.like);
+}
+const SIGNALS = { words: 'words', captions: 'captions', pictures: 'what’s in the pictures' };
+const andList = a => (a.length > 1 ? a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1] : a[0] || '');
+function hitsHTML(found, head) {
+  const byDay = {};
+  for (const d of S.days) byDay[d.day] = d;
+  const hits = found.days.filter(h => byDay[h.day]), n = hits.length;
+  const sig = (found.signals || []).filter(x => SIGNALS[x]).map(x => SIGNALS[x]);
+  return '<p class="rnote">' + head + (n ? n + ' day' + (n === 1 ? '' : 's') +
+      (found.photos ? ' · ' + found.photos.toLocaleString() + ' photo' + (found.photos === 1 ? '' : 's') : '') +
+      (sig.length ? ', by ' + andList(sig) : '') + '.' : 'No days match.') + '</p>' +
+    (found.notes || []).map(t => '<p class="note">' + esc(t) + '</p>').join('') +
+    hits.map(h => dayRow(byDay[h.day], h)).join('');
+}
+function resultsHTML() {
+  if (S.like) {
+    const head = '<b>More like this:</b> days with photos like ' + esc(S.like.name) + '. ';
+    return S.like.found ? hitsHTML(S.like.found, head) : '<p class="rnote">' + head + 'Looking…</p>';
+  }
+  const f = S.found;
+  if (!f) return '<p class="rnote">Searching…</p>';
+  return (f.q !== S.daySearch.trim() ? '<p class="rnote">Searching…</p>' : '') + hitsHTML(f, '');
+}
+async function showLike(id, name) {
+  closeSheet();
+  S.like = { id, name, found: null };
+  S.daySearch = ''; S.found = null;
+  showDays();
+  let r;
+  try { r = await getJSON('/m/api/like/' + id); }
+  catch (e) { r = { days: [], photos: 0, signals: [], notes: ['More like this failed: ' + e.message] }; }
+  if (S.like && S.like.id === id) { S.like.found = r; refreshDays(); }
+}
+function clearSearch() {
+  S.daySearch = ''; S.like = null; S.found = null;
+  const i = $('#day-search');
+  if (i) i.value = '';
+  refreshDays();
 }
 
 function vDays() {
@@ -416,7 +500,8 @@ function vDays() {
   for (const d of S.days) { const y = yearOf(d); if (!years.includes(y)) years.push(y); }
   return '<div class="head"><h1>Days</h1><span>mycloud · Pictures · ' + S.days.length + ' days</span></div>' +
     '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>' +
-    '<div class="dtools"><input class="search" id="day-search" type="search" placeholder="Search days: dates, places, what you shot" value="' + esc(S.daySearch) + '" autocomplete="off">' +
+    '<div class="dtools"><label class="sbox"><input class="search" id="day-search" type="search" placeholder="Search what, where, when" value="' + esc(S.daySearch) + '" autocomplete="off" enterkeyhint="search" aria-label="Search days">' +
+    '<button class="sx" id="search-x" data-act="q-clear" aria-label="Clear the search"' + (S.daySearch || S.like ? '' : ' hidden') + '>×</button></label>' +
     '<div class="seg" role="tablist"><button data-act="day-view" data-v="date" aria-selected="' + (S.dayView !== 'place') + '">Date</button>' +
     '<button data-act="day-view" data-v="place" aria-selected="' + (S.dayView === 'place') + '">Place</button></div></div>' +
     (S.dayView !== 'place' ? '<div class="yearbar">' + years.map(y => '<button data-act="jump-year" data-year="' + y + '">' + y + '</button>').join('') + '</div>' : '') +
@@ -461,9 +546,10 @@ function vCull() {
   const on = a => (pressed(a) ? ' on' : '');
   const ar = AR[f.id] || 1.5;
   const cls = 'card ' + (ar < 1 ? 'k-fill' : 'k-land') + (burst ? ' is-stack' : '') + (st.done ? ' st-' + st.v : '');
-  const left = n - doneCount();
-  return top(backBtn('days', 'Days'), dayTitle(S.day), left + (left === 1 ? ' stack' : ' stacks') + ' to go',
-      '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>') +
+  const left = n - doneCount(), togo = left + (left === 1 ? ' stack' : ' stacks') + ' to go';
+  return top(backBtn('days', 'Days'), dayTitle(S.day), S.matches ? '' : togo,
+      '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>',
+      S.matches ? '<button class="mchip" data-act="matches">' + S.matches.n + ' match' + (S.matches.n === 1 ? '' : 'es') + ' first</button> · ' + left + ' to go' : '') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' + budgetBar() +
     '<div class="stage" id="stage"><div class="' + cls + '"' + (ar < 1 ? '' : ' style="aspect-ratio:' + ar.toFixed(4) + '"') + '>' +
       photo(f, '<div class="tint"></div>' + stLine(s, st) + '<div class="badges">' + badges + '</div>' + chip + '<div class="stamp"><span>KEEP</span></div>') + '</div>' +
@@ -793,16 +879,23 @@ async function showDays() {
   catch (e) { S.screen = 'error'; S.error = 'Could not load days: ' + e.message; }
   if (S.screen === 'days' || S.screen === 'error') draw();
 }
-async function openDay(day) {
+async function openDay(day, match) {   // match: {ids, label} from a search, whose stacks go first
   S.screen = 'loading'; draw();
   let body;
   try { body = await getJSON('/m/api/day/' + dayPath(day)); }
   catch (e) { S.screen = 'error'; S.error = 'Could not load ' + day + ': ' + e.message; return draw(); }
-  S.day = body; S.stacks = body.stacks; S.dec = {}; S.hist = []; S.picker = null;
+  S.day = body; S.stacks = body.stacks; S.dec = {}; S.hist = []; S.picker = null; S.matches = null;
   for (const s of S.stacks) for (const f of s.frames) if (f.decision) S.dec[f.id] = f.decision;
+  if (match) {
+    const ids = new Set(match.ids), first = S.stacks.filter(s => s.frames.some(f => ids.has(f.id)));
+    if (first.length && first.length < S.stacks.length) {
+      S.stacks = first.concat(S.stacks.filter(s => !first.includes(s)));
+      S.matches = { n: first.length, label: match.label };
+    }
+  }
   const p = body.progress;
   S.pass = 2;                       // one pass now; the server still records pass and position
-  S.cursor = p ? Math.min(p.cursor, S.stacks.length - 1) : 0;
+  S.cursor = S.matches || !p ? 0 : Math.max(0, S.stacks.findIndex(s => s.id === p.cursor));
   const i = status(S.stacks[S.cursor]).done ? firstOpen(S.cursor) : S.cursor;
   if (i < 0) S.screen = 'summary'; else { S.cursor = i; S.screen = 'cull'; await loadShape(shown(S.stacks[i]).id, 1500); }
   const hash = '#/day/' + day;
@@ -883,7 +976,13 @@ document.addEventListener('click', e => {
   if (!b || b.disabled) return;
   const a = b.dataset.act, s = S.stacks[S.cursor];
   switch (a) {
-    case 'open-day': return openDay(b.dataset.day);
+    case 'open-day': {
+      const f = S.like ? S.like.found : S.daySearch.trim() ? S.found : null, h = f && f.days.find(x => x.day === b.dataset.day);
+      return openDay(b.dataset.day, h && h.match_ids.length ? { ids: h.match_ids, label: S.like ? 'photos like ' + S.like.name : '“' + S.daySearch.trim() + '”' } : null);
+    }
+    case 'q-clear': e.preventDefault(); return clearSearch();
+    case 'like': return showLike(+b.dataset.id, b.dataset.name);
+    case 'matches': return toast(S.matches.n + ' stack' + (S.matches.n === 1 ? '' : 's') + ' matched ' + S.matches.label + ', so they come first. The rest of the day follows.');
     case 'toggle-year': {
       const y = b.dataset.year;
       S.yearsOpen.has(y) ? S.yearsOpen.delete(y) : S.yearsOpen.add(y);
@@ -945,7 +1044,8 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   if (e.target.id !== 'day-search') return;
   S.daySearch = e.target.value;
-  $('#days-list').innerHTML = dayListHTML();
+  S.like = null;
+  runSearch();
 });
 document.addEventListener('keydown', e => {
   if (e.target.matches('input, textarea')) return;
