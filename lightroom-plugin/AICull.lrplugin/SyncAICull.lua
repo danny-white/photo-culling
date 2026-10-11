@@ -23,7 +23,9 @@
     * Color label and keywords: the AI's, applied as before.
 
   After a complete (uncanceled) run it writes applied/<time>-receipt.tsv, one outcome per row,
-  which Culling Bay reads back, and moves each input file to applied/<time>-<name>.
+  and applied/<time>-catalog.tsv, the flag and rating of every selected photo (so the phone can
+  show what you already culled here). Culling Bay reads both back. Each input file moves to
+  applied/<time>-<name>.
 ]]
 
 local LrApplication     = import 'LrApplication'
@@ -79,6 +81,35 @@ local function writeReceipt(dir, stamp, lines)
         out:write(Core.RECEIPT_HEADER, '\n', table.concat(lines, '\n'), #lines > 0 and '\n' or '')
         out:close()
         return dest
+    end)
+    if not ok then return false, tostring(result) end
+    return true, result
+end
+
+-- What Lightroom holds for every selected photo after the sync, for Culling Bay: which photos
+-- you have already flagged or rated there, so the phone can skip them. Virtual copies share their
+-- master's file and are left out.
+local function writeCatalog(catalog, photos, dir, stamp)
+    local ok, result = LrTasks.pcall(function()
+        local raw = catalog:batchGetRawMetadata(photos, { 'path', 'isVirtualCopy', 'pickStatus', 'rating' })
+        local props = catalog:batchGetPropertyForPlugin(photos, _PLUGIN, { 'cullFlag', 'cullStars' })
+        local lines = { Core.CATALOG_HEADER }
+        for _, photo in ipairs(photos) do
+            local r, p = raw[photo] or {}, props[photo] or {}
+            local folder, fname = (r.path or ''):match('([^/\\]+)[/\\]([^/\\]+)$')
+            if folder and not r.isVirtualCopy then
+                lines[#lines + 1] = Core.catalogLine(folder, fname, r.pickStatus, r.rating,
+                    tonumber(p.cullFlag), tonumber(p.cullStars))
+            end
+        end
+        local appliedDir = LrPathUtils.child(dir, 'applied')
+        LrFileUtils.createDirectory(appliedDir)
+        local dest = LrPathUtils.child(appliedDir, stamp .. '-catalog.tsv')
+        local out, werr = io.open(dest, 'wb')
+        if not out then error('open catalog file failed: ' .. tostring(werr)) end
+        out:write(table.concat(lines, '\n'), '\n')
+        out:close()
+        return #lines - 1
     end)
     if not ok then return false, tostring(result) end
     return true, result
@@ -384,6 +415,9 @@ local function runSync(context)
     if missing > 0 then
         notes[#notes + 1] = string.format('%d phone row(s) matched no selected photo; the receipt lists them.', missing)
     end
+    local cok, cinfo = writeCatalog(catalog, photos, dir, stamp)
+    notes[#notes + 1] = cok and string.format('Flags and ratings of %d photo(s) sent back to Culling Bay.', cinfo)
+        or ('Could not write the catalog file for Culling Bay: ' .. tostring(cinfo))
     LrDialogs.message('AI Cull Sync complete', summary .. '\n\n' .. table.concat(notes, '\n'))
 end
 

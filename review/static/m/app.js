@@ -102,13 +102,25 @@ function shown(s) {   // the frame a card shows: the kept one, else the lead
   if (s.frames.length === 1) return s.frames[0];
   return s.frames.find(f => isPick(S.dec[f.id])) || leadOf(s);
 }
+// A flag you set in Lightroom by hand (reported back by the plugin's catalog file). Flags the
+// plugin set from the phone come back as by 'phone' and are already in S.dec.
+const lrMark = f => (f.lr && f.lr.by === 'you' && f.lr.pick ? (f.lr.pick === 1 ? 'pick' : 'reject') : null);
+const LR_WORD = { pick: 'Picked in Lightroom', reject: 'Rejected in Lightroom' };
 function status(s) {
   const ds = s.frames.map(f => S.dec[f.id]);
   const kept = ds.find(isPick);
-  if (kept) return { done: true, v: ds.some(d => isPick(d) && d.stars === 5) ? 'hero' : 'keep' };
-  if (ds.every(d => d && d.flag === 'reject')) return { done: true, v: 'reject' };
+  if (kept) return { done: true, v: ds.some(d => isPick(d) && d.stars === 5) ? 'hero' : 'keep', src: 'phone' };
+  if (ds.every(d => d && d.flag === 'reject')) return { done: true, v: 'reject', src: 'phone' };
+  const lr = s.frames.map(lrMark);
+  if (lr.includes('pick')) return { done: true, v: 'keep', src: 'lr' };
+  if (lr.every(m => m === 'reject')) return { done: true, v: 'reject', src: 'lr' };
   return { done: false };
 }
+// How many of these changes disagree with a flag you set in Lightroom (that flag will win).
+function lrClashes(changes) {
+  return changes.filter(c => { const m = lrMark(frameById(c.id)); return m && c.flag !== 'none' && m !== c.flag; }).length;
+}
+const clashNote = n => (n ? ' · Lightroom keeps your own flag on ' + (n > 1 ? n + ' of them' : 'it') : '');
 const firstOpen = (from = 0) => {
   const n = S.stacks.length;
   for (let k = 0; k < n; k++) { const i = (from + k) % n; if (!status(S.stacks[i]).done) return i; }
@@ -116,6 +128,7 @@ const firstOpen = (from = 0) => {
 };
 const markOf = f => (S.dec[f.id] ? S.dec[f.id].flag : 'none');
 const doneCount = () => S.stacks.filter(s => status(s).done).length;
+const lrDone = () => S.stacks.filter(s => status(s).src === 'lr').length;
 function dayTitle(d) {
   if (!d.date) return d.folder;
   const [y, m, dd] = d.date.split('-').map(Number);
@@ -152,7 +165,7 @@ function commit(label, changes) {
   act(label, changes);
   S.picker = null;
   closeSheet();
-  toast(label, true);
+  toast(label + clashNote(lrClashes(changes)), true);
   advance();
 }
 function advance() {
@@ -205,6 +218,12 @@ function openSheet() {
   }
   if (f.badges.includes('Blown')) lines.push('Blown: ' + Math.round(f.blown_pct) + '% of the pixels are pure white.');
   if (f.badges.includes('Dark')) lines.push('Dark: mean brightness ' + Math.round(f.mean_lum) + ' of 255.');
+  if (f.lr && (f.lr.pick || f.lr.rating)) {
+    const bits = [];
+    if (f.lr.pick) bits.push((f.lr.pick === 1 ? 'picked' : 'rejected') + (f.lr.by === 'you' ? ' by you' : ' from the phone'));
+    if (f.lr.rating) bits.push(f.lr.rating + ' star' + (f.lr.rating > 1 ? 's' : '') + (f.lr.stars_by === 'you' ? ' by you' : ' from the phone'));
+    lines.push('In Lightroom at the last sync: ' + bits.join(', ') + '.');
+  }
   if (s.kind === 'bracket') lines.push('Looks like an exposure bracket: dark, normal and bright frames together. Keep all to merge it in Lightroom.');
   if (s.kind === 'pano') lines.push('The frames slide one way, like a panorama, so Keep all is suggested.');
   const html = '<div class="sheet" role="dialog" aria-label="Photo details"><div class="sh-grab"></div>' +
@@ -233,22 +252,25 @@ function vDays() {
   const row = d => {
     const pct = d.frames ? Math.round(d.decided / d.frames * 100) : 0;
     const tag = d.conflicts ? '<span class="tag warn">' + d.conflicts + ' conflict' + (d.conflicts > 1 ? 's' : '') + '</span>'
-      : d.landed ? '<span class="tag quiet">In Lightroom</span>'
+      : d.landed ? '<span class="tag quiet">Synced</span>'
       : d.sent_at ? '<span class="tag quiet">Sent</span>'
       : d.finished ? '<span class="tag quiet">Done</span>'
       : d.decided ? '<span class="tag">' + pct + '%</span>' : '';
     return '<button class="day" data-act="open-day" data-day="' + esc(d.day) + '"><span class="mos">' +
       d.thumbs.map(id => '<img src="' + img(id, 'thumb') + '" alt="" loading="lazy">').join('') + '</span>' +
-      '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + d.frames + ' frames · ' + d.stacks + ' stacks' + (d.date ? '' : ' · ' + esc(d.day)) + '</span>' +
+      '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + d.frames + ' frames · ' + d.stacks + ' stacks' + (d.date ? '' : ' · ' + esc(d.day)) +
+      (d.lr_done && d.lr_done < d.stacks ? ' · ' + d.lr_done + ' culled in Lightroom' : '') + '</span>' +
       (d.decided ? '<span class="day-bar"><i style="width:' + pct + '%"></i></span>' : '') + '</span>' + tag + '</button>';
   };
+  const inLr = d => !d.decided && !d.finished && d.stacks && d.lr_done >= d.stacks;
   const going = S.days.filter(d => d.decided && !d.finished);
-  const fresh = S.days.filter(d => !d.decided && !d.finished);
+  const fresh = S.days.filter(d => !d.decided && !d.finished && !inLr(d));
   const done = S.days.filter(d => d.finished);
+  const lrDays = S.days.filter(inLr);
   const sec = (title, list) => list.length ? '<p class="sec">' + title + '</p>' + list.map(row).join('') : '';
   return '<div class="head"><h1>Days</h1><span>mycloud · Pictures · ' + S.days.length + ' days</span></div>' +
     '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>' +
-    '<div class="scroll">' + sec('In progress', going) + sec('Not started', fresh) + sec('Finished', done) + '</div>';
+    '<div class="scroll">' + sec('In progress', going) + sec('Not started', fresh) + sec('Finished', done) + sec('Culled in Lightroom', lrDays) + '</div>';
 }
 
 function vLoading(msg) { return top(backBtn('days', 'Days'), 'Culling Bay') + '<div class="empty-state">' + esc(msg) + '</div>'; }
@@ -257,7 +279,7 @@ const sweepLabel = () => S.sweepSel.size ? 'Reject ' + S.sweepSel.size + ', star
 function vSweep() {
   const tile = (s, i) => {
     const f = leadOf(s), st = status(s), on = S.sweepSel.has(i), multi = s.frames.length > 1;
-    const bd = s.kind === 'bracket' ? 'Bracket' : s.kind === 'pano' ? 'Panorama' : (f.badges[0] || '');
+    const bd = st.src === 'lr' ? 'In Lightroom' : s.kind === 'bracket' ? 'Bracket' : s.kind === 'pano' ? 'Panorama' : (f.badges[0] || '');
     const what = (multi ? 'burst of ' + s.frames.length + ' led by ' : '') + stem(f.file);
     return '<button class="sw-t' + (on ? ' on' : '') + (st.done ? ' done' : '') + '" data-act="sweep-tick" data-i="' + i + '" aria-pressed="' + on + '" aria-label="' +
       esc(st.done ? what + ', already decided' : 'Reject ' + what) + '"' + (st.done ? ' disabled' : '') + '>' +
@@ -267,20 +289,23 @@ function vSweep() {
   };
   return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 1 · tap the misses') +
     '<div class="scroll"><div class="sw-grid">' + S.stacks.map(tile).join('') + '</div>' +
-    '<p class="note">' + S.stacks.length + ' stacks in shot order, nothing pre-selected. A burst tile rejects the whole burst. Press and hold a tile to see it large.</p></div>' +
+    '<p class="note">' + S.stacks.length + ' stacks in shot order, nothing pre-selected' + (lrDone() ? '; ' + lrDone() + ' already culled in Lightroom are greyed out' : '') +
+    '. A burst tile rejects the whole burst. Press and hold a tile to see it large.</p></div>' +
     '<div class="foot"><button class="pb2 pri" data-act="sweep-done">' + sweepLabel() + '</button></div>';
 }
 
 function vCull() {
   const s = S.stacks[S.cursor], f = shown(s), st = status(s), n = S.stacks.length;
   const burst = s.frames.length > 1, sugg = s.kind === 'pano' || s.kind === 'bracket';
-  const pill = st.done ? '<span class="pill p-' + st.v + '">' + ({ keep: 'Kept', hero: 'Hero', reject: 'Rejected' })[st.v] + '</span>' : '';
+  const pill = !st.done ? '' : st.src === 'lr' ? '<span class="pill p-lr p-' + st.v + '">' + (st.v === 'reject' ? LR_WORD.reject : LR_WORD.pick) + '</span>'
+    : '<span class="pill p-' + st.v + '">' + ({ keep: 'Kept', hero: 'Hero', reject: 'Rejected' })[st.v] + '</span>';
+  const lrHere = st.src !== 'lr' && lrMark(f) ? '<span class="bd bd-lr">' + LR_WORD[lrMark(f)] + '</span>' : '';
   const chip = burst ? '<button class="chip" data-act="picker" aria-label="Open burst of ' + s.frames.length + '">' + IC.stack + '<span>' + s.frames.length + '</span></button>'
     : f.partners.length ? '<span class="chip static">RAW + ' + esc(f.partners.map(p => p.split('.').pop().toUpperCase()).join(' + ')) + '</span>' : '';
   const badges = (s.kind === 'pano' ? '<span class="bd bd-dot">Looks like a panorama</span>'
     : s.kind === 'bracket' ? '<span class="bd bd-dot">Looks like a bracket</span>'
     : burst && f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') +
-    f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('');
+    f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + lrHere;
   const strip = burst ? '<button class="strip" data-act="picker">' + s.frames.slice(0, 6).map(x =>
       '<img src="' + img(x.id, 'thumb') + '" alt="" class="m-' + markOf(x) + '">').join('') +
       (s.frames.length > 6 ? '<span class="more">+' + (s.frames.length - 6) + '</span>' : '') + '<span class="strip-l">Choose</span></button>'
@@ -305,7 +330,8 @@ function vStrip() {
   const n = pk.sel.size;
   return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, 'Tick the keepers') +
     '<div class="pk-main" id="pk-main"><div class="pk-frame"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) + '" draggable="false">' +
-      '<div class="pk-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + '</div>' +
+      '<div class="pk-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') +
+        (lrMark(f) ? '<span class="bd bd-lr">' + LR_WORD[lrMark(f)] + '</span>' : '') + '</div>' +
       '<button class="pk-tick' + (on ? ' on' : '') + '" data-act="tick" aria-pressed="' + on + '" aria-label="Keep ' + esc(f.file) + '">' + IC.check + '</button>' +
       '<span class="pk-id">' + esc(stem(f.file)) + ' · ' + (pk.view + 1) + '/' + fr.length + '</span></div></div>' +
     '<div class="pk-strip">' + fr.map((x, i) => '<button class="pk-th' + (i === pk.view ? ' cur' : '') + '" data-act="view" data-i="' + i + '" aria-label="Show ' + esc(x.file) + '">' +
@@ -396,14 +422,19 @@ function closeFocus() {
 function vSummary() {
   let keep = 0, hero = 0, rej = 0, none = 0;
   const all = S.stacks.flatMap(s => s.frames);
+  const inLr = new Set(S.stacks.filter(s => status(s).src === 'lr').flatMap(s => s.frames.map(f => f.id)));
   for (const f of all) {
     const d = S.dec[f.id];
-    if (!d || d.flag === 'none') none++;
+    if (!d || d.flag === 'none') { if (!inLr.has(f.id)) none++; }
     else if (d.flag === 'reject') rej++;
     else if (d.stars === 5) hero++;
     else keep++;
   }
-  const rejects = all.filter(f => S.dec[f.id] && S.dec[f.id].flag === 'reject');
+  const rejects = all.filter(f => S.dec[f.id] && S.dec[f.id].flag === 'reject' && S.dec[f.id].state !== 'conflict');
+  const won = all.filter(f => S.dec[f.id] && S.dec[f.id].state === 'conflict');
+  const wonGrid = '<div class="sm-grid">' + won.map(f => '<div class="sm-th won" title="' + esc(f.file) + '"><img src="' + img(f.id, 'thumb') + '" alt="" loading="lazy">' +
+    '<span class="sm-lab">' + esc(lrMark(f) ? (lrMark(f) === 'pick' ? 'Picked in LR' : 'Rejected in LR') : 'Kept as you set it') + '</span></div>').join('') + '</div>';
+  const skipped = lrDone();
   const fromBurst = rejects.filter(f => S.dec[f.id].note), outright = rejects.filter(f => !S.dec[f.id].note);
   const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="rescue" data-id="' + f.id + '" aria-label="Rescue ' + esc(f.file) + '">' +
     '<img src="' + img(f.id, 'thumb') + '" alt="" loading="lazy"><b>' + IC.x + '</b></button>').join('') + '</div>';
@@ -415,12 +446,14 @@ function vSummary() {
   if (landed) lr.push(landed + ' in Lightroom');
   if (queued) lr.push(queued + ' waiting for the next Sync AI Cull Data');
   if (by('missing')) lr.push(by('missing') + ' not found in the last sync, will go again');
-  if (conflicts) lr.push(conflicts + ' left alone: you had flagged ' + (conflicts > 1 ? 'them' : 'it') + ' yourself');
+  if (skipped) lr.push(skipped + ' stack' + (skipped > 1 ? 's were' : ' was') + ' already culled in Lightroom and skipped');
   const sendLabel = unsent ? 'Send ' + unsent + ' to Lightroom' : queued ? 'Waiting for Lightroom' : landed ? 'In Lightroom' : 'Send to Lightroom';
   return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far') +
     '<div class="scroll"><div class="counts"><div><b>' + keep + '</b><span>Kept</span></div><div><b>' + hero + '</b><span>Hero</span></div>' +
       '<div><b>' + rej + '</b><span>Rejected</span></div><div><b>' + none + '</b><span>Unflagged</span></div></div>' +
       (lr.length ? '<p class="sec">Lightroom</p>' + lr.map(t => '<p class="note">' + esc(t) + '</p>').join('') : '') +
+      (won.length ? '<p class="sec">Your Lightroom flag won</p>' + wonGrid +
+        '<p class="note">The phone said otherwise, but you had flagged ' + (won.length > 1 ? 'these' : 'this') + ' in Lightroom yourself, so Lightroom kept your flag. Change it there if the phone was right.</p>' : '') +
       (rejects.length ? (fromBurst.length ? '<p class="sec">From bursts · similar frame kept</p>' + grid(fromBurst) : '') +
         (outright.length ? '<p class="sec">Rejected outright</p>' + grid(outright) : '') + '<p class="note">Tap a frame to rescue it.</p>'
         : '<p class="note">No rejects today.</p>') + '</div>' +
@@ -591,7 +624,8 @@ async function openDay(day) {
   const p = body.progress, any = Object.keys(S.dec).length > 0;
   S.pass = p ? p.pass : (any ? 2 : 1);
   S.cursor = p ? Math.min(p.cursor, S.stacks.length - 1) : 0;
-  if (S.pass === 1) S.screen = 'sweep';
+  if (firstOpen(0) < 0) S.screen = 'summary';
+  else if (S.pass === 1) S.screen = 'sweep';
   else {
     const i = status(S.stacks[S.cursor] || {}).done ? firstOpen(S.cursor) : S.cursor;
     if (i < 0) S.screen = 'summary'; else { S.cursor = i; S.screen = 'cull'; }
@@ -679,8 +713,9 @@ document.addEventListener('click', e => {
     case 'back-cull': { const i = firstOpen(S.cursor); if (i >= 0) S.cursor = i; S.screen = 'cull'; return draw(); }
     case 'rescue': {
       const f = frameById(+b.dataset.id);
-      act('Rescued ' + stem(f.file), [{ id: f.id, flag: 'pick', note: '', via: 'rescue' }], { screen: 'summary' });
-      toast('Rescued ' + stem(f.file), true);
+      const change = [{ id: f.id, flag: 'pick', note: '', via: 'rescue' }];
+      act('Rescued ' + stem(f.file), change, { screen: 'summary' });
+      toast('Rescued ' + stem(f.file) + clashNote(lrClashes(change)), true);
       return draw();
     }
     case 'send': return sendDay(b);

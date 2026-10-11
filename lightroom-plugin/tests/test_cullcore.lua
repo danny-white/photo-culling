@@ -140,6 +140,11 @@ do
 end
 
 eq('receipt line', C.receiptLine('f', 'x.ARW', 'applied'), 'f\tx.ARW\tapplied\t')
+eq('catalog: your pick', C.catalogLine('f', 'x.ARW', 1, nil, nil, nil), 'f\tx.ARW\t1\t0\tyou\t')
+eq('catalog: phone reject', C.catalogLine('f', 'x.ARW', -1, 0, -1, nil), 'f\tx.ARW\t-1\t0\tphone\t')
+eq('catalog: you changed a phone flag', C.catalogLine('f', 'x.ARW', 1, 0, -1, nil), 'f\tx.ARW\t1\t0\tyou\t')
+eq('catalog: phone hero', C.catalogLine('f', 'x.ARW', 1, 5, 1, 5), 'f\tx.ARW\t1\t5\tphone\tphone')
+eq('catalog: unflagged, your stars', C.catalogLine('f', 'x.ARW', 0, 3, nil, nil), 'f\tx.ARW\t0\t3\t\tyou')
 
 print(string.format('%d passed, %d failed', passed, failed))
 os.exit(failed == 0 and 0 or 1)

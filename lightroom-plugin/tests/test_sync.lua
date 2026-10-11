@@ -76,6 +76,20 @@ eq('receipt: NOTREAL missing', r1['NOTREAL.ARW missing'], true)
 eq('inputs moved out of the inbox', exists(inbox .. '/pending.tsv') or exists(inbox .. '/cull-decisions.tsv'), false)
 eq('pending.tsv kept in applied/', exists(inbox .. '/applied/20261010-120001-pending.tsv'), true)
 eq('decisions kept in applied/', exists(inbox .. '/applied/20261010-120001-cull-decisions.tsv'), true)
+local cat, catRows = {}, 0
+for line in io.lines(inbox .. '/applied/20261010-120001-catalog.tsv') do
+    if line:sub(1, 1) ~= '#' then
+        catRows = catRows + 1
+        local _, fname, rest = line:match('^([^\t]*)\t([^\t]*)\t(.*)$')
+        cat[fname] = rest
+    end
+end
+eq('catalog: one row per photo, virtual copy left out', catRows, 7)
+eq('catalog: your own pick', cat['DSC05038.ARW'], '1\t0\tyou\t')
+eq('catalog: a phone reject', cat['DSC05036.ARW'], '-1\t0\tphone\t')
+eq('catalog: phone hero', cat['DSC05037.ARW'], '1\t5\tphone\tphone')
+eq('catalog: phone pick, your stars', cat['DSC05040.ARW'], '1\t2\tphone\tyou')
+eq('catalog: untouched', cat['DSC05041.ARW'], '0\t0\t\t')
 
 -- your edits between the runs, then run 2: pick cull-decisions.tsv this time
 Fp.caption = Fp.caption .. ' Extra words.'

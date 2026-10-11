@@ -33,7 +33,7 @@ INBOX = Path("/mnt/Passport_AICullInbox")          # the narrow rw mount the wat
 INBOX_SOURCE = "//mycloud/Passport/AICullInbox"     # ...and must come from this share (as in watch_ingest.sh)
 DECISIONS_FILE = "cull-decisions.tsv"
 DECISIONS_HEADER = "#cull-decisions v1"
-RECEIPT_RE = re.compile(r"^(\d{8}-\d{6})-receipt\.tsv$")
+RECEIPT_RE = re.compile(r"^(\d{8}-\d{6})-(receipt|catalog)\.tsv$")   # the plugin's two report files
 LOST_AFTER = timedelta(seconds=60)                   # sent this long before a receipt that lacks it
 IMG_EDGE = {"thumb": 320, "view": 1616}   # 1616 = the embedded preview's full width
 DAYS_TTL_S = 30
@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS cull_receipts(
   name    TEXT PRIMARY KEY,
   read_at TEXT,
   rows    INTEGER);
+CREATE TABLE IF NOT EXISTS lr_state(      -- what Lightroom held at the last sync that covered the photo
+  path     TEXT PRIMARY KEY,
+  day      TEXT NOT NULL,
+  pick     INTEGER NOT NULL,            -- 1 picked, 0 unflagged, -1 rejected
+  rating   INTEGER NOT NULL,
+  flag_by  TEXT NOT NULL,               -- 'you' (by hand), 'phone' (the plugin, from a Send), ''
+  stars_by TEXT NOT NULL,
+  seen_at  TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS lr_state_day ON lr_state(day);
 """
 
 ROW_COLS = ("rowid, path, filename, capture_ts, camera, sharpness, exposure_flag, mean_lum, "
@@ -272,6 +281,34 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                         [(at, d["path"]) for d in decisions])
         return len(lines)
 
+    def library_keys() -> dict[tuple, str]:
+        """(shoot folder, file name) -> library path: how the plugin's rows map back to files."""
+        con = db_ro()
+        try:
+            return {(Path(r["path"]).parent.name, r["filename"]): r["path"]
+                    for r in con.execute("SELECT path, filename FROM images")}
+        finally:
+            con.close()
+
+    def ingest_catalog(con, path: Path, by_key: dict) -> int:
+        """Upsert lr_state from a catalog file. Photos the sync didn't cover keep their old row."""
+        at, rows = now_iso(), []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if not line or line.startswith("#") or len(parts) < 6:
+                continue
+            lib = by_key.get((parts[0], parts[1]))
+            d = day_of(lib) if lib else None
+            if not d:
+                continue
+            try:
+                rows.append((lib, d, int(parts[2]), int(parts[3]), parts[4], parts[5], at))
+            except ValueError:
+                continue
+        con.executemany("INSERT OR REPLACE INTO lr_state(path, day, pick, rating, flag_by, stars_by, seen_at) "
+                        "VALUES (?,?,?,?,?,?,?)", rows)
+        return len(rows)
+
     def ingest_receipts() -> None:
         """Read receipts the plugin left in applied/ since last time. Each queued decision becomes
         landed, conflict (your own flag kept) or missing (not in the selection; sent again next
@@ -286,8 +323,16 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 seen = {r["name"] for r in con.execute("SELECT name FROM cull_receipts")}
                 fresh = sorted(p for p in applied.iterdir() if RECEIPT_RE.match(p.name) and p.name not in seen)
                 lost: dict[str, dict] = {}
+                by_key = None
                 for rp in fresh:
-                    stamp = datetime.strptime(RECEIPT_RE.match(rp.name)[1], "%Y%m%d-%H%M%S")
+                    m = RECEIPT_RE.match(rp.name)
+                    if m[2] == "catalog":
+                        if by_key is None:
+                            by_key = library_keys()
+                        n = ingest_catalog(con, rp, by_key)
+                        con.execute("INSERT INTO cull_receipts(name, read_at, rows) VALUES (?,?,?)", (rp.name, now_iso(), n))
+                        continue
+                    stamp = datetime.strptime(m[1], "%Y%m%d-%H%M%S")
                     outcomes: dict[tuple, dict] = {}
                     for line in rp.read_text(encoding="utf-8").splitlines():
                         parts = line.split("\t")
@@ -338,8 +383,10 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         if cache["days"] is None or now - cache["days_at"] > DAYS_TTL_S:
             by_day = library_rows()
             summary = []
+            stack_paths = {}
             for d, rows in by_day.items():
                 st = stacks.build_stacks(rows)
+                stack_paths[d] = [[f["path"] for f in s["frames"]] for s in st]
                 lead_ids = [s["lead"] for s in st]
                 summary.append({
                     "day": d, "folder": d.rsplit("/", 1)[-1], "date": day_date(d),
@@ -349,20 +396,25 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                     "last_ts": max((r["capture_ts"] or 0) for r in rows),
                 })
             summary.sort(key=lambda x: (x["date"] or "", x["last_ts"]), reverse=True)
-            cache.update(days=summary, days_at=now)
+            cache.update(days=summary, days_at=now, stack_paths=stack_paths)
         con = anno_db()
         try:
             decided = {r["day"]: (r["n"], r["sent"], r["landed"], r["conflicts"]) for r in con.execute(
                 "SELECT day, COUNT(*) n, SUM(state!='draft') sent, SUM(state='landed') landed, "
                 "SUM(state='conflict') conflicts FROM cull_decisions GROUP BY day")}
             days_state = {r["day"]: dict(r) for r in con.execute("SELECT * FROM cull_days")}
+            lr = {r["path"]: r["pick"] for r in con.execute(
+                "SELECT path, pick FROM lr_state WHERE flag_by='you' AND pick != 0")}
         finally:
             con.close()
         out = []
         for d in cache["days"]:
             n, sent, landed, conflicts = decided.get(d["day"], (0, 0, 0, 0))
             ds = days_state.get(d["day"], {})
-            out.append(dict(d, decided=n, sent=sent, landed=landed, conflicts=conflicts,
+            # a stack is culled in Lightroom when you picked a frame there, or rejected all of them
+            lr_done = sum(1 for paths in cache["stack_paths"].get(d["day"], [])
+                          if any(lr.get(p) == 1 for p in paths) or all(lr.get(p) == -1 for p in paths)) if lr else 0
+            out.append(dict(d, decided=n, sent=sent, landed=landed, conflicts=conflicts, lr_done=lr_done,
                             finished=bool(ds.get("finished_at")), sent_at=ds.get("sent_at")))
         return jsonify({"days": out})
 
@@ -381,6 +433,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             dec = {r["path"]: dict(r) for r in con.execute(
                 f"SELECT path, flag, stars, note, state, outcome FROM cull_decisions WHERE path IN ({q})", paths)}
             ds = con.execute("SELECT * FROM cull_days WHERE day=?", (day,)).fetchone()
+            lr = {r["path"]: dict(r) for r in con.execute(
+                "SELECT path, pick, rating, flag_by, stars_by FROM lr_state WHERE day=?", (day,))}
         finally:
             con.close()
         ids = [f["id"] for s in day_stacks for f in s["frames"]]
@@ -395,7 +449,11 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             s["id"] = i
             s.pop("pano_candidate", None)
             for f in s["frames"]:
-                d = dec.get(f.pop("path"))
+                path = f.pop("path")
+                l = lr.get(path)
+                f["lr"] = ({"pick": l["pick"], "rating": l["rating"], "by": l["flag_by"], "stars_by": l["stars_by"]}
+                           if l else None)
+                d = dec.get(path)
                 f["decision"] = ({k: d[k] for k in ("flag", "stars", "note", "state", "outcome")}
                                  if d else None)
                 det = details.get(f["id"], {})

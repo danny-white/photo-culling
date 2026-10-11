@@ -45,6 +45,10 @@ button{font:inherit;color:inherit}
 .p-keep{background:var(--keep);color:#05140C}
 .p-hero{background:var(--hint);color:#1A1200}
 .p-reject{background:var(--reject);color:#fff}
+.p-lr{background:rgba(0,0,0,.62)}
+.p-lr.p-keep{color:var(--keep);box-shadow:inset 0 0 0 1.5px var(--keep)}
+.p-lr.p-reject{color:var(--reject);box-shadow:inset 0 0 0 1.5px var(--reject)}
+.bd-lr{color:#fff;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.55)}
 .chip{position:absolute;right:8px;bottom:8px;display:flex;align-items:center;gap:5px;font:700 12px/1 var(--body);padding:7px 10px;border-radius:999px;border:0;background:rgba(0,0,0,.62);color:#fff;cursor:pointer;transition:opacity .2s}
 .chip svg{width:15px;height:15px}
 .chip.static{cursor:default;font-weight:600;font-family:var(--mono);font-size:10px}
@@ -158,6 +162,9 @@ button{font:inherit;color:inherit}
 .sm-th img{width:100%;height:100%;object-fit:cover;opacity:.55;display:block}
 .sm-th b{position:absolute;right:3px;top:3px;width:17px;height:17px;border-radius:50%;background:var(--reject);color:#fff;display:grid;place-items:center}
 .sm-th b svg{width:10px;height:10px}
+.sm-th.won{cursor:default}
+.sm-th.won img{opacity:.8}
+.sm-lab{position:absolute;left:3px;right:3px;bottom:3px;font:600 9.5px/1.2 var(--body);padding:2px 4px;border-radius:4px;background:rgba(0,0,0,.7);text-align:center}
 .note{font-size:13px;color:var(--muted);margin:12px 4px}
 
 /* sheet and toast */

@@ -40,7 +40,7 @@ The kit is staged on the inbox share at `/Volumes/Passport/AICullInbox/plugin-v2
 | DSC05040 | Pick, still **2** stars |
 | DSC05041 | Caption `TEST AI: F one.` |
 | Collections | Smart collection **Burst rejects, similar kept** holds DSC05036 only |
-| Final dialog | 1 phone row matched no photo (`NOTREAL.ARW`); a receipt in `run1/applied/` |
+| Final dialog | 1 phone row matched no photo (`NOTREAL.ARW`); flags and ratings of 32 photos sent back to Culling Bay; a receipt and a catalog file in `run1/applied/` |
 
 ## Between runs
 

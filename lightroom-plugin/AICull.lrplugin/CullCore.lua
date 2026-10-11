@@ -10,6 +10,7 @@ M.AI_FILE          = 'pending.tsv'
 M.DECISIONS_FILE   = 'cull-decisions.tsv'
 M.DECISIONS_HEADER = '#cull-decisions v1'
 M.RECEIPT_HEADER   = '#cull-receipt v1'
+M.CATALOG_HEADER   = '#cull-catalog v1'
 M.NOTE_PREFIX      = 'Burst reject \194\183 kept '   -- "Burst reject · kept " (UTF-8 middle dot)
 
 -- Stored in the hidden aiCaption field once a caption is settled as yours (you kept it at the
@@ -150,6 +151,20 @@ M.decideStars = decide
 
 function M.receiptLine(folder, fname, outcome, detail)
     return table.concat({ folder, fname, outcome, detail or '' }, '\t')
+end
+
+--[[
+  catalogLine(folder, fname, pick, rating, mineFlag, mineStars): one row of the catalog file the
+  plugin leaves after every sync, so Culling Bay can show what is already flagged in Lightroom.
+    folder \t file \t pickStatus \t rating \t flagBy \t starsBy
+  flagBy/starsBy: 'phone' when the value is the one this plugin set from a phone decision,
+  'you' when it was set some other way (by hand), '' when there is none.
+]]
+function M.catalogLine(folder, fname, pick, rating, mineFlag, mineStars)
+    pick, rating = pick or 0, rating or 0
+    local flagBy = pick ~= 0 and (mineFlag == pick and 'phone' or 'you') or ''
+    local starsBy = rating ~= 0 and (mineStars == rating and 'phone' or 'you') or ''
+    return table.concat({ folder, fname, tostring(pick), tostring(rating), flagBy, starsBy }, '\t')
 end
 
 return M

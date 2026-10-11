@@ -31,7 +31,10 @@ APP_PORT, WD_PORT = 8765, 4444
 
 
 def start_app(tmp: Path):
-    (tmp / "inbox").mkdir(exist_ok=True)
+    (tmp / "inbox" / "applied").mkdir(parents=True, exist_ok=True)
+    # what the plugin would report from a Lightroom sync: two stacks you already picked by hand
+    (tmp / "inbox" / "applied" / "19990101-000000-catalog.tsv").write_text(
+        "#cull-catalog v1\n2026-10-01\tDSC05062.ARW\t1\t0\tyou\t\n2026-10-01\tDSC05066.ARW\t1\t3\tyou\tyou\n")
     from flask import Flask
     from werkzeug.serving import make_server
     import mobile
@@ -157,12 +160,15 @@ def main():
         loaded(".sw-t img")
         tiles = wd.js("return document.querySelectorAll('.sw-t').length")
         check(tiles > 5, f"sweep grid: {tiles} tiles")
+        greyed = wd.js("return [...document.querySelectorAll('.sw-t.done')].map(t => t.textContent)")
+        check(greyed == ["In Lightroom", "3In Lightroom"] and "2 already culled in Lightroom" in wd.text(".note"),
+              f"sweep greys out stacks culled in Lightroom: {greyed}")
         wd.click('.sw-t[data-i="1"]'); wd.click('.sw-t[data-i="7"]')
         check(wd.text('[data-act="sweep-done"]') == "Reject 2, start pass 2", "sweep footer: " + wd.text('[data-act="sweep-done"]'))
         shot("2-sweep")
         wd.click('[data-act="sweep-done"]')
         wd.wait("document.querySelector('.card')")
-        check("Pass 2" in wd.text(".top .t"), "pass 2 card: " + wd.text(".top .t"))
+        check("Pass 2 · 4 of 11" in wd.text(".top .t"), "pass 2 counts the Lightroom stacks as done: " + wd.text(".top .t"))
         wd.click('#toast [data-act="undo"]')
         wd.wait("document.querySelector('.sw-grid')")
         check(wd.js("return document.querySelectorAll('.sw-t.on').length") == 2, "undo returns to the sweep with both marks")
@@ -256,6 +262,22 @@ def main():
         for asset, kind in (("manifest.webmanifest", "manifest+json"), ("sw.js", "javascript"), ("apple-touch-icon.png", "image/png")):
             with urllib.request.urlopen(app + asset) as resp:
                 check(kind in resp.headers.get("Content-Type", ""), f"{asset} served as {resp.headers.get('Content-Type')}")
+
+        # Lightroom reports back: you had picked DSC05049 by hand, so the phone's reject lost
+        (tmp / "inbox" / "applied" / "20000101-000000-receipt.tsv").write_text(
+            "#cull-receipt v1\n2026-10-01\tDSC05049.ARW\tyour_flag_kept\tyou picked it\n")
+        (tmp / "inbox" / "applied" / "20000101-000001-catalog.tsv").write_text(
+            "#cull-catalog v1\n2026-10-01\tDSC05049.ARW\t1\t0\tyou\t\n")
+        wd.go(app + f"#/day/{DAY}")
+        wd.go(app + "#/")
+        wd.wait("document.querySelectorAll('.day').length > 300")
+        wd.click(f'.day[data-day="{DAY}"]')
+        wd.wait("document.querySelector('[data-act=\"send\"]')")
+        secs = wd.js("return [...document.querySelectorAll('.sec')].map(e => e.textContent)")
+        won = wd.js("return [...document.querySelectorAll('.sm-th.won')].map(e => e.textContent)")
+        check("Your Lightroom flag won" in secs and won == ["Picked in LR"], f"conflict shown apart: {secs} {won}")
+        check("2 stacks were already culled in Lightroom and skipped" in wd.text(".scroll"), "summary counts the skipped stacks")
+        shot("7-summary-lr")
 
         # everything reached the server: reload and compare
         wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)

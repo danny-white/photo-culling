@@ -110,6 +110,13 @@ class RoundTrip(unittest.TestCase):
         self.assertEqual(st["DSC05062.ARW"], "missing")
         self.assertEqual(self.ids()["DSC05038.ARW"]["decision"]["outcome"], "you picked it")
 
+        # the plugin's catalog file: what Lightroom now holds, and who set it
+        fr = self.ids()
+        self.assertEqual(fr["DSC05038.ARW"]["lr"], {"pick": 1, "rating": 0, "by": "you", "stars_by": ""})
+        self.assertEqual(fr["DSC05036.ARW"]["lr"]["by"], "phone")
+        self.assertEqual(fr["DSC05061.ARW"]["lr"], {"pick": 1, "rating": 5, "by": "phone", "stars_by": "phone"})
+        self.assertIsNone(fr["DSC05062.ARW"]["lr"])                     # not in the Lightroom selection
+
         # Send again: only the missing one goes; landed and conflict rows stay put
         again = self.c.post(f"/m/api/day/{DAY}/send", json={}, headers=H).get_json()
         self.assertEqual(again["queued"], 1)
@@ -117,6 +124,7 @@ class RoundTrip(unittest.TestCase):
                          ["DSC05062.ARW"])
         days = {d["day"]: d for d in self.c.get("/m/api/days").get_json()["days"]}
         self.assertEqual((days[DAY]["landed"], days[DAY]["conflicts"]), (4, 1))
+        self.assertEqual(days[DAY]["lr_done"], 1)                       # the burst you picked from by hand
 
     def test_lost_rows_are_written_again(self):
         fr = self.ids()
