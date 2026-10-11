@@ -172,41 +172,10 @@ def main():
         wd.wait("document.querySelector('.yearbar')")
 
         wd.click(f'.day[data-day="{DAY}"]')
-        wd.wait("document.querySelector('.sw-grid')")
-        loaded(".sw-t img")
-        tiles = wd.js("return document.querySelectorAll('.sw-t').length")
-        check(tiles > 5, f"sweep grid: {tiles} tiles")
-        greyed = wd.js("return [...document.querySelectorAll('.sw-t.done')].map(t => t.textContent)")
-        check(greyed == ["In Lightroom", "2In Lightroom", "3In Lightroom"] and "count toward it" in wd.text(".note"),
-              f"pass 1 greys out stacks culled in Lightroom: {greyed}")
-        # pass 1 is selection against a budget: an 11-minute shoot gets 5, and 3 are kept in Lightroom
-        check(wd.text("#budget") == "3 of 5 picked" and wd.text('[data-act="sweep-done"]') == "Tap your best to start",
-              "budget before picking: " + wd.text("#budget"))
-        for i in (0, 1, 3, 4):
-            wd.click(f'.sw-t[data-i="{i}"]')
-        check(wd.text("#budget") == "7 picked · 2 over 5" and wd.js("return document.querySelector('#budget').classList.contains('over')"),
-              "soft limit shows the overshoot: " + wd.text("#budget"))
-        check(wd.text('[data-act="sweep-done"]') == "Keep 4, reject 4 · start pass 2", "pass 1 footer: " + wd.text('[data-act="sweep-done"]'))
-        shot("2-sweep")
-        wd.click('[data-act="sweep-done"]')
-        wd.wait("!document.querySelector('#sheet').hidden")
-        check("7 picked, 2 over this shoot" in wd.text("#sheet"), "over the budget asks once: " + wd.text("#sheet .sh-q"))
-        shot("2b-budget")
-        wd.click('#sheet [data-act="close-sheet"]')                    # Trim: back to the grid, picks intact
-        check(wd.js("return document.querySelectorAll('.sw-t.on').length") == 4, "Trim keeps the picks")
-        wd.click('[data-act="sweep-done"]')
-        wd.wait("!document.querySelector('#sheet').hidden")
-        wd.click('#sheet [data-act="sweep-force"]')
         wd.wait("document.querySelector('.card')")
-        check("Kept 4 · rejected 4 · now choose frames in 4 bursts" in wd.text("#toast"), "pass 1 result: " + wd.text("#toast"))
-        check("Pass 2 · 4 stacks left" in wd.text(".top .t"), "pass 2 visits only the picked bursts: " + wd.text(".top .t"))
-        wd.click('#toast [data-act="undo"]')
-        wd.wait("document.querySelector('.sw-grid')")
-        check(wd.js("return document.querySelectorAll('.sw-t.on').length") == 4, "undo returns to pass 1 with the picks")
-        wd.click('[data-act="sweep-done"]')
-        wd.wait("!document.querySelector('#sheet').hidden")
-        wd.click('#sheet [data-act="sweep-force"]')
-        wd.wait("document.querySelector('.card')")
+        # one pass: the 3 stacks already kept in Lightroom are skipped, and count toward the budget
+        check(wd.text("#budget") == "Kept 3 of 5" and "8 stacks to go" in wd.text(".top .t"),
+              f"one pass; Lightroom stacks skipped and counted: {wd.text('#budget')} / {wd.text('.top .t small')}")
 
         # first card: the 4-frame burst led by its sharpest frame
         check("Sharpest" in wd.text(".badges"), "burst card shows Sharpest: " + wd.text(".badges"))
@@ -235,6 +204,12 @@ def main():
         wd.click('[data-act="keep"]')
         wd.wait("document.querySelector('#toast').textContent.includes('rejected with a note')")
         check("Kept DSC05039 · 3 rejected with a note" in wd.text("#toast"), "keep frame: " + wd.text("#toast"))
+        wd.click('#toast [data-act="undo"]')                              # undo puts the burst back
+        wd.wait("document.querySelector('#toast').textContent.includes('Undone')")
+        wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
+        check(wd.text("#budget") == "Kept 3 of 5" and "Sharpest" in wd.text(".badges"), "undo puts the burst back: " + wd.text("#budget"))
+        wd.click('[data-act="keep"]')
+        wd.wait("document.querySelector('#toast').textContent.startsWith('Kept DSC05039')")   # not the "Undone: Kept…" toast
 
         # the bracket suggests Keep all
         wd.wait("document.querySelector('.card')")
@@ -250,6 +225,9 @@ def main():
         wd.drag(".card", -220)
         wd.wait("document.querySelector('#toast').textContent.includes('Kept') && document.querySelector('.fname') && document.querySelector('.fname').textContent !== arguments[0]".replace("arguments[0]", json.dumps(before)))
         check(True, "swipe up kept " + before.split(" ")[0])
+        check(wd.text("#budget") == "Kept 6 · 1 over 5" and wd.js("return document.querySelector('#budget').classList.contains('over')")
+              and "1 over this shoot" in wd.text("#toast"), "the sixth keep is one over: " + wd.text("#budget") + " / " + wd.text("#toast"))
+        shot("2-over")
 
         # the details sheet
         wd.click('[data-act="info"]')
@@ -275,15 +253,24 @@ def main():
                 wd.js("window.__picked = true")
                 wd.wait("document.querySelector('.card') || document.querySelector('[data-act=\"send\"]')")
                 continue
-            wd.click('[data-act="keep"]')
+            if "DSC05061" in wd.text(".fname"):                            # one outright reject
+                wd.click('[data-act="reject"]')
+            else:
+                wd.click('[data-act="keep"]')
             time.sleep(0.25)
         check(wd.js("return !!document.querySelector('[data-act=\"send\"]')"), "reached the rejects review")
         secs = wd.js("return [...document.querySelectorAll('.sec')].map(e => e.textContent)")
-        check("From bursts · similar frame kept" in secs and "Rejected outright" in secs, "summary sections: %s" % secs)
+        kept_sec = next((x for x in secs if x.startswith("Kept · ")), None)
+        check(kept_sec == "Kept · 10 of 5" and "From bursts · similar frame kept" in secs and "Rejected outright" in secs,
+              "review lists the kept stacks to trim: %s" % secs)
         shot("6-summary")
-        n = wd.js("return document.querySelectorAll('.sm-th').length")
-        wd.click(".sm-th")
-        wd.wait(f"document.querySelectorAll('.sm-th').length === {n - 1}")
+        wd.click(".sm-th.kept")                                           # trim: drop one kept stack
+        wd.wait("document.querySelector('#toast').textContent.includes('Dropped')")
+        secs = wd.js("return [...document.querySelectorAll('.sec')].map(e => e.textContent)")
+        check("Kept · 9 of 5" in secs, "trimming drops a stack: " + wd.text("#toast"))
+        n = wd.js("return document.querySelectorAll('.sm-th[data-act=\"rescue\"]').length")
+        wd.click('.sm-th[data-act="rescue"]')
+        wd.wait(f"document.querySelectorAll('.sm-th[data-act=\"rescue\"]').length === {n - 1}")
         check(True, f"rescue: {n} -> {n - 1} rejects")
         wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
         wd.click('[data-act="send"]')
@@ -324,31 +311,30 @@ def main():
         wd.js("const i=document.querySelector('#day-search'); i.value=''; i.dispatchEvent(new Event('input', {bubbles:true}));")
         wd.wait("document.querySelector('.day[data-day=\"%s\"]')" % DAY2)
         wd.click(f'.day[data-day="{DAY2}"]')
-        wd.wait("document.querySelector('.sw-grid')")
-        wd.click('.sw-t[data-i="0"]')
-        wd.click('[data-act="sweep-done"]')
-        wd.wait("document.querySelector('.card') || !document.querySelector('#sheet').hidden")
-        if not wd.js("return document.querySelector('#sheet').hidden"):
-            wd.click('#sheet [data-act="sweep-force"]')
-        wd.wait("document.querySelector('[data-act=\"reset-ask\"]')")
+        wd.wait("document.querySelector('.card')")
+        fresh = wd.text(".top .t small")
+        wd.click('[data-act="reject"]')
+        wd.wait("document.querySelector('#toast').textContent.includes('Rejected')")
+        wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
+        wd.click('[data-act="keep"]')
+        wd.wait("document.querySelector('#toast').textContent.includes('Kept')")
         wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
         con = sqlite3.connect(tmp / "annotations.db")
         before = con.execute("SELECT COUNT(*) FROM cull_decisions WHERE day=?", (DAY2,)).fetchone()[0]
+        con.close()
         wd.click('[data-act="reset-ask"]')
         wd.wait("document.querySelector('[data-act=\"reset-do\"]')")
         shot("8-reset")
         wd.click('[data-act="reset-do"]')
         wd.wait("document.querySelector('#toast').textContent.includes('Started over')")
+        time.sleep(1.0)   # a stale position save would land in this window
+        con = sqlite3.connect(tmp / "annotations.db")
         after = con.execute("SELECT COUNT(*) FROM cull_decisions WHERE day=?", (DAY2,)).fetchone()[0]
         prog = con.execute("SELECT COUNT(*) FROM cull_days WHERE day=?", (DAY2,)).fetchone()[0]
         con.close()
-        time.sleep(1.0)   # a stale position save would land in this window
-        con = sqlite3.connect(tmp / "annotations.db")
-        prog = con.execute("SELECT COUNT(*) FROM cull_days WHERE day=?", (DAY2,)).fetchone()[0]
-        con.close()
-        grid = wd.js("return !!document.querySelector('.sw-grid') && !document.querySelector('.sw-t.on')")
-        check(before > 50 and after == 0 and prog == 0 and grid,
-              f"start over: {before} -> {after} decisions, progress rows {prog}, empty pass 1 {grid} (" + wd.text("#toast") + ")")
+        again = wd.text(".top .t small")
+        check(before >= 2 and after == 0 and prog == 0 and again == fresh,
+              f"start over: {before} -> {after} decisions, progress rows {prog}, back to '{again}' (" + wd.text("#toast") + ")")
         wd.go(app + f"#/day/{DAY}")
 
         # everything reached the server: reload and compare

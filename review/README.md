@@ -43,16 +43,16 @@ Cull a day from the NAS on your phone, then send the flags to Lightroom. Open
 `http://100.82.57.4:8000/m/` over Tailscale (or the `tailscale serve` HTTPS address, which
 also lets it install to the Home Screen with an offline app shell).
 
-- **Pass 1, pick your best:** every stack of the day in a grid; tap the ones to keep. A soft
-  budget of 15 stacks per hour of shooting (pauses over 10 minutes don't count; at least 5)
-  shows as a counter and asks once if you go over. Stacks you kept in Lightroom count toward
-  it. Whatever you don't pick is rejected when pass 2 starts; rescue any in the review.
-- **Pass 2, the cards:** only the bursts you picked, one per card. Swipe up to keep the frame, down to reject the
-  burst, sideways to browse. Bursts open as a filmstrip (up to 6 frames) or a winner-stays
-  duel. Keeping one frame rejects the rest with the note `Burst reject · kept DSC05039`.
-  Double-tap for a 1:1 crop from the RAW.
-- **Start over:** the restart button (either pass) or "Start this day over" in the review clears
-  the day's phone decisions and returns it to pass 1. It works until anything from the day has
+- **One pass of cards:** one stack per card, with the details sheet, a 1:1 focus check and the
+  burst picker to compare frames. Swipe up to keep the frame, down to reject the stack, sideways
+  to browse. Bursts open as a filmstrip (up to 6 frames) or a winner-stays duel. Keeping one frame
+  rejects the rest with the note `Burst reject · kept DSC05039`.
+- **Budget:** 15 kept stacks per hour of shooting (pauses over 10 minutes don't count; at least
+  5), counted per stack, so a whole panorama or bracket is one. A "Kept 7 of 15" bar turns amber
+  over budget, and if you finish over, the review lists your kept stacks to trim. Stacks you kept
+  in Lightroom count toward it and are skipped.
+- **Start over:** the restart button on the cards, or "Start this day over" in the review, clears
+  the day's phone decisions and starts it again from the first stack. It works until anything from the day has
   reached Lightroom; rows already queued in the inbox are taken back out.
 - **Send:** queues the day into `AICullInbox/cull-decisions.tsv`. The AI Cull plugin (v2)
   applies it on the next **Sync AI Cull Data** and leaves a receipt, which the app reads back:
