@@ -37,8 +37,9 @@ can safely cover the **whole library at once**; you don't have to select one sho
    [`ops/watch_ingest.sh`](../ops/watch_ingest.sh) merges each shoot into `pending.tsv` there;
    see [`ops/README.md`](../ops/README.md).
 3. Lightroom Classic → **File → Plug-in Manager → Add** → select the `AICull.lrplugin` folder.
-   To upgrade, replace the folder's contents and click **Reload Plug-in**. v2 adds hidden
-   metadata fields, so Lightroom asks once per catalog to update it.
+   To upgrade, replace the folder's contents and **restart Lightroom**: it reads a plug-in's
+   metadata definitions (v2's hidden fields) only at launch, and Reload Plug-in reports "No
+   script by the name AICullMetadata.lua" until then. Lightroom asks once per catalog to update it.
 
 ## Each sync
 
