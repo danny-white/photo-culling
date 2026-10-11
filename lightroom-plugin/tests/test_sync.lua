@@ -99,6 +99,15 @@ eq('receipt 2: I caption left', r2['DSC05042.ARW caption_left'], true)
 eq('receipt 2: D not reported again', r2['DSC05039.ARW caption_left'], nil)
 eq('receipt 2: C kept again', r2['DSC05038.ARW your_flag_kept'], true)
 
+-- run 3: the phone file alone (the AI's pending.tsv already synced) must still be applied and moved
+local only = io.open(inbox .. '/cull-decisions.tsv', 'wb')
+only:write('#cull-decisions v1\n2026-10-01\tDSC05041.ARW\treject\t\t\n'); only:close()
+F.dialog.openPath = inbox .. '/cull-decisions.tsv'
+dofile('lightroom-plugin/AICull.lrplugin/SyncAICull.lua')
+eq('decisions-only run applied', Fp.pickStatus, -1)
+eq('decisions-only run moved its input', exists(inbox .. '/cull-decisions.tsv'), false)
+eq('decisions-only input kept in applied/', exists(inbox .. '/applied/20261010-120003-cull-decisions.tsv'), true)
+
 os.execute('rm -rf "' .. inbox .. '"')
 print(string.format('%d passed, %d failed', passed, failed))
 os.exit(failed == 0 and 0 or 1)

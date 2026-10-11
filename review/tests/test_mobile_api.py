@@ -40,7 +40,8 @@ class MobileApi(unittest.TestCase):
         (tmp / "static" / "index.html").write_text("<!doctype html><title>Culling Bay</title>")
         app = Flask(__name__)
         app.register_blueprint(mobile.make_blueprint(
-            db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state"))
+            db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state",
+            inbox=tmp / "inbox", check_mount=False))
         cls.client = app.test_client()
 
     @classmethod

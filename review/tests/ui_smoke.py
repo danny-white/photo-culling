@@ -31,6 +31,7 @@ APP_PORT, WD_PORT = 8765, 4444
 
 
 def start_app(tmp: Path):
+    (tmp / "inbox").mkdir(exist_ok=True)
     from flask import Flask
     from werkzeug.serving import make_server
     import mobile
@@ -51,7 +52,8 @@ def start_app(tmp: Path):
     app = Flask(__name__)
     app.register_blueprint(mobile.make_blueprint(
         db_ro=db_ro, anno=anno, pc=pc, cache_dir=ROOT / "review" / "cache",
-        static_dir=ROOT / "review" / "static" / "m", state_dir=tmp / "state"))
+        static_dir=ROOT / "review" / "static" / "m", state_dir=tmp / "state",
+        inbox=tmp / "inbox", check_mount=False))
     srv = make_server("127.0.0.1", APP_PORT, app, threaded=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
@@ -244,6 +246,13 @@ def main():
         wd.click(".sm-th")
         wd.wait(f"document.querySelectorAll('.sm-th').length === {n - 1}")
         check(True, f"rescue: {n} -> {n - 1} rejects")
+        wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
+        wd.click('[data-act="send"]')
+        wd.wait("document.querySelector('#toast').textContent.includes('Queued')")
+        sent = (tmp / "inbox" / "cull-decisions.tsv").read_text().splitlines()
+        check(sent[0] == "#cull-decisions v1" and len(sent) > 20, f"send wrote {len(sent) - 1} rows: " + wd.text("#toast"))
+        check(wd.js("return document.querySelector('[data-act=\"send\"]').disabled") and "waiting" in wd.text('.scroll'),
+              "after send: " + wd.text('[data-act="send"]'))
         for asset, kind in (("manifest.webmanifest", "manifest+json"), ("sw.js", "javascript"), ("apple-touch-icon.png", "image/png")):
             with urllib.request.urlopen(app + asset) as resp:
                 check(kind in resp.headers.get("Content-Type", ""), f"{asset} served as {resp.headers.get('Content-Type')}")

@@ -372,12 +372,13 @@ local function runSync(context)
         notes[#notes + 1] = ok and ('Receipt: applied/' .. LrPathUtils.leafName(info))
             or ('Could not write the receipt: ' .. tostring(info))
     end
-    for _, path in ipairs({ aiPath, decPath }) do
-        if path then
-            local ok, info = moveToApplied(path, stamp)
-            if not ok then
-                notes[#notes + 1] = 'Could not move ' .. LrPathUtils.leafName(path) .. ' to applied/: ' .. tostring(info)
-            end
+    local inputs = {}   -- not { aiPath, decPath }: ipairs stops at the first nil, so a missing
+    if aiPath then inputs[#inputs + 1] = aiPath end      -- pending.tsv would skip the decisions file
+    if decPath then inputs[#inputs + 1] = decPath end
+    for _, path in ipairs(inputs) do
+        local ok, info = moveToApplied(path, stamp)
+        if not ok then
+            notes[#notes + 1] = 'Could not move ' .. LrPathUtils.leafName(path) .. ' to applied/: ' .. tostring(info)
         end
     end
     if missing > 0 then

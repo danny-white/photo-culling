@@ -6,16 +6,18 @@ review server already owns. Stack rules live in stacks.py.
 """
 from __future__ import annotations
 
+import fcntl
 import functools
 import hashlib
 import io
 import json
 import mimetypes
+import os
 import re
 import sqlite3
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +29,12 @@ import stacks
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 LIBRARY_ROOT = "/mnt/passport/Pictures"
+INBOX = Path("/mnt/Passport_AICullInbox")          # the narrow rw mount the watcher also writes
+INBOX_SOURCE = "//mycloud/Passport/AICullInbox"     # ...and must come from this share (as in watch_ingest.sh)
+DECISIONS_FILE = "cull-decisions.tsv"
+DECISIONS_HEADER = "#cull-decisions v1"
+RECEIPT_RE = re.compile(r"^(\d{8}-\d{6})-receipt\.tsv$")
+LOST_AFTER = timedelta(seconds=60)                   # sent this long before a receipt that lacks it
 IMG_EDGE = {"thumb": 320, "view": 1616}   # 1616 = the embedded preview's full width
 DAYS_TTL_S = 30
 CROP_MAX = 2400          # longest side of a crop, in source pixels
@@ -60,6 +68,10 @@ CREATE TABLE IF NOT EXISTS cull_days(
   cursor      INTEGER,
   finished_at TEXT,
   sent_at     TEXT);
+CREATE TABLE IF NOT EXISTS cull_receipts(
+  name    TEXT PRIMARY KEY,
+  read_at TEXT,
+  rows    INTEGER);
 """
 
 ROW_COLS = ("rowid, path, filename, capture_ts, camera, sharpness, exposure_flag, mean_lum, "
@@ -102,9 +114,20 @@ def day_date(day: str) -> str | None:
         return None
 
 
-def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path) -> Blueprint:
+def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
+    """One cull-decisions.tsv line for a file, keyed like the plugin matches: (folder, file)."""
+    p = Path(path)
+    stars = str(d["stars"]) if d["flag"] == "pick" and d.get("stars") else ""
+    note = (d.get("note") or "").replace("\t", " ").replace("\n", " ")
+    return (p.parent.name, p.name), "\t".join((p.parent.name, p.name, d["flag"], stars, note))
+
+
+def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
+                   inbox: Path = INBOX, check_mount: bool = True) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
-    state_dir: where derived per-day data is cached (trial_out/mobile)."""
+    state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
+    cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
+    the narrow AICullInbox mount (tests turn it off and pass a temp dir)."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
     state_dir.mkdir(parents=True, exist_ok=True)
     pano_file = state_dir / "pano.json"
@@ -203,6 +226,99 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 tmp.write_text(json.dumps(known))
                 tmp.replace(pano_file)
 
+    # ---------------------------------------------------------------- Lightroom round trip
+    def inbox_problem() -> str | None:
+        if not check_mount:
+            return None
+        if not os.path.ismount(inbox):
+            return f"{inbox} is not mounted"
+        with open("/proc/mounts") as fh:
+            if not any(line.split()[:2] == [INBOX_SOURCE, str(inbox)] for line in fh):
+                return f"{inbox} is not mounted from {INBOX_SOURCE}"
+        return None
+
+    def write_rows(lines: dict) -> None:
+        """Merge lines into the inbox's cull-decisions.tsv, keyed by (folder, file). A local lock
+        serialises writers; the temp-file swap means the plugin never reads half a file."""
+        target = inbox / DECISIONS_FILE
+        with open(state_dir / "decisions.lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            rows = {}
+            if target.exists():
+                for line in target.read_text(encoding="utf-8").splitlines():
+                    parts = line.split("\t")
+                    if line and not line.startswith("#") and len(parts) >= 2:
+                        rows[(parts[0], parts[1])] = line
+            rows.update(lines)
+            tmp = inbox / (DECISIONS_FILE + ".tmp")
+            tmp.write_text(DECISIONS_HEADER + "\n" + "\n".join(rows.values()) + "\n", encoding="utf-8")
+            os.replace(tmp, target)
+
+    def partner_paths(day: str) -> dict[str, list[str]]:
+        return {f["path"]: [p["path"] for p in f["partners"]] for f in stacks.pair_frames(day_rows(day))}
+
+    def queue_decisions(con, decisions: list[dict]) -> int:
+        """Write decisions (and their pair partners) to the inbox file and mark them queued."""
+        lines = {}
+        partners_by_day: dict[str, dict] = {}
+        for d in decisions:
+            partners = partners_by_day.setdefault(d["day"], partner_paths(d["day"]))
+            for p in [d["path"]] + partners.get(d["path"], []):
+                key, line = tsv_row(p, d)
+                lines[key] = line
+        write_rows(lines)
+        at = now_iso()
+        con.executemany("UPDATE cull_decisions SET state='queued', sent_at=? WHERE path=?",
+                        [(at, d["path"]) for d in decisions])
+        return len(lines)
+
+    def ingest_receipts() -> None:
+        """Read receipts the plugin left in applied/ since last time. Each queued decision becomes
+        landed, conflict (your own flag kept) or missing (not in the selection; sent again next
+        time). A queued decision that a newer receipt doesn't mention was lost (written while the
+        plugin was mid-sync, then deleted with its input), so it is written to the inbox again."""
+        applied = inbox / "applied"
+        if not applied.is_dir():
+            return
+        with lock:
+            con = anno_db()
+            try:
+                seen = {r["name"] for r in con.execute("SELECT name FROM cull_receipts")}
+                fresh = sorted(p for p in applied.iterdir() if RECEIPT_RE.match(p.name) and p.name not in seen)
+                lost: dict[str, dict] = {}
+                for rp in fresh:
+                    stamp = datetime.strptime(RECEIPT_RE.match(rp.name)[1], "%Y%m%d-%H%M%S")
+                    outcomes: dict[tuple, dict] = {}
+                    for line in rp.read_text(encoding="utf-8").splitlines():
+                        parts = line.split("\t")
+                        if line and not line.startswith("#") and len(parts) >= 3:
+                            outcomes.setdefault((parts[0], parts[1]), {})[parts[2]] = parts[3] if len(parts) > 3 else ""
+                    for d in [dict(r) for r in con.execute("SELECT * FROM cull_decisions WHERE state='queued'")]:
+                        p = Path(d["path"])
+                        out = outcomes.get((p.parent.name, p.name))
+                        if not out:
+                            if d["sent_at"] and datetime.fromisoformat(d["sent_at"]) < stamp - LOST_AFTER:
+                                lost[d["path"]] = d
+                            continue
+                        lost.pop(d["path"], None)
+                        if "your_flag_kept" in out:
+                            state, outcome = "conflict", out["your_flag_kept"]
+                        elif "missing" in out:
+                            state, outcome = "missing", "not in the Lightroom selection"
+                        elif "applied" in out:
+                            state, outcome = "landed", ("your " + out["your_stars_kept"] + " kept") if "your_stars_kept" in out else None
+                        else:
+                            continue
+                        con.execute("UPDATE cull_decisions SET state=?, outcome=?, landed_at=? WHERE path=?",
+                                    (state, outcome, now_iso() if state == "landed" else None, d["path"]))
+                    con.execute("INSERT INTO cull_receipts(name, read_at, rows) VALUES (?,?,?)",
+                                (rp.name, now_iso(), sum(len(v) for v in outcomes.values())))
+                if lost and inbox_problem() is None:
+                    queue_decisions(con, list(lost.values()))
+                con.commit()
+            finally:
+                con.close()
+
     # ---------------------------------------------------------------- routes: app shell
     @bp.route("/")
     def app_index():
@@ -217,6 +333,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     # ---------------------------------------------------------------- routes: reads
     @bp.route("/api/days")
     def api_days():
+        ingest_receipts()
         now = time.time()
         if cache["days"] is None or now - cache["days_at"] > DAYS_TTL_S:
             by_day = library_rows()
@@ -251,6 +368,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
 
     @bp.route("/api/day/<path:day>")
     def api_day(day):
+        ingest_receipts()
         rows = day_rows(day)
         if not rows:
             return jsonify({"error": "no such day"}), 404
@@ -387,6 +505,28 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         finally:
             con.close()
         return jsonify({"ok": True})
+
+    @bp.route("/api/day/<path:day>/send", methods=["POST"])
+    @guarded
+    def api_send(day):
+        """Queue the day's unsent decisions for the next Lightroom sync. Decisions that landed or
+        met your own flag (conflict) are not sent again unless you change them on the phone."""
+        problem = inbox_problem()
+        if problem:
+            return jsonify({"error": problem + "; nothing was sent"}), 503
+        ingest_receipts()
+        with lock:
+            con = anno_db()
+            try:
+                todo = [dict(r) for r in con.execute(
+                    "SELECT * FROM cull_decisions WHERE day=? AND state IN ('draft','missing')", (day,))]
+                rows = queue_decisions(con, todo) if todo else 0
+                con.execute("""INSERT INTO cull_days(day, sent_at) VALUES (?,?)
+                               ON CONFLICT(day) DO UPDATE SET sent_at=excluded.sent_at""", (day, now_iso()))
+                con.commit()
+            finally:
+                con.close()
+        return jsonify({"ok": True, "queued": len(todo), "file_rows": rows})
 
     @bp.route("/api/crop/<int:rowid>")
     def api_crop(rowid):

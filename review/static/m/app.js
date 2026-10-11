@@ -408,13 +408,23 @@ function vSummary() {
   const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="rescue" data-id="' + f.id + '" aria-label="Rescue ' + esc(f.file) + '">' +
     '<img src="' + img(f.id, 'thumb') + '" alt="" loading="lazy"><b>' + IC.x + '</b></button>').join('') + '</div>';
   const open = firstOpen(0);
+  const decided = all.map(f => S.dec[f.id]).filter(Boolean);
+  const by = st => decided.filter(d => d.state === st).length;
+  const unsent = by('draft') + by('missing'), queued = by('queued'), landed = by('landed'), conflicts = by('conflict');
+  const lr = [];
+  if (landed) lr.push(landed + ' in Lightroom');
+  if (queued) lr.push(queued + ' waiting for the next Sync AI Cull Data');
+  if (by('missing')) lr.push(by('missing') + ' not found in the last sync, will go again');
+  if (conflicts) lr.push(conflicts + ' left alone: you had flagged ' + (conflicts > 1 ? 'them' : 'it') + ' yourself');
+  const sendLabel = unsent ? 'Send ' + unsent + ' to Lightroom' : queued ? 'Waiting for Lightroom' : landed ? 'In Lightroom' : 'Send to Lightroom';
   return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far') +
     '<div class="scroll"><div class="counts"><div><b>' + keep + '</b><span>Kept</span></div><div><b>' + hero + '</b><span>Hero</span></div>' +
       '<div><b>' + rej + '</b><span>Rejected</span></div><div><b>' + none + '</b><span>Unflagged</span></div></div>' +
+      (lr.length ? '<p class="sec">Lightroom</p>' + lr.map(t => '<p class="note">' + esc(t) + '</p>').join('') : '') +
       (rejects.length ? (fromBurst.length ? '<p class="sec">From bursts · similar frame kept</p>' + grid(fromBurst) : '') +
         (outright.length ? '<p class="sec">Rejected outright</p>' + grid(outright) : '') + '<p class="note">Tap a frame to rescue it.</p>'
         : '<p class="note">No rejects today.</p>') + '</div>' +
-    '<div class="foot"><button class="pb2" data-act="days">Back to days</button><button class="pb2 pri" data-act="send">Send to Lightroom</button></div>';
+    '<div class="foot"><button class="pb2" data-act="days">Back to days</button><button class="pb2 pri" data-act="send"' + (unsent ? '' : ' disabled') + '>' + sendLabel + '</button></div>';
 }
 
 function draw(anim) {
@@ -600,6 +610,23 @@ function sweepDone() {
   toast((idx.length ? 'Rejected ' + idx.length + (idx.length === 1 ? ' stack' : ' stacks') + ' · ' : '') + 'Pass 2: choose what to keep', !!changes.length);
   draw('next');
 }
+// Send: every queued tap must reach the server first, so the day is sent whole.
+async function sendDay(btn) {
+  btn.disabled = true;
+  pump();
+  for (let i = 0; i < 40 && Q.items.length; i++) await new Promise(r => setTimeout(r, 250));
+  if (Q.items.length) { btn.disabled = false; return toast('Still offline: ' + Q.items.length + ' taps waiting to save. Send once they are in.'); }
+  let body;
+  try {
+    const r = await fetch('/m/api/day/' + dayPath(S.day.day) + '/send', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Culling-Bay': '1' }, body: '{}' });
+    body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+  } catch (e) { btn.disabled = false; return toast('Not sent: ' + e.message); }
+  for (const id in S.dec) if (S.dec[id].state === 'draft' || S.dec[id].state === 'missing') S.dec[id].state = 'queued';
+  toast(body.queued ? 'Queued ' + body.queued + ' for Lightroom. On the Mac: Sync AI Cull Data.' : 'Nothing new to send.');
+  draw();
+}
+
 function openPicker() {
   const s = S.stacks[S.cursor];
   if (!s || s.frames.length < 2) return;
@@ -656,7 +683,7 @@ document.addEventListener('click', e => {
       toast('Rescued ' + stem(f.file), true);
       return draw();
     }
-    case 'send': return toast('Sending to Lightroom arrives in the next build. Every decision is already saved on the PC.');
+    case 'send': return sendDay(b);
   }
 });
 document.addEventListener('keydown', e => {
