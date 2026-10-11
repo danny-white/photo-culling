@@ -25,12 +25,13 @@ const IC = {
   stack: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="4" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M4 8v10a2 2 0 0 0 2 2h10" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>',
   focus: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg>',
   restart: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4.5 4.5v3.7h3.7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  grid: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13" y="4" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="4" y="13" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13" y="13" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>',
 };
 
 const S = {
   screen: 'days', days: null, day: null, stacks: [], dec: {},
   pass: 2, cursor: 0, hist: [], picker: null,
-  chrome: true, busy: false, sheet: false, focus: null,
+  chrome: true, busy: false, sheet: false, focus: null, gridFrom: null, gridFilter: 'all',
 };
 
 /* ---------------------------------------------------------------- server */
@@ -377,7 +378,7 @@ function vCull() {
     : '<div class="strip empty" aria-hidden="true"></div>';
   const left = n - doneCount();
   return top(backBtn('days', 'Days'), dayTitle(S.day), left + (left === 1 ? ' stack' : ' stacks') + ' to go',
-      '<div class="tools"><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>') +
+      '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' + budgetBar() +
     '<div class="stage" id="stage"><div class="card' + (burst ? ' is-stack' : '') + '"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) + '" draggable="false"><div class="tint"></div>' +
       '<div class="badges">' + badges + '</div>' + pill + chip + '<div class="stamp"><span>KEEP</span></div></div>' +
@@ -485,6 +486,39 @@ function closeFocus() {
   draw();
 }
 
+// The day grid: every photo, with what it ends up as -- the phone's decision, or your
+// Lightroom flag where there is none or where yours won. Picks outlined, rejects greyed.
+function finalMark(f) {
+  const d = S.dec[f.id];
+  if (d && d.state !== 'conflict' && d.flag !== 'none') return d.flag === 'reject' ? 'reject' : d.stars === 5 ? 'hero' : 'pick';
+  if (f.lr && f.lr.pick) return f.lr.pick === 1 ? 'pick' : 'reject';
+  return 'none';
+}
+const GRID_FILTERS = { all: 'All', picks: 'Picks', rejects: 'Rejects', none: 'Unflagged' };
+function vGrid() {
+  const all = S.stacks.flatMap((s, si) => s.frames.map((f, fi) => ({ f, s, si, fi, m: finalMark(f) })));
+  const n = { pick: 0, reject: 0, none: 0 };
+  for (const x of all) n[x.m === 'hero' ? 'pick' : x.m]++;
+  const keep = x => S.gridFilter === 'all' || (S.gridFilter === 'picks' ? (x.m === 'pick' || x.m === 'hero') : S.gridFilter === 'rejects' ? x.m === 'reject' : x.m === 'none');
+  const tile = x => {
+    const stars = (x.f.lr && x.f.lr.rating) || (S.dec[x.f.id] && S.dec[x.f.id].stars) || 0;
+    return '<button class="gv-t m-' + x.m + '" data-act="grid-open" data-stack="' + x.si + '" aria-label="' + esc(x.f.file + ', ' + ({ pick: 'picked', hero: 'hero', reject: 'rejected', none: 'unflagged' })[x.m]) + '">' +
+      '<img src="' + img(x.f.id, 'thumb') + '" alt="" loading="lazy">' +
+      (x.s.frames.length > 1 ? '<span class="gv-n">' + (x.fi + 1) + '/' + x.s.frames.length + '</span>' : '') +
+      (stars ? '<span class="gv-s">' + '★'.repeat(stars) + '</span>' : '') +
+      (x.m === 'pick' || x.m === 'hero' ? '<b>' + (x.m === 'hero' ? IC.star : IC.check) + '</b>' : '') + '</button>';
+  };
+  const shown = all.filter(keep);
+  return top(backBtn('grid', S.gridFrom === 'summary' ? 'Review' : 'Cards'), dayTitle(S.day),
+      n.pick + ' picked · ' + n.reject + ' rejected · ' + n.none + ' unflagged',
+      '<div class="tools"><button class="ico on" data-act="grid" aria-label="Back to the cards">' + IC.grid + '</button></div>') +
+    '<div class="dtools gv-tools"><div class="seg" role="tablist">' + Object.entries(GRID_FILTERS).map(([k, label]) =>
+      '<button data-act="grid-filter" data-f="' + k + '" aria-selected="' + (S.gridFilter === k) + '">' + label + '</button>').join('') + '</div></div>' +
+    '<div class="scroll"><div class="gv-grid">' + shown.map(tile).join('') + '</div>' +
+    (shown.length ? '' : '<p class="note">Nothing here.</p>') +
+    '<p class="note">The phone’s decisions, or your Lightroom flags from the last sync where the phone has none. Tap a photo to open its card.</p></div>';
+}
+
 function vSummary() {
   let keep = 0, hero = 0, rej = 0, none = 0;
   const all = S.stacks.flatMap(s => s.frames);
@@ -521,7 +555,8 @@ function vSummary() {
       '</div><p class="note">' + over + ' over this shoot’s budget of ' + b + ' (' + S.day.budget.per_hour + ' stacks an hour of shooting). Tap a stack to drop it.</p>'
     : b ? '<p class="note">Kept ' + keptN + ' of this shoot’s budget of ' + b + '.</p>' : '';
   const sendLabel = unsent ? 'Send ' + unsent + ' to Lightroom' : queued ? 'Waiting for Lightroom' : landed ? 'In Lightroom' : 'Send to Lightroom';
-  return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far') +
+  return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far',
+      '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button></div>') +
     '<div class="scroll">' + (S.day.summary ? '<p class="dsum-top">' + S.day.summary.split('\n').map(esc).join('<br>') + '</p>' : '') +
       '<div class="counts"><div><b>' + keep + '</b><span>Kept</span></div><div><b>' + hero + '</b><span>Hero</span></div>' +
       '<div><b>' + rej + '</b><span>Rejected</span></div><div><b>' + none + '</b><span>Unflagged</span></div></div>' + trim +
@@ -542,7 +577,7 @@ function draw(anim) {
   view.innerHTML = scr === 'days' ? vDays() : scr === 'loading' ? vLoading('Loading the day…')
     : scr === 'error' ? vLoading(S.error || 'Something went wrong')
     : scr === 'picker' ? (S.picker.m === 'strip' ? vStrip() : vDuel())
-    : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : vCull();
+    : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : vCull();
   view.classList.toggle('no-chrome', !S.chrome);
   if (scr === 'cull') {
     bindStage();
@@ -782,6 +817,12 @@ document.addEventListener('click', e => {
     case 'info': return openSheet();
     case 'close-sheet': return closeSheet();
     case 'close-focus': return closeFocus();
+    case 'grid':                       // the toggle: into the grid, and back to where you were
+      if (S.screen === 'grid') { S.screen = S.gridFrom || 'cull'; S.gridFrom = null; }
+      else { S.gridFrom = S.screen; S.screen = 'grid'; }
+      return draw();
+    case 'grid-filter': S.gridFilter = b.dataset.f; return draw();
+    case 'grid-open': S.cursor = +b.dataset.stack; S.gridFrom = null; S.screen = 'cull'; return draw();
     case 'reset-ask': return resetAsk();
     case 'reset-do': return resetDo(b);
     case 'picker': return openPicker();

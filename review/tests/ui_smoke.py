@@ -279,6 +279,33 @@ def main():
         wd.click('.sm-th[data-act="rescue"]')
         wd.wait(f"document.querySelectorAll('.sm-th[data-act=\"rescue\"]').length === {n - 1}")
         check(True, f"rescue: {n} -> {n - 1} rejects")
+        # the day grid: a toggle from the review, every photo with its final state
+        wd.click('.top [data-act="grid"]')
+        wd.wait("document.querySelector('.gv-grid')")
+        tiles = wd.js("return document.querySelectorAll('.gv-t').length")
+        marks = wd.js("return ['m-pick','m-hero','m-reject','m-none'].map(c => document.querySelectorAll('.gv-t.' + c).length)")
+        sub = wd.text(".top .t small")
+        check(tiles == 32 and marks[0] + marks[1] + marks[2] + marks[3] == 32 and f"{marks[0] + marks[1]} picked · {marks[2]} rejected" in sub,
+              f"grid shows all 32 photos: {sub}")
+        gray = wd.js("return getComputedStyle(document.querySelector('.gv-t.m-reject img')).filter")
+        check("grayscale" in gray, "rejects are greyed: " + gray)
+        shot("9-grid")
+        wd.click('[data-act="grid-filter"][data-f="picks"]')
+        only = wd.js("return [...document.querySelectorAll('.gv-t')].every(t => t.classList.contains('m-pick') || t.classList.contains('m-hero'))")
+        check(only and wd.js("return document.querySelectorAll('.gv-t').length") == marks[0] + marks[1], "Picks filter shows only picks")
+        wd.click('[data-act="grid-filter"][data-f="all"]')
+        wd.click('.gv-t')
+        wd.wait("document.querySelector('.card')")
+        wd.click('.top [data-act="grid"]')                                # the same button on a card
+        wd.wait("document.querySelector('.gv-grid')")
+        wd.click('.top [data-act="grid"]')                                # ...and back
+        wd.wait("document.querySelector('.card')")
+        check(True, "grid toggles from a card and back")
+        wd.click('[data-act="days"]')
+        wd.wait("document.querySelector('#day-search')")
+        wd.click(f'.day[data-day="{DAY}"]')
+        wd.wait("document.querySelector('[data-act=\"send\"]')")
+
         wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
         wd.click('[data-act="send"]')
         wd.wait("document.querySelector('#toast').textContent.includes('Queued')")

@@ -51,6 +51,10 @@ also lets it install to the Home Screen with an offline app shell).
   5), counted per stack, so a whole panorama or bracket is one. A "Kept 7 of 15" bar turns amber
   over budget, and if you finish over, the review lists your kept stacks to trim. Stacks you kept
   in Lightroom count toward it and are skipped.
+- **Day grid:** the grid button on the cards or the review toggles to every photo of the day:
+  picks outlined (Hero in gold), rejects greyed, your Lightroom stars shown, filters for All /
+  Picks / Rejects / Unflagged. Each photo shows the phone's decision, or your Lightroom flag where
+  the phone has none (or yours won). Tap a photo to open its card.
 - **Start over:** the restart button on the cards, or "Start this day over" in the review, clears
   the day's phone decisions and starts it again from the first stack. It works until anything from the day has
   reached Lightroom; rows already queued in the inbox are taken back out.
