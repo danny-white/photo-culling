@@ -41,7 +41,9 @@ class MobileApi(unittest.TestCase):
         app = Flask(__name__)
         app.register_blueprint(mobile.make_blueprint(
             db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state",
-            inbox=tmp / "inbox", check_mount=False))
+            inbox=tmp / "inbox", check_mount=False, ingest_log=tmp / "ingest.log",
+            ollama_url="http://127.0.0.1:9"))   # nothing listens there: Ollama "not answering"
+        cls.log = tmp / "ingest.log"
         cls.client = app.test_client()
 
     @classmethod
@@ -189,3 +191,29 @@ class MobileApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_pipeline_health(self):
+        from datetime import datetime, timedelta
+        now = datetime.now().astimezone()
+        at = lambda h: (now - timedelta(hours=h)).isoformat(timespec="seconds")
+        self.log.write_text("\n".join([
+            "first line is skipped as a possible partial line",
+            f"[{at(400)}] run FAILED for /mnt/passport/Pictures/2025/2025-01-01 -- leaving unmarked",   # over a week old
+            f"[{at(30)}] run FAILED for /mnt/passport/Pictures/2026/2026-09-29 -- leaving unmarked, will retry next poll",
+            f"[{at(29)}] done: /mnt/passport/Pictures/2026/2026-09-29 -> /mnt/Passport_AICullInbox/pending.tsv",
+            f"[{at(5)}] export FAILED for /mnt/passport/Pictures/2026/2026-10-01 -- leaving unmarked, will retry next poll",
+            f"[{at(4)}] msmtp send FAILED (check ~/.msmtprc) -- ignored",
+            f"[{at(3)}] processing /mnt/passport/Pictures/2026/2026-10-01", ""]))
+        d = self.client.get("/m/api/pipeline-health").get_json()
+        self.assertIn(d["status"], ("warn", "bad"))
+        titles = [a["title"] for a in d["alerts"]]
+        self.assertIn("Ollama not answering", titles)
+        self.assertIn("Ingest export failing", titles)          # no later done: for that folder
+        self.assertNotIn("Ingest run failing", titles)           # 2026-09-29 was done afterwards
+        self.assertTrue(all(a["level"] in ("warn", "bad") and a["fix"] for a in d["alerts"]))
+        steps = [(r["step"], r["resolved"]) for r in d["recent"]]
+        self.assertEqual(steps, [("run", True), ("export", False)])   # the old one and msmtp are left out
+        self.assertEqual(d["last_ingest"]["shoot"], "2026-09-29")
+        self.assertIsNone(d["model"]["installed"])
+        self.assertGreater(d["index"]["ok"], 40000)
+

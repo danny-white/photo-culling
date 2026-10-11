@@ -17,7 +17,8 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import date, datetime, timedelta
+import urllib.request
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,8 @@ mimetypes.add_type("application/manifest+json", ".webmanifest")
 LIBRARY_ROOT = "/mnt/passport/Pictures"
 INBOX = Path("/mnt/Passport_AICullInbox")          # the narrow rw mount the watcher also writes
 INBOX_SOURCE = "//mycloud/Passport/AICullInbox"     # ...and must come from this share (as in watch_ingest.sh)
+INGEST_LOG = Path(__file__).resolve().parents[1] / "trial_out" / "ingest_watch.log"   # ops/watch_ingest.sh
+OLLAMA_URL = "http://localhost:11434"
 DECISIONS_FILE = "cull-decisions.tsv"
 DECISIONS_HEADER = "#cull-decisions v1"
 RECEIPT_RE = re.compile(r"^(\d{8}-\d{6})-(receipt|catalog)\.tsv$")   # the plugin's two report files
@@ -132,7 +135,8 @@ def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
 
 
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
-                   inbox: Path = INBOX, check_mount: bool = True) -> Blueprint:
+                   inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
+                   ollama_url: str = OLLAMA_URL) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
@@ -743,6 +747,113 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             "without_since": without_since,
             "advice": "Re-pair the camera's location link: Creators' App (or Imaging Edge Mobile) > "
                       "Location Information Link, with the phone's Bluetooth on.",
+        })
+
+    @bp.route("/api/pipeline-health")
+    def api_pipeline_health():
+        """For the Pi status page: problems in the photo pipeline that don't stop the ingest, so
+        never turn its systemd unit red. The search model vanished from Ollama in Aug 2026 and
+        1,625 photos went unindexed for seven weeks unnoticed. Each alert reads the pipeline's
+        current state, not the log, so it clears itself once fixed; the log only adds history."""
+        alerts: list[dict] = []
+        def alert(level, title, detail, fix=""):
+            alerts.append({"level": level, "title": title, "detail": detail, "fix": fix})
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(timespec="seconds")
+        con = db_ro()
+        try:
+            ok = con.execute("SELECT COUNT(*) FROM images WHERE status='ok'").fetchone()[0]
+            unindexed = con.execute(
+                "SELECT COUNT(*) FROM images i WHERE status='ok' AND COALESCE(processed_at, '') < ? AND NOT EXISTS "
+                "(SELECT 1 FROM embeddings e WHERE e.path = i.path AND e.embed_version = ?)",
+                (cutoff, pc.EMBED_VERSION)).fetchone()[0]
+            ungeo = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND gps_checked IS NULL "
+                                "AND COALESCE(processed_at, '') < ?", (cutoff,)).fetchone()[0]
+            folders: dict[str, str] = {}
+            for r in con.execute("SELECT path, processed_at FROM images WHERE status='ok'"):
+                f = os.path.dirname(r["path"])
+                folders[f] = max(folders.get(f, ""), r["processed_at"] or "")
+            summed = {r["folder"] for r in con.execute("SELECT folder FROM day_summaries")}
+            errored = con.execute("SELECT COUNT(*) FROM images WHERE status='error'").fetchone()[0]
+        finally:
+            con.close()
+        unsummed = sorted(f for f, t in folders.items() if f not in summed and t < cutoff)
+
+        model = {"name": pc.EMBED_MODEL, "installed": None}
+        try:
+            with urllib.request.urlopen(ollama_url + "/api/tags", timeout=3) as r:
+                names = [m.get("name", "") for m in json.load(r).get("models", [])]
+            model["installed"] = any(n == pc.EMBED_MODEL or n.startswith(pc.EMBED_MODEL + ":") for n in names)
+        except Exception as e:  # noqa: BLE001
+            model["error"] = f"{type(e).__name__}"
+        if model["installed"] is False:
+            alert("bad", "Search model missing",
+                  f"{pc.EMBED_MODEL} isn't installed in Ollama, so photo search fails and new shoots go unindexed.",
+                  f"ollama pull {pc.EMBED_MODEL}")
+        elif model["installed"] is None:
+            alert("warn", "Ollama not answering", "Search queries and new shoots' indexing need it.",
+                  "systemctl status ollama")
+        if unindexed:
+            alert("bad" if unindexed >= 200 else "warn", f"{unindexed:,} photos not searchable",
+                  "They have no search embedding.",
+                  "cd ~/photo-culling && ./venv/bin/python photo_cull.py embed --db trial_out/trial.db")
+        if ungeo:
+            alert("warn", f"{ungeo:,} photos not geotagged", "Their GPS and nearest town were never read.",
+                  "cd ~/photo-culling && ./venv/bin/python photo_cull.py geotag --db trial_out/trial.db")
+        if unsummed:
+            alert("warn", f"{len(unsummed)} day{'s' if len(unsummed) > 1 else ''} without a summary",
+                  ", ".join(os.path.basename(f) for f in unsummed[:4]) + (" …" if len(unsummed) > 4 else ""),
+                  "cd ~/photo-culling && ./venv/bin/python photo_cull.py daysum --db trial_out/trial.db")
+        mount = None
+        if check_mount:
+            mount = inbox_problem()
+            if mount:
+                alert("bad", "Ingest is stopped", f"{mount}; the watcher refuses to write until it is.",
+                      "Remount the AICull inbox (see ~/nas-drive/docs/open-tasks.md)")
+
+        # The watcher's log, last 7 days: failures, each marked resolved where the state says so.
+        # It logs nothing on an idle poll, so "last_ingest" is the last shoot it finished.
+        recent, last = [], None
+        week = datetime.now().astimezone() - timedelta(days=7)
+        try:
+            with open(ingest_log, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 600_000))
+                tail = fh.read().decode("utf-8", "replace").splitlines()[1:]
+        except OSError:
+            tail = []
+        done_after: dict[str, str] = {}
+        for line in tail:
+            m = re.match(r"^\[([^\]]+)\] (.*)$", line)
+            if not m:
+                continue
+            try:
+                at = datetime.fromisoformat(m.group(1))
+            except ValueError:
+                continue
+            msg = m.group(2)
+            if msg.startswith("done: "):
+                done_after[msg[6:].split(" -> ")[0]] = m.group(1)
+                last = {"at": at.isoformat(timespec="seconds"), "shoot": os.path.basename(msg[6:].split(" -> ")[0])}
+            if at < week or not ("FAILED" in msg or msg.startswith("ABORT")) or msg.startswith("msmtp"):
+                continue
+            step = "inbox" if msg.startswith("ABORT") else msg.split(" ", 1)[0]
+            folder = (re.search(r" for (\S+)", msg) or [None, ""])[1]
+            recent.append({"at": at.isoformat(timespec="seconds"), "step": step, "folder": folder, "what": msg[:160]})
+        for r in recent:
+            r["resolved"] = {"embed": not unindexed, "geotag": not ungeo, "daysum": not unsummed,
+                             "inbox": check_mount and not mount}.get(
+                r["step"], bool(r["folder"]) and done_after.get(r["folder"], "") > r["at"])
+        for step in ("run", "export"):
+            open_ = [r for r in recent if r["step"] == step and not r["resolved"]]
+            if open_:
+                alert("bad", f"Ingest {step} failing", f"{len(open_)} failure{'s' if len(open_) > 1 else ''} this week, last for "
+                      f"{os.path.basename(open_[-1]['folder'])}; it retries every 15 minutes.", "tail ~/photo-culling/trial_out/ingest_watch.log")
+        status = "bad" if any(a["level"] == "bad" for a in alerts) else "warn" if alerts else "ok"
+        return jsonify({
+            "status": status, "alerts": alerts, "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "index": {"ok": ok, "unindexed": unindexed, "ungeotagged": ungeo, "unsummarised": len(unsummed),
+                      "days": len(folders), "caption_errors": errored},
+            "model": model, "last_ingest": last, "recent": recent[-8:],
         })
 
     @bp.route("/api/img/<int:rowid>")

@@ -1704,6 +1704,8 @@ def cmd_embed(args):
             eta = (elapsed / i) * (len(rows) - i)
             print(f"[{i}/{len(rows)}] embedded  ({elapsed/i*1000:.0f}ms/img, ETA {_fmt_eta(eta)})")
     print(f"\nDone: {done} ok / {skipped} skipped (no text) / {errs} error in {_fmt_eta(time.time() - t0)}.")
+    if errs:   # non-zero, so the ingest watcher logs "embed FAILED" instead of carrying on silently
+        sys.exit(1)
 
 
 # ----------------------------------------------------------------------------
@@ -1929,6 +1931,8 @@ def cmd_daysum(args):
         if i % 25 == 0 or i == len(todo):
             print(f"[{i}/{len(todo)}] {Path(folder).name}: {summary.splitlines()[0]}  ({_fmt_eta(time.time() - t0)})", flush=True)
     print(f"Done: {len(todo) - errs} summarised, {errs} error(s).")
+    if errs:   # non-zero, so the ingest watcher logs "daysum FAILED"
+        sys.exit(1)
 
 
 def cmd_compare(args):
