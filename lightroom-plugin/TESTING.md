@@ -1,0 +1,68 @@
+# AI Cull Sync v2 — scratch-catalog checklist
+
+About 15 minutes at the Mac. It runs the same two-run kit as `tests/test_sync.lua`, but in real
+Lightroom, which the fake SDK can't stand in for. Use a scratch catalog: nothing here touches
+your real one.
+
+The kit is staged on the inbox share at `/Volumes/Passport/AICullInbox/plugin-v2-test/`:
+
+| Path | What |
+|---|---|
+| `AICull.lrplugin/` | v2 |
+| `AICull-v1.lrplugin/` | v1, to roll back to |
+| `run1/`, `run2/` | `pending.tsv` + `cull-decisions.tsv` for each run |
+
+## Set up
+
+1. **File → New Catalog**, named `AI Cull test`, anywhere on the Mac.
+2. Import `/Volumes/Passport/Pictures/2026/2026-10-01` with **Add** (not Copy): 32 photos.
+3. **File → Plug-in Manager**, select **AI Cull Sync**, note the folder it loads from, replace that
+   folder's contents with `plugin-v2-test/AICull.lrplugin`, then **Reload Plug-in**. Accept the
+   prompt to update the catalog for the plugin's metadata.
+4. Set the "before" state by hand:
+   - `DSC05038`: flag as **Pick** (P).
+   - `DSC05039`: Caption `My own caption.`
+   - `DSC05040`: **2 stars**.
+
+## Run 1
+
+5. Select **All Photographs** → **Library → Plug-in Extras → Sync AI Cull Data (AI + phone
+   culls)…** → pick `plugin-v2-test/run1/pending.tsv`.
+6. It asks about **1 caption** that differs from the AI's text. Choose **Keep them**.
+7. Check:
+
+| Photo | Expected |
+|---|---|
+| DSC05036 | Rejected. Caption: `Burst reject · kept DSC05037`, then `TEST AI: A one.` Keyword `Cull › Burst reject` |
+| DSC05037 | Pick, 5 stars |
+| DSC05038 | Still **your** Pick. Caption `TEST AI: C one.` with no burst line, no burst keyword |
+| DSC05039 | Caption still `My own caption.` |
+| DSC05040 | Pick, still **2** stars |
+| DSC05041 | Caption `TEST AI: F one.` |
+| Collections | Smart collection **Burst rejects, similar kept** holds DSC05036 only |
+| Final dialog | 1 phone row matched no photo (`NOTREAL.ARW`); a receipt in `run1/applied/` |
+
+## Between runs
+
+8. `DSC05041`: add ` Extra words.` to the end of its caption.
+9. `DSC05042`: change its caption to `TEST AI: I one, fixed by me.`
+
+## Run 2
+
+10. Select **All Photographs** → Sync → pick `plugin-v2-test/run2/cull-decisions.tsv` this time.
+    There should be **no** caption question.
+11. Check:
+
+| Photo | Expected |
+|---|---|
+| DSC05036 | Pick (rescued). Caption `TEST AI: A one.` with no burst line; keyword gone; out of the smart collection |
+| DSC05038 | Still your Pick |
+| DSC05039 | Still `My own caption.` |
+| DSC05041 | `TEST AI: F two. Extra words.` |
+| DSC05042 | Still `TEST AI: I one, fixed by me.` |
+
+## If something is off
+
+Note the photo and what you saw (a screenshot of any error dialog helps). To roll back, put
+`AICull-v1.lrplugin`'s contents back in the plugin folder and Reload. The hidden fields v2 added
+stay in the catalog, unused.

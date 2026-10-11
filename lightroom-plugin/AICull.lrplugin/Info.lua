@@ -1,20 +1,20 @@
 --[[
   AI Cull Sync -- Lightroom Classic plugin.
 
-  Merges photo_cull's AI keywords + color label into your catalog WITHOUT ever touching your
-  star ratings or pick/reject flags. It reads a TSV written by:
-      photo_cull.py export --plugin-data aicull.tsv --folder <shoot>
-  and applies only `label` (color) + keywords to the selected photos. No "Read Metadata from
-  File", so nothing you set by hand is overwritten.
+  Applies photo_cull's AI color label, keywords and caption, plus your phone culls from
+  Culling Bay Mobile (pick/reject flags, Hero stars, burst notes). It never overwrites a flag,
+  rating or caption text you set by hand: hidden plugin fields (AICullMetadata.lua) record what
+  the plugin itself wrote, and only that is ever replaced. No "Read Metadata from File".
 ]]
 return {
     LrSdkVersion        = 12.0,
     LrSdkMinimumVersion = 6.0,
     LrToolkitIdentifier = 'com.dannywhite.photocull.aicull',
     LrPluginName        = 'AI Cull Sync',
+    LrMetadataProvider  = 'AICullMetadata.lua',
     LrLibraryMenuItems  = {
         {
-            title = 'Sync AI Cull Data (keywords + color label)…',
+            title = 'Sync AI Cull Data (AI + phone culls)…',
             file  = 'SyncAICull.lua',
         },
         {
@@ -22,5 +22,5 @@ return {
             file  = 'SemanticSearch.lua',
         },
     },
-    VERSION = { major = 1, minor = 0, revision = 0 },
+    VERSION = { major = 2, minor = 0, revision = 0 },
 }
