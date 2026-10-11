@@ -156,6 +156,8 @@ button{font:inherit;color:inherit}
 .pb2{flex:1;min-height:50px;border-radius:14px;border:0;background:var(--raise);font:600 14px/1.15 var(--body);cursor:pointer;padding:0 10px}
 .pb2.pri{background:var(--ink);color:var(--bg)}
 .pb2:disabled{opacity:.4;cursor:default}
+.pb2.danger{background:var(--reject);color:#fff}
+.link{background:none;border:0;padding:0;color:var(--muted);font:500 13px/1.3 var(--body);text-decoration:underline;cursor:pointer}
 
 /* duel */
 .du{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:4px 0}

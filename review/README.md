@@ -51,6 +51,9 @@ also lets it install to the Home Screen with an offline app shell).
   burst, sideways to browse. Bursts open as a filmstrip (up to 6 frames) or a winner-stays
   duel. Keeping one frame rejects the rest with the note `Burst reject · kept DSC05039`.
   Double-tap for a 1:1 crop from the RAW.
+- **Start over:** the restart button (either pass) or "Start this day over" in the review clears
+  the day's phone decisions and returns it to pass 1. It works until anything from the day has
+  reached Lightroom; rows already queued in the inbox are taken back out.
 - **Send:** queues the day into `AICullInbox/cull-decisions.tsv`. The AI Cull plugin (v2)
   applies it on the next **Sync AI Cull Data** and leaves a receipt, which the app reads back:
   landed, your own flag kept, or not found.

@@ -263,6 +263,24 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             tmp.write_text(DECISIONS_HEADER + "\n" + "\n".join(rows.values()) + "\n", encoding="utf-8")
             os.replace(tmp, target)
 
+    def remove_rows(keys: set) -> int:
+        """Take rows back out of the inbox's cull-decisions.tsv (under the same lock as writes).
+        A file left with no rows is removed, so the plugin has nothing to pick up."""
+        target = inbox / DECISIONS_FILE
+        if not target.exists():
+            return 0
+        with open(state_dir / "decisions.lock", "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            rows = [l for l in target.read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")]
+            kept = [l for l in rows if tuple(l.split("\t")[:2]) not in keys]
+            if kept:
+                tmp = inbox / (DECISIONS_FILE + ".tmp")
+                tmp.write_text(DECISIONS_HEADER + "\n" + "\n".join(kept) + "\n", encoding="utf-8")
+                os.replace(tmp, target)
+            else:
+                target.unlink()
+        return len(rows) - len(kept)
+
     def partner_paths(day: str) -> dict[str, list[str]]:
         return {f["path"]: [p["path"] for p in f["partners"]] for f in stacks.pair_frames(day_rows(day))}
 
@@ -601,6 +619,37 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             finally:
                 con.close()
         return jsonify({"ok": True, "queued": len(todo), "file_rows": rows})
+
+    @bp.route("/api/day/<path:day>/reset", methods=["POST"])
+    @guarded
+    def api_reset(day):
+        """Start a day over on the phone: clear its decisions and its pass and position. Allowed
+        until anything from the day reaches Lightroom; rows already queued in the inbox are
+        withdrawn. (A sync running at that very moment may still apply what it already read.)"""
+        ingest_receipts()
+        with lock:
+            con = anno_db()
+            try:
+                rows = [dict(r) for r in con.execute("SELECT path, state FROM cull_decisions WHERE day=?", (day,))]
+                applied = sum(1 for r in rows if r["state"] in ("landed", "conflict"))
+                if applied:
+                    return jsonify({"error": f"{applied} decision(s) from this day are already in Lightroom; "
+                                             "change those there", "applied": applied}), 409
+                queued = [r["path"] for r in rows if r["state"] == "queued"]
+                withdrawn = 0
+                if queued:
+                    problem = inbox_problem()
+                    if problem:
+                        return jsonify({"error": problem + "; nothing was reset"}), 503
+                    partners = partner_paths(day)
+                    withdrawn = remove_rows({(Path(p).parent.name, Path(p).name)
+                                             for q in queued for p in [q] + partners.get(q, [])})
+                con.execute("DELETE FROM cull_decisions WHERE day=?", (day,))
+                con.execute("DELETE FROM cull_days WHERE day=?", (day,))
+                con.commit()
+            finally:
+                con.close()
+        return jsonify({"ok": True, "cleared": len(rows), "withdrawn": withdrawn})
 
     @bp.route("/api/crop/<int:rowid>")
     def api_crop(rowid):

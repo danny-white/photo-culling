@@ -24,6 +24,7 @@ const IC = {
   back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   stack: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="4" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M4 8v10a2 2 0 0 0 2 2h10" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>',
   focus: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg>',
+  restart: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4.5 4.5v3.7h3.7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
 
 const S = {
@@ -373,7 +374,8 @@ function vSweep() {
       (multi ? '<span class="sw-n">' + IC.stack + s.frames.length + '</span>' : '') +
       (bd ? '<span class="sw-bd">' + esc(bd) + '</span>' : '') + '<b>' + IC.check + '</b></button>';
   };
-  return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 1 · pick your best') + selectCounter() +
+  const reset = Object.keys(S.dec).length ? '<div class="tools"><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button></div>' : '';
+  return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 1 · pick your best', reset) + selectCounter() +
     '<div class="scroll"><div class="sw-grid">' + S.stacks.map(tile).join('') + '</div>' +
     '<p class="note">Tap your best stacks. This shoot’s budget is ' + b.stacks + ': ' + b.per_hour + ' an hour of shooting (' + b.hours + ' h, pauses over 10 minutes not counted). ' +
     'It’s a soft limit.' + (lrDone() ? ' Stacks you already kept in Lightroom count toward it.' : '') +
@@ -408,7 +410,7 @@ function vCull() {
     : '<div class="strip empty" aria-hidden="true"></div>';
   const left = n - doneCount();
   return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 2 · ' + left + (left === 1 ? ' stack' : ' stacks') + ' left to finish',
-      '<div class="tools"><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>') +
+      '<div class="tools"><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' +
     '<div class="stage" id="stage"><div class="card' + (burst ? ' is-stack' : '') + '"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) + '" draggable="false"><div class="tint"></div>' +
       '<div class="badges">' + badges + '</div>' + pill + chip + '<div class="stamp"><span>KEEP</span></div></div>' +
@@ -555,7 +557,8 @@ function vSummary() {
         '<p class="note">The phone said otherwise, but you had flagged ' + (won.length > 1 ? 'these' : 'this') + ' in Lightroom yourself, so Lightroom kept your flag. Change it there if the phone was right.</p>' : '') +
       (rejects.length ? (fromBurst.length ? '<p class="sec">From bursts · similar frame kept</p>' + grid(fromBurst) : '') +
         (outright.length ? '<p class="sec">Rejected outright</p>' + grid(outright) : '') + '<p class="note">Tap a frame to rescue it.</p>'
-        : '<p class="note">No rejects today.</p>') + '</div>' +
+        : '<p class="note">No rejects today.</p>') +
+      '<p class="note"><button class="link" data-act="reset-ask">Start this day over</button></p></div>' +
     '<div class="foot"><button class="pb2" data-act="days">Back to days</button><button class="pb2 pri" data-act="send"' + (unsent ? '' : ' disabled') + '>' + sendLabel + '</button></div>';
 }
 
@@ -769,6 +772,41 @@ async function sendDay(btn) {
   draw();
 }
 
+// Start a day over: clears the phone's decisions for it. Allowed until any of them reach
+// Lightroom; rows already queued in the inbox are taken back out.
+function resetAsk() {
+  const ds = Object.values(S.dec), applied = ds.filter(d => d.state === 'landed' || d.state === 'conflict').length;
+  const queued = ds.filter(d => d.state === 'queued').length;
+  const el = $('#sheet');
+  el.innerHTML = '<div class="sheet" role="dialog" aria-label="Start this day over"><div class="sh-grab"></div>' + (applied
+    ? '<p class="sh-q">Already in Lightroom</p><p class="sh-muted">' + applied + ' decision' + (applied > 1 ? 's' : '') +
+      ' from this day reached Lightroom in a sync. The phone can’t take ' + (applied > 1 ? 'them' : 'it') + ' back: change ' + (applied > 1 ? 'those photos' : 'that photo') + ' in Lightroom.</p>' +
+      '<div class="sh-row"><button class="pb2" data-act="close-sheet">Close</button></div>'
+    : '<p class="sh-q">Start ' + esc(dayTitle(S.day)) + ' over?</p><p class="sh-muted">Clears the ' + ds.length + ' decision' + (ds.length === 1 ? '' : 's') +
+      ' you made on the phone for this day' + (queued ? ', and takes the ' + queued + ' waiting for Lightroom back out of the inbox' : '') +
+      '. Flags and stars you set in Lightroom aren’t touched. This can’t be undone.</p>' +
+      '<div class="sh-row"><button class="pb2" data-act="close-sheet">Cancel</button><button class="pb2 danger" data-act="reset-do">Start over</button></div>') + '</div>';
+  el.hidden = false;
+  S.sheet = true;
+}
+async function resetDo(btn) {
+  btn.disabled = true;
+  clearTimeout(progressT);                          // a position save still pending would bring the day back
+  pump();                                           // taps still in the queue must land first
+  for (let i = 0; i < 40 && Q.items.length; i++) await new Promise(r => setTimeout(r, 250));
+  if (Q.items.length) { btn.disabled = false; return toast('Still offline: ' + Q.items.length + ' taps waiting to save. Try again once they are in.'); }
+  const day = S.day.day;
+  let body;
+  try {
+    const r = await fetch('/m/api/day/' + dayPath(day) + '/reset', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Culling-Bay': '1' }, body: '{}' });
+    body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+  } catch (e) { btn.disabled = false; closeSheet(); return toast('Not reset: ' + e.message); }
+  closeSheet();
+  await openDay(day);
+  toast('Started over: cleared ' + body.cleared + (body.withdrawn ? ', took ' + body.withdrawn + ' back out of the inbox' : ''));
+}
+
 function openPicker() {
   const s = S.stacks[S.cursor];
   if (!s || s.frames.length < 2) return;
@@ -816,6 +854,8 @@ document.addEventListener('click', e => {
     case 'info': return openSheet();
     case 'close-sheet': return closeSheet();
     case 'close-focus': return closeFocus();
+    case 'reset-ask': return resetAsk();
+    case 'reset-do': return resetDo(b);
     case 'picker': return openPicker();
     case 'close-picker': S.picker = null; S.screen = 'cull'; return draw();
     case 'view': return stripView(+b.dataset.i);

@@ -311,6 +311,46 @@ def main():
         check("3 stacks were already flagged or rated in Lightroom and skipped" in wd.text(".scroll"), "summary counts the skipped stacks")
         shot("7-summary-lr")
 
+        # start over: refused for a day with a decision already in Lightroom...
+        wd.click('.link[data-act="reset-ask"]')
+        wd.wait("!document.querySelector('#sheet').hidden")
+        check("Already in Lightroom" in wd.text("#sheet") and not wd.js("return !!document.querySelector('[data-act=\"reset-do\"]')"),
+              "start over refused once a decision is in Lightroom")
+        wd.click('#sheet [data-act="close-sheet"]')
+        # ...and allowed for a day that is only culled on the phone
+        DAY2 = "2026/2026-09-29"
+        wd.go(app + "#/")
+        wd.wait("document.querySelector('#day-search')")
+        wd.js("const i=document.querySelector('#day-search'); i.value=''; i.dispatchEvent(new Event('input', {bubbles:true}));")
+        wd.wait("document.querySelector('.day[data-day=\"%s\"]')" % DAY2)
+        wd.click(f'.day[data-day="{DAY2}"]')
+        wd.wait("document.querySelector('.sw-grid')")
+        wd.click('.sw-t[data-i="0"]')
+        wd.click('[data-act="sweep-done"]')
+        wd.wait("document.querySelector('.card') || !document.querySelector('#sheet').hidden")
+        if not wd.js("return document.querySelector('#sheet').hidden"):
+            wd.click('#sheet [data-act="sweep-force"]')
+        wd.wait("document.querySelector('[data-act=\"reset-ask\"]')")
+        wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
+        con = sqlite3.connect(tmp / "annotations.db")
+        before = con.execute("SELECT COUNT(*) FROM cull_decisions WHERE day=?", (DAY2,)).fetchone()[0]
+        wd.click('[data-act="reset-ask"]')
+        wd.wait("document.querySelector('[data-act=\"reset-do\"]')")
+        shot("8-reset")
+        wd.click('[data-act="reset-do"]')
+        wd.wait("document.querySelector('#toast').textContent.includes('Started over')")
+        after = con.execute("SELECT COUNT(*) FROM cull_decisions WHERE day=?", (DAY2,)).fetchone()[0]
+        prog = con.execute("SELECT COUNT(*) FROM cull_days WHERE day=?", (DAY2,)).fetchone()[0]
+        con.close()
+        time.sleep(1.0)   # a stale position save would land in this window
+        con = sqlite3.connect(tmp / "annotations.db")
+        prog = con.execute("SELECT COUNT(*) FROM cull_days WHERE day=?", (DAY2,)).fetchone()[0]
+        con.close()
+        grid = wd.js("return !!document.querySelector('.sw-grid') && !document.querySelector('.sw-t.on')")
+        check(before > 50 and after == 0 and prog == 0 and grid,
+              f"start over: {before} -> {after} decisions, progress rows {prog}, empty pass 1 {grid} (" + wd.text("#toast") + ")")
+        wd.go(app + f"#/day/{DAY}")
+
         # everything reached the server: reload and compare
         wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
         wd.go(app + f"#/day/{DAY}")

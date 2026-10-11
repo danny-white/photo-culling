@@ -139,6 +139,32 @@ class RoundTrip(unittest.TestCase):
         self.assertEqual(self.states()["DSC05061.ARW"], "queued")
         self.assertIn("DSC05061.ARW", (self.inbox / "cull-decisions.tsv").read_text())
 
+    def test_reset_a_day(self):
+        fr = self.ids()
+        self.decide("rej-61", [{"id": fr["DSC05061.ARW"]["id"], "flag": "reject", "via": "sweep"}])
+        self.decide("rej-62", [{"id": fr["DSC05062.ARW"]["id"], "flag": "reject", "via": "sweep"}])
+        self.c.put(f"/m/api/day/{DAY}/progress", json={"pass": 2, "cursor": 3}, headers=H)
+        self.c.post(f"/m/api/day/{DAY}/send", json={}, headers=H)                  # queued, not yet synced
+        (self.inbox / "cull-decisions.tsv").write_text(                              # another day's row shares the file
+            (self.inbox / "cull-decisions.tsv").read_text() + "2026-09-29\tDSC04001.ARW\treject\t\t\n")
+        r = self.c.post(f"/m/api/day/{DAY}/reset", json={}, headers=H).get_json()
+        self.assertEqual((r["cleared"], r["withdrawn"]), (2, 2))
+        self.assertEqual((self.inbox / "cull-decisions.tsv").read_text().splitlines()[1:],
+                         ["2026-09-29\tDSC04001.ARW\treject\t\t"])                # the other day stays
+        body = self.c.get(f"/m/api/day/{DAY}").get_json()
+        self.assertIsNone(body["progress"])
+        self.assertTrue(all(f["decision"] is None for s in body["stacks"] for f in s["frames"]))
+
+    def test_reset_refused_once_in_lightroom(self):
+        fr = self.ids()
+        self.decide("rej-61", [{"id": fr["DSC05061.ARW"]["id"], "flag": "reject", "via": "sweep"}])
+        con = self.anno()
+        con.execute("UPDATE cull_decisions SET state='landed'")
+        con.commit(); con.close()
+        r = self.c.post(f"/m/api/day/{DAY}/reset", json={}, headers=H)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("already in Lightroom", r.get_json()["error"])
+
     def test_send_refuses_without_the_inbox_mount(self):
         import mobile
         from flask import Flask
