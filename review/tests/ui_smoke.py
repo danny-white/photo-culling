@@ -388,7 +388,9 @@ def main():
         con = sqlite3.connect(tmp / "annotations.db")
         before = con.execute("SELECT COUNT(*) FROM cull_decisions WHERE day=?", (DAY2,)).fetchone()[0]
         con.close()
-        wd.click('[data-act="reset-ask"]')
+        check(not wd.js("return !!document.querySelector('.top [data-act=\"reset-ask\"]')"), "Start over is off the card's top bar")
+        wd.click('.top [data-act="grid"]'); wd.wait("document.querySelector('.gv-grid')")
+        wd.click('.link[data-act="reset-ask"]')                         # it lives with the day grid and the review
         wd.wait("document.querySelector('[data-act=\"reset-do\"]')")
         shot("8-reset")
         wd.click('[data-act="reset-do"]')

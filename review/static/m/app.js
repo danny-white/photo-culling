@@ -162,12 +162,21 @@ function dayTitle(d) {
   return new Date(y, m - 1, dd).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+// The gesture hint goes once you have culled on three different days.
+const HINT_DAYS = 3;
+const hintDays = () => recall('cbm-hint-days', []);
+function noteHintDay() {
+  const d = new Date().toISOString().slice(0, 10), days = hintDays();
+  if (!days.includes(d) && days.length < HINT_DAYS) store('cbm-hint-days', days.concat(d));
+}
+
 /* one action = one tap; saved to the server and to the undo history */
 function act(label, changes, extra) {
   const before = changes.map(c => [c.id, S.dec[c.id] ? Object.assign({}, S.dec[c.id]) : null]);
   for (const c of changes) {
     S.dec[c.id] = { flag: c.flag, stars: c.flag === 'pick' ? (c.stars || null) : null, note: c.note || '', state: 'draft', outcome: null };
   }
+  noteHintDay();
   const action_id = newId();
   S.hist.push(Object.assign({ action_id, label, before, cursor: S.cursor, pass: S.pass, screen: 'cull' }, extra || {}));
   send('POST', '/m/api/decide', { action_id, day: S.day.day, label, changes });
@@ -200,15 +209,17 @@ function advance() {
   else { S.cursor = i; S.screen = 'cull'; saveProgress(); }
   draw('dec');
 }
-function keepFrames(s, keeps, hero, via) {
-  const changes = keeps.map((f, i) => ({ id: f.id, flag: 'pick', stars: hero && i === 0 ? 5 : null, note: '', via }));
+// rates: {frame id: stars} from the star row; a frame without one is kept unrated.
+function keepFrames(s, keeps, rates, via) {
+  rates = rates || {};
+  const changes = keeps.map(f => ({ id: f.id, flag: 'pick', stars: rates[f.id] || null, note: '', via }));
   const others = s.frames.filter(f => !keeps.includes(f));
   const note = NOTE_PREFIX + keeps.map(f => stem(f.file)).join(', ');
   for (const f of others) changes.push({ id: f.id, flag: 'reject', note, via });
-  const head = (hero ? 'Hero ' : 'Kept ') + (keeps.length > 1 ? keeps.length + ' frames' : stem(keeps[0].file));
+  const head = 'Kept ' + (keeps.length > 1 ? keeps.length + ' frames' : stem(keeps[0].file) + (rates[keeps[0].id] ? ' ' + starText(rates[keeps[0].id]) : ''));
   commit(others.length ? head + ' · ' + others.length + ' rejected with a note' : head, changes);
 }
-function decide(a) {
+function decide(a, stars) {   // stars: from the star row, keeping the photo with that rating
   const s = S.stacks[S.cursor];
   if (!s) return;
   if (a === 'reject') {
@@ -219,8 +230,13 @@ function decide(a) {
     return commit('Kept all ' + s.frames.length + (s.kind === 'pano' ? ' · panorama' : s.kind === 'bracket' ? ' · bracket' : ''),
       s.frames.map(f => ({ id: f.id, flag: 'pick', note: '', via: 'card' })));
   }
-  keepFrames(s, [shown(s)], a === 'hero', 'card');
+  const f = shown(s);
+  keepFrames(s, [f], stars ? { [f.id]: stars } : null, 'card');
 }
+// The star row: one tap keeps the photo with that rating (as in Thumbs). In the burst picker it
+// rates the frame you are looking at, and ticks it.
+const starRow = (rated, label) => '<div class="stars" role="group" aria-label="' + (label || 'Keep with stars') + '">' + [1, 2, 3, 4, 5].map(n =>
+  '<button data-act="star" data-n="' + n + '" class="' + (n <= rated ? 'on' : '') + '" aria-label="' + n + ' star' + (n > 1 ? 's' : '') + '">' + IC.star + '</button>').join('') + '</div>';
 
 /* ---------------------------------------------------------------- toast and sheet */
 let toastT;
@@ -303,6 +319,8 @@ function bindPhotos(root) {
   }
 }
 window.addEventListener('resize', () => { for (const p of view.querySelectorAll('.photo')) fitPhoto(p); });
+// Turning the phone swaps layouts (app.css); redraw so the 1:1 band is measured for the new one.
+if (window.matchMedia) matchMedia('(orientation: landscape)').addEventListener('change', () => { if (S.screen === 'cull') draw(); });
 function loadShape(id, ms) {   // the photo's shape before its card is drawn, so it doesn't jump
   if (AR[id]) return Promise.resolve();
   return new Promise(res => {
@@ -538,7 +556,7 @@ function vCull() {
     f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + lrHere;
   const strip = burst ? '<button class="strip" data-act="picker">' + s.frames.slice(0, 6).map(x => thumb(x, 'm-' + markOf(x))).join('') +
       (s.frames.length > 6 ? '<span class="more">+' + (s.frames.length - 6) + '</span>' : '') + '<span class="strip-l">Choose</span></button>'
-    : '<div class="strip empty" aria-hidden="true"></div>';
+    : '<div class="strip empty" aria-hidden="true"></div>';   // keeps the buttons still between cards
   // The button that made the decision shows pressed when you come back to the stack.
   const kept = s.frames.filter(x => isPick(S.dec[x.id])).length;
   const pressed = a => !st.done ? false : a === 'reject' ? st.v === 'reject' : st.v === 'reject' ? false
@@ -554,20 +572,21 @@ function vCull() {
   const band = ar >= 1 ? '<div class="band" id="band"><img alt="" draggable="false"><span class="bd">1:1 at ' +
     (f.af ? 'the AF point' : 'the centre') + '</span><span class="band-load">Decoding the RAW…</span></div>' : '';
   return top(backBtn('days', 'Days'), dayTitle(S.day), S.matches ? '' : togo,
-      '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>',
+      '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>',
       S.matches ? '<button class="mchip" data-act="matches">' + S.matches.n + ' match' + (S.matches.n === 1 ? '' : 'es') + ' first</button> · ' + left + ' to go' : '') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' + budgetBar() +
     '<div class="stage' + (band ? ' has-band' : '') + '" id="stage"><div class="' + cls + '"' + (ar < 1 ? '' : ' style="aspect-ratio:' + ar.toFixed(4) + '"') + '>' +
       photo(f, '<div class="tint"></div>' + afBox(f) + stLine(s, st) + '<div class="badges">' + badges + '</div>' + chip + '<div class="stamp"><span>KEEP</span></div>') + '</div>' +
-      band + '<div class="fname">' + esc([f.file].concat(f.partners).join(' + ')) + ' · ' + (S.cursor + 1) + '/' + n + '</div></div>' +
-    strip +
+      band + '<div class="fname">' + esc([f.file].concat(f.partners).join(' + ')) + ' · ' + (S.cursor + 1) + '/' + n + '</div>' +
+      // turned sideways the top bar goes; these stand in for it (app.css)
+      '<button class="ov ov-back" data-act="days">' + IC.back + 'Days</button><span class="ov ov-left">' + esc(togo) + (budgetOf() ? ' · kept ' + keptCount() + ' of ' + budgetOf() : '') + '</span></div>' +
+    (burst || !band ? strip : '') + '<div class="rcol">' + (burst ? '' : starRow(st.done && st.v !== 'reject' ? (frameMark(f) || {}).stars || 0 : 0)) +
     '<div class="bar"><button class="pb pb-rej' + on('reject') + '" data-act="reject">' + IC.x + '<span>Reject</span></button>' +
       '<button class="pb pb-undo" data-act="undo"' + (S.hist.length ? '' : ' disabled') + '>' + IC.undo + '<span>Undo</span></button>' +
-      (burst ? '<button class="pb pb-all' + (sugg && !st.done ? ' sugg' : '') + on('keep-all') + '" data-act="keep-all">' + IC.stack + '<span>Keep all ' + s.frames.length + '</span></button>'
-        : '<button class="pb pb-hero' + on('hero') + '" data-act="hero">' + IC.star + '<span>Hero</span></button>') +
+      (burst ? '<button class="pb pb-all' + (sugg && !st.done ? ' sugg' : '') + on('keep-all') + '" data-act="keep-all">' + IC.stack + '<span>Keep all ' + s.frames.length + '</span></button>' : '') +
       (burst ? '<button class="pb pb-keep' + on('keep') + '" data-act="choose">' + IC.stack + '<span>Choose</span></button></div>'
-        : '<button class="pb pb-keep' + on('keep') + '" data-act="keep">' + IC.check + '<span>Keep</span></button></div>') +
-    '<div class="hint">Swipe ↑ ' + (burst ? 'open the burst' : 'keep') + ' · ↓ reject · ← → browse · double-tap for focus</div>';
+        : '<button class="pb pb-keep' + on('keep') + on('hero') + '" data-act="keep">' + IC.check + '<span>Keep</span></button></div>') + '</div>' +
+    (hintDays().length < HINT_DAYS ? '<div class="hint">Swipe ↑ ' + (burst ? 'open' : 'keep') + ' · ↓ reject · ← → browse · tap: full screen · double-tap: focus</div>' : '');
 }
 
 function vStrip() {
@@ -588,7 +607,8 @@ function vStrip() {
       '<span class="pk-id">' + esc(stem(f.file)) + ' · ' + (pk.view + 1) + '/' + fr.length + '</span></div>' +
     '<div class="pk-strip">' + fr.map((x, i) => '<button class="pk-th' + (i === pk.view ? ' cur' : '') + '" data-act="view" data-i="' + i + '" aria-label="Show ' + esc(x.file) + '">' +
       thumb(x) + (x.id === s.lead ? '<i class="dot"></i>' : '') + (pk.sel.has(x.id) ? '<b>' + IC.check + '</b>' : '') + '</button>').join('') + '</div>' +
-    '<p class="pk-note">A dot marks the sharpest frame. Swipe to look, 1:1 to compare the same spot, ✓ to keep.</p>' +
+    starRow(pk.rate[f.id] || (isPick(S.dec[f.id]) && S.dec[f.id].stars) || 0, 'Rate this frame') +
+    '<p class="pk-note">A dot marks the sharpest frame. Swipe to look, 1:1 to compare the same spot, ✓ or a star to keep.</p>' +
     '<div class="foot"><button class="pb2" data-act="pk-reject">Reject all ' + fr.length + '</button>' +
       '<button class="pb2 pri" data-act="pk-keep"' + (n ? '' : ' disabled') + '>' + (n ? 'Keep ' + n + ' · reject ' + (fr.length - n) : 'Tick a keeper') + '</button></div>';
 }
@@ -706,7 +726,8 @@ function vGrid() {
       '<button data-act="grid-filter" data-f="' + k + '" aria-selected="' + (S.gridFilter === k) + '">' + label + '</button>').join('') + '</div></div>' +
     '<div class="scroll"><div class="gv-grid">' + shown.map(tile).join('') + '</div>' +
     (shown.length ? '' : '<p class="note">Nothing here.</p>') +
-    '<p class="note">The phone’s decisions, or your Lightroom flags from the last sync where the phone has none. Tap a photo to open its card.</p></div>';
+    '<p class="note">The phone’s decisions, or your Lightroom flags from the last sync where the phone has none. Tap a photo to open its card.</p>' +
+    '<p class="note"><button class="link" data-act="reset-ask">Start this day over</button></p></div>';
 }
 
 function vSummary() {
@@ -769,6 +790,7 @@ function draw(anim) {
     : scr === 'picker' ? (S.picker.m === 'strip' ? vStrip() : vKnock())
     : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : vCull();
   view.classList.toggle('no-chrome', !S.chrome);
+  view.dataset.screen = scr;
   bindPhotos(view);
   if (scr === 'cull') {
     bindStage();
@@ -903,16 +925,16 @@ function setStamp(card, a, k) {
   tint.style.background = a === 'reject' ? 'var(--reject)' : 'var(--keep)';
   tint.style.opacity = k * .25;
 }
-function flyOut(a) {
+function flyOut(a, stars) {
   if (S.busy) return;
   const card = $('.card', view);
-  if (S.screen !== 'cull' || !card || reduced()) return decide(a);
+  if (S.screen !== 'cull' || !card || reduced()) return decide(a, stars);
   S.busy = true;
   setStamp(card, a, 1);
-  card.style.transition = 'transform .2s ease-in, opacity .2s ease-in';
+  card.style.transition = 'transform .1s ease-in, opacity .1s ease-in';
   card.style.transform = 'translateY(' + (a === 'reject' ? 115 : -115) + '%)';
   card.style.opacity = '0';
-  setTimeout(() => { S.busy = false; decide(a); }, 190);
+  setTimeout(() => { S.busy = false; decide(a, stars); }, 100);
 }
 function go(d) {
   const n = S.stacks.length;
@@ -934,13 +956,18 @@ function tap(x, y) {
     return;
   }
   lastTap = now;
-  tapT = setTimeout(() => { S.chrome = !S.chrome; view.classList.toggle('no-chrome', !S.chrome); }, 300);
+  tapT = setTimeout(() => {
+    S.chrome = !S.chrome;
+    view.classList.toggle('no-chrome', !S.chrome);
+    for (const p of view.querySelectorAll('.photo')) fitPhoto(p);
+    if (S.chrome) loadBand();
+  }, 300);
 }
 function bindStage() {
   const stage = $('#stage', view), card = $('.card', view);
   if (!stage || !card) return;
   let st = null;
-  const reset = () => { card.style.transition = 'transform .22s cubic-bezier(.2,.8,.2,1)'; card.style.transform = ''; setStamp(card, 'keep', 0); };
+  const reset = () => { card.style.transition = 'transform .12s cubic-bezier(.2,.8,.2,1)'; card.style.transform = ''; setStamp(card, 'keep', 0); };
   stage.addEventListener('pointerdown', e => {
     if (S.busy || e.button > 0 || e.target.closest('button')) return;
     st = { x: e.clientX, y: e.clientY, axis: null, d: 0, kind: null };
@@ -1086,7 +1113,7 @@ function openPicker(fromStart) {
   if (!s || s.frames.length < 2) return;
   const picked = s.frames.filter(f => isPick(S.dec[f.id]));
   if (s.frames.length <= PICKER_STRIP_MAX) {
-    S.picker = { m: 'strip', sel: new Set(picked.map(f => f.id)), view: fromStart ? 0 : s.frames.indexOf(shown(s)) };
+    S.picker = { m: 'strip', sel: new Set(picked.map(f => f.id)), view: fromStart ? 0 : s.frames.indexOf(shown(s)), rate: {} };
   } else {   // coming back to a decided burst, the frames you didn't keep start out
     S.picker = { m: 'knock', out: new Set(picked.length ? s.frames.filter(f => !isPick(S.dec[f.id])).map(f => f.id) : []) };
   }
@@ -1139,8 +1166,13 @@ document.addEventListener('click', e => {
     case 'choose': return openPicker(true);
     case 'linked': return toggleLinked();
     case 'ko': return knockTap(+b.dataset.i);
-    case 'ko-keep': { const keeps = s.frames.filter(f => !S.picker.out.has(f.id)); if (keeps.length) keepFrames(s, keeps, false, 'burst'); return; }
-    case 'keep': case 'reject': case 'hero':
+    case 'ko-keep': { const keeps = s.frames.filter(f => !S.picker.out.has(f.id)); if (keeps.length) keepFrames(s, keeps, null, 'burst'); return; }
+    case 'star': {
+      const n = +b.dataset.n;
+      if (S.screen === 'picker') { const f = s.frames[S.picker.view]; S.picker.rate[f.id] = n; S.picker.sel.add(f.id); return draw(); }
+      return flyOut('keep', n);
+    }
+    case 'keep': case 'reject':
       if (S.screen === 'focus') { S.focus = null; S.screen = 'cull'; return decide(a); }
       return flyOut(a);
     case 'keep-all': return flyOut('all');
@@ -1160,7 +1192,7 @@ document.addEventListener('click', e => {
     case 'close-picker': S.picker = null; S.screen = 'cull'; return draw();
     case 'view': return stripView(+b.dataset.i);
     case 'tick': { const f = s.frames[S.picker.view]; S.picker.sel.has(f.id) ? S.picker.sel.delete(f.id) : S.picker.sel.add(f.id); return draw(); }
-    case 'pk-keep': { const keeps = s.frames.filter(f => S.picker.sel.has(f.id)); if (keeps.length) keepFrames(s, keeps, false, 'burst'); return; }
+    case 'pk-keep': { const keeps = s.frames.filter(f => S.picker.sel.has(f.id)); if (keeps.length) keepFrames(s, keeps, S.picker.rate, 'burst'); return; }
     case 'pk-reject': return decide('reject');
     case 'drop': {
       const st = S.stacks[+b.dataset.stack], name = stem(shown(st).file);
@@ -1199,7 +1231,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'ArrowRight') { e.preventDefault(); go(1); }
   else if (k === 'ArrowLeft') { e.preventDefault(); go(-1); }
   else if (k === 'a' && burst) flyOut('all');
-  else if (k === 'h' && !burst) flyOut('hero');
+  else if (k >= '1' && k <= '5' && !burst) flyOut('keep', +k);   // stars, as in Lightroom
   else if (k === 'b' || k === 'Enter') openPicker();
   else if (k === 'i') openSheet();
   else if (k === 'f') { const sp = spotOf(shown(s)); openFocus(shown(s).id, sp[0], sp[1]); }

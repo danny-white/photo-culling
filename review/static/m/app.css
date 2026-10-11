@@ -105,6 +105,41 @@ button{font:inherit;color:inherit}
 .pb:active:not(:disabled){background:var(--raise)}
 .pb.on{background:var(--raise);background:color-mix(in srgb,currentColor 18%,var(--panel));box-shadow:inset 0 0 0 1.5px currentColor}
 .hint{flex:none;text-align:center;font-size:11px;color:var(--muted);padding:6px 8px 6px}
+/* the star row: a tap keeps with that rating */
+.stars{display:flex;justify-content:center;gap:5px;padding:4px 12px 2px;flex:none}
+.stars button{flex:1;max-width:56px;height:36px;border:0;border-radius:10px;background:var(--panel);color:var(--muted);cursor:pointer;display:grid;place-items:center;padding:0}
+.stars button.on{color:var(--hint)}
+.stars svg{width:19px;height:19px}
+.rcol{display:contents}
+.ov{display:none}
+
+/* a tap hides every control: the photo gets the whole screen, and swipes still work */
+#view[data-screen="cull"].no-chrome>.top,#view[data-screen="cull"].no-chrome>.net,#view[data-screen="cull"].no-chrome>.prog,
+#view[data-screen="cull"].no-chrome>.budget,#view[data-screen="cull"].no-chrome>.strip,#view[data-screen="cull"].no-chrome>.rcol,
+#view[data-screen="cull"].no-chrome>.hint,#view.no-chrome .band{display:none!important}
+#view.no-chrome .card{flex:1 1 0;min-height:0;max-height:none;aspect-ratio:auto!important;margin-top:0}
+#view.no-chrome .card .photo::before,#view.no-chrome .card .photo::after{display:none}
+
+/* turned sideways: the photo fills the height, Keep and Reject down the right edge */
+@media (orientation:landscape) and (max-height:520px){
+  #view[data-screen="cull"]{flex-direction:row;max-width:none}
+  #view[data-screen="cull"]>.top,#view[data-screen="cull"]>.prog,#view[data-screen="cull"]>.budget,
+  #view[data-screen="cull"]>.strip,#view[data-screen="cull"]>.hint,#view[data-screen="cull"] .fname,#view[data-screen="cull"] .band{display:none!important}
+  #view[data-screen="cull"] .stage{padding:6px 0}
+  #view[data-screen="cull"] .card{flex:1 1 0;min-height:0;max-height:none;aspect-ratio:auto!important;margin-top:0}
+  #view[data-screen="cull"] .card .photo::before,#view[data-screen="cull"] .card .photo::after{display:none}
+  #view[data-screen="cull"] .rcol{display:flex;flex-direction:column;gap:6px;width:104px;flex:none;padding:8px 8px 8px 6px}
+  #view[data-screen="cull"] .rcol .stars{flex-direction:column;padding:0;gap:3px}
+  #view[data-screen="cull"] .rcol .stars button{max-width:none;height:26px;flex:none}
+  #view[data-screen="cull"] .rcol .bar{flex-direction:column;flex:1;padding:0;gap:6px}
+  #view[data-screen="cull"] .rcol .pb{min-height:0}
+  #view[data-screen="cull"] .ov{display:flex;position:absolute;z-index:3;align-items:center;gap:2px;border:0;border-radius:999px;background:rgba(0,0,0,.62);font:600 12px/1 var(--body);padding:6px 10px}
+  #view[data-screen="cull"] .ov-back{left:8px;top:8px;color:var(--accent);cursor:pointer}
+  #view[data-screen="cull"] .ov-back svg{width:14px;height:14px}
+  #view[data-screen="cull"] .ov-left{left:8px;bottom:8px;color:#fff}
+  #view[data-screen="cull"].no-chrome .ov{display:none}
+  #view[data-screen="cull"] .badges{top:40px}
+}
 
 /* days */
 .head{padding:8px 16px 4px;flex:none}
@@ -249,7 +284,7 @@ button{font:inherit;color:inherit}
 @keyframes enterUp{from{opacity:0;transform:translateY(16px) scale(.98)}to{opacity:1;transform:none}}
 @keyframes enterNext{from{opacity:0;transform:translateX(42px)}to{opacity:1;transform:none}}
 @keyframes enterPrev{from{opacity:0;transform:translateX(-42px)}to{opacity:1;transform:none}}
-.card.enter-dec{animation:enterUp .22s ease-out}
-.card.enter-next{animation:enterNext .2s ease-out}
-.card.enter-prev{animation:enterPrev .2s ease-out}
+.card.enter-dec{animation:enterUp .1s ease-out}
+.card.enter-next{animation:enterNext .1s ease-out}
+.card.enter-prev{animation:enterPrev .1s ease-out}
 @media (prefers-reduced-motion:reduce){.card,.toast,.prog i{animation:none!important;transition:none!important}}
