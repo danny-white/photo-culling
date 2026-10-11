@@ -15,7 +15,9 @@ The kit is staged on the inbox share at `/Volumes/Passport/AICullInbox/plugin-v2
 ## Set up
 
 1. **File → New Catalog**, named `AI Cull test`, anywhere on the Mac.
-2. Import `/Volumes/Passport/Pictures/2026/2026-10-01` with **Add** (not Copy): 32 photos.
+2. Import `/Volumes/Passport/Pictures/2026/2026-10-01` with **Add**: 32 photos. Check the mode at
+   the top of the import window before clicking Import: Lightroom remembers the last one, and
+   **Move** carries the files off the NAS (it did, on the first run of this checklist).
 3. **File → Plug-in Manager**, select **AI Cull Sync**, note the folder it loads from, replace that
    folder's contents with `plugin-v2-test/AICull.lrplugin`, then **quit and reopen Lightroom**
    (⌘Q). Lightroom reads a plug-in's metadata definitions only at launch: Reload Plug-in after
