@@ -80,6 +80,12 @@ data lives in `trial_out/geo` (download it as `geotag --help` says; GeoNames is 
 some frames have GPS: the Sony when it is paired with a phone, and iPhone shots. The ingest
 watcher geotags each new shoot.
 
+**Day summaries:** each day shows two lines (what the day was, then its highlights), written
+by a local text model (`qwen3.5:9b`) from the annotations `photo_cull.py` already made: one
+caption line per burst in shot order, the GPS towns and the commonest subjects. Run
+`photo_cull.py daysum`; the ingest watcher does it per new shoot, and a day is summarised again
+only when its facts change. Search matches the summaries too.
+
 **Lightroom read-back:** each sync, the plugin reports every selected photo's flag and rating.
 A stack you picked, or rated, in Lightroom counts as done on the phone (a reject flag still
 rejects), and a phone decision that loses to your own flag shows under "Your Lightroom flag won".

@@ -187,6 +187,16 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 by_day.setdefault(d, []).append(r)
         return by_day
 
+    def day_summaries() -> dict[str, str]:
+        """{shoot folder path: two-line summary} from photo_cull.py daysum; empty before it runs."""
+        con = db_ro()
+        try:
+            return {r["folder"]: r["summary"] for r in con.execute("SELECT folder, summary FROM day_summaries")}
+        except sqlite3.OperationalError:
+            return {}
+        finally:
+            con.close()
+
     def day_rows(day: str) -> list[dict]:
         con = db_ro()
         try:
@@ -400,6 +410,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         now = time.time()
         if cache["days"] is None or now - cache["days_at"] > DAYS_TTL_S:
             by_day = library_rows()
+            sums = day_summaries()
             summary = []
             stack_paths = {}
             for d, rows in by_day.items():
@@ -420,6 +431,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                     "place": ranked[0] if ranked else None,         # the town most frames were near
                     "places": ranked[:4],
                     "gps_frames": sum(towns.values()),
+                    "summary": sums.get(f"{LIBRARY_ROOT}/{d}"),
                 })
             summary.sort(key=lambda x: (x["date"] or "", x["last_ts"]), reverse=True)
             cache.update(days=summary, days_at=now, stack_paths=stack_paths)
@@ -495,6 +507,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 f["place"] = det.get("place")
         return jsonify({
             "day": day, "folder": day.rsplit("/", 1)[-1], "date": day_date(day),
+            "summary": day_summaries().get(f"{LIBRARY_ROOT}/{day}"),
             "budget": {"stacks": stacks.keep_budget(rows), "per_hour": stacks.KEEP_PER_HOUR,
                        "hours": round(stacks.shooting_hours(rows), 2)},
             "stacks": day_stacks,

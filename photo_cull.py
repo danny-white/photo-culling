@@ -209,6 +209,19 @@ CREATE TABLE IF NOT EXISTS embeddings (
     created_at      TEXT,
     PRIMARY KEY (path, embed_version)
 );
+
+-- Two-line summaries of each shoot folder, written by a local text model from the annotations
+-- above (see cmd_daysum). input_hash covers the facts the model saw plus the prompt version, so a
+-- folder that gains photos, or a new prompt, gets summarised again.
+CREATE TABLE IF NOT EXISTS day_summaries (
+    folder          TEXT PRIMARY KEY,          -- the shoot folder's path
+    summary         TEXT,                      -- line 1: what the day was; line 2: highlights
+    model           TEXT,
+    version         TEXT,
+    frames          INTEGER,
+    input_hash      TEXT,
+    created_at      TEXT
+);
 """
 
 
@@ -1804,6 +1817,120 @@ def cmd_geotag(args):
     print(f"Done: {found} of {len(paths)} image(s) have GPS.")
 
 
+# ----------------------------------------------------------------------------
+# Day summaries: two lines per shoot folder, from the annotations, by a local text model
+# ----------------------------------------------------------------------------
+DAYSUM_MODEL = "qwen3.5:9b"
+DAYSUM_VERSION = "v1"          # bump when the prompt or the facts change, to regenerate every day
+DAYSUM_MAX_LINES = 80          # photo lines per day; busier days are sampled evenly across the day
+DAYSUM_PROMPT = """You write two-line summaries of a day of photos for a photographer's personal archive.
+Below are facts about the day and short AI descriptions of its photos, one line per group of near-identical shots, in the order they were taken.
+
+Return JSON with two fields:
+- "day": what the day was, in under 14 words. Name a place only if it appears in "Places"; otherwise describe the setting (coast, forest, city streets). Never guess a country, region or city.
+- "highlights": the notable subjects or moments, in under 20 words, roughly in the order they happened.
+
+Plain and factual. Do not mention the date, weekday or number of photos. No emoji, no hype, no names of people.
+
+{facts}"""
+DAYSUM_SCHEMA = {"type": "object", "properties": {"day": {"type": "string"}, "highlights": {"type": "string"}},
+                 "required": ["day", "highlights"]}
+_WEEKDAY_LEAD = re.compile(r"^(?:on )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b[,\s]*(?:in |at |of |featuring )?",
+                           re.IGNORECASE)
+
+
+def day_facts(rows: "list[dict]") -> str:
+    """What the model sees for one shoot folder: when, where (GPS towns), the commonest subjects,
+    then one line per burst (time, caption, first tags) in shot order. rows: the folder's ok
+    images, in capture order."""
+    from collections import Counter
+    seen, lines = set(), []
+    for r in rows:
+        key = r.get("burst_id") or r["path"]
+        if key in seen:
+            continue
+        seen.add(key)
+        t = datetime.fromtimestamp(r["capture_ts"]).strftime("%H:%M") if r.get("capture_ts") else "--:--"
+        try:
+            tags = ", ".join(json.loads(r.get("tags") or "[]")[:4])
+        except (ValueError, TypeError):
+            tags = ""
+        lines.append(f"{t} {(r.get('caption') or '').strip()}" + (f" [{tags}]" if tags else ""))
+    if len(lines) > DAYSUM_MAX_LINES:
+        lines = [lines[round(i * (len(lines) - 1) / (DAYSUM_MAX_LINES - 1))] for i in range(DAYSUM_MAX_LINES)]
+    ts = [r["capture_ts"] for r in rows if r.get("capture_ts")]
+    places = Counter(r["place"] for r in rows if r.get("place"))
+    subjects = Counter((r.get("subject") or "").lower() for r in rows if r.get("subject"))
+    when = (f"Shooting {datetime.fromtimestamp(min(ts)).strftime('%H:%M')} to "
+            f"{datetime.fromtimestamp(max(ts)).strftime('%H:%M')}; " if ts else "")
+    return "\n".join([
+        f"{when}{len(rows)} photos in {len(seen)} groups.",
+        "Places (from GPS): " + ("; ".join(f"{p} ({n} photos)" for p, n in places.most_common(4))
+                                 if places else "none recorded") + ".",
+        "Most common subjects: " + ", ".join(f"{s} ({n})" for s, n in subjects.most_common(8)) + ".",
+        "Photos in order:",
+    ] + lines)
+
+
+def infer_daysum(base_url: str, model: str, facts: str, timeout: float = 300) -> str:
+    """One call to Ollama's native /api/chat (it takes num_ctx and think, which the OpenAI endpoint
+    doesn't). Returns the two lines joined by a newline."""
+    import urllib.request
+    body = {"model": model, "think": False, "stream": False, "format": DAYSUM_SCHEMA,
+            "options": {"num_ctx": 8192, "temperature": 0.3},
+            "messages": [{"role": "user", "content": DAYSUM_PROMPT.format(facts=facts)}]}
+    req = urllib.request.Request(base_url.rstrip("/") + "/api/chat", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        out = json.loads(json.loads(resp.read().decode())["message"]["content"])
+    day = _WEEKDAY_LEAD.sub("", out["day"].strip()).strip()
+    day = day[:1].upper() + day[1:]
+    return day.rstrip(".") + ".\n" + out["highlights"].strip().rstrip(".") + "."
+
+
+def cmd_daysum(args):
+    """Summarise each shoot folder in two lines from its annotations, newest first. Skips folders
+    whose facts haven't changed since their summary (unless --force)."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    conn = connect(args.db)
+    by_folder: "dict[str, list]" = {}
+    for r in conn.execute("SELECT path, capture_ts, caption, subject, tags, place, burst_id FROM images "
+                          "WHERE status='ok' ORDER BY capture_ts, filename"):
+        r = dict(r)
+        by_folder.setdefault(str(Path(r["path"]).parent), []).append(r)
+    if args.folder:
+        wanted = {str(Path(f).resolve()) for f in args.folder}
+        by_folder = {k: v for k, v in by_folder.items() if k in wanted}
+    known = {r["folder"]: r["input_hash"] for r in conn.execute("SELECT folder, input_hash FROM day_summaries")}
+    todo = []
+    for folder, rows in sorted(by_folder.items(), key=lambda kv: kv[0], reverse=True):
+        facts = day_facts(rows)
+        h = hashlib.sha1(f"{DAYSUM_VERSION}|{args.model}|{facts}".encode()).hexdigest()
+        if args.force or known.get(folder) != h:
+            todo.append((folder, rows, facts, h))
+    if not todo:
+        print("Every folder's summary is up to date.")
+        return
+    print(f"Summarising {len(todo)} folder(s) with {args.model} via {args.ollama} ...", flush=True)
+    t0, errs = time.time(), 0
+    for i, (folder, rows, facts, h) in enumerate(todo, 1):
+        try:
+            summary = infer_daysum(args.ollama, args.model, facts)
+        except Exception as e:  # noqa: BLE001 -- one bad day never stops the rest
+            errs += 1
+            print(f"[{i}/{len(todo)}] {folder}: ERROR {_exc_text(e)[:100]}", flush=True)
+            continue
+        conn.execute("INSERT OR REPLACE INTO day_summaries(folder, summary, model, version, frames, input_hash, created_at) "
+                     "VALUES (?,?,?,?,?,?,?)",
+                     (folder, summary, args.model, DAYSUM_VERSION, len(rows), h,
+                      datetime.now(timezone.utc).isoformat(timespec="seconds")))
+        conn.commit()
+        if i % 25 == 0 or i == len(todo):
+            print(f"[{i}/{len(todo)}] {Path(folder).name}: {summary.splitlines()[0]}  ({_fmt_eta(time.time() - t0)})", flush=True)
+    print(f"Done: {len(todo) - errs} summarised, {errs} error(s).")
+
+
 def cmd_compare(args):
     """Compare a model in `analyses` against the images baseline — and, if you've culled in LR,
     against your own ratings (the objective 'which model matches my taste' read)."""
@@ -1962,6 +2089,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"GeoNames files (default: {GEO_DIR_DEFAULT}; from {GEO_URL}).")
     gt.add_argument("--force", action="store_true", help="Re-read images already checked.")
     gt.set_defaults(func=cmd_geotag)
+
+    ds = sub.add_parser("daysum", help="Two-line summary of each shoot folder from its annotations, "
+                        "by a local text model, for Culling Bay's day list.")
+    ds.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    ds.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    ds.add_argument("--model", default=DAYSUM_MODEL, help=f"Ollama text model (default {DAYSUM_MODEL}).")
+    ds.add_argument("--ollama", default="http://localhost:11434", help="Ollama base URL (native API).")
+    ds.add_argument("--force", action="store_true", help="Summarise again even if nothing changed.")
+    ds.set_defaults(func=cmd_daysum)
 
     cp = sub.add_parser("compare", help="Compare a model in `analyses` vs the images baseline (and "
                         "vs your LR ratings).")

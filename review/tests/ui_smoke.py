@@ -162,6 +162,13 @@ def main():
         wd.wait("document.querySelector('.day[data-day^=\"2015/\"]')")
         months = wd.js("return [...document.querySelectorAll('#days-list .sec')].map(e => e.textContent)")
         check(any(m.startswith("June") for m in months), f"jumping to 2015 opens it by month: {months[-3:]}")
+        summ = wd.js("return (document.querySelector('.day[data-day=\"%s\"] .dsum') || {}).textContent || ''" % DAY)
+        word = next((w.strip('.,').lower() for w in summ.split() if len(w.strip('.,')) > 6), None)
+        check(bool(summ) and word, "the day row shows its two-line summary: " + summ[:70])
+        if word:
+            wd.js("const i=document.querySelector('#day-search'); i.value=arguments[0]; i.dispatchEvent(new Event('input', {bubbles:true}));", word)
+            hits = wd.js("return [...document.querySelectorAll('.day')].map(e => e.dataset.day)")
+            check(DAY in hits, f"search matches summary text ({word!r}): {len(hits)} day(s)")
         wd.js("const i=document.querySelector('#day-search'); i.value='2026-10-01'; i.dispatchEvent(new Event('input', {bubbles:true}));")
         found = wd.js("return [...document.querySelectorAll('.day')].map(e => e.dataset.day)")
         check(found == [DAY], f"search finds the day: {found}")

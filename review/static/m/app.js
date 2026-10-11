@@ -286,6 +286,7 @@ function dayRow(d) {
     d.thumbs.map(id => '<img src="' + img(id, 'thumb') + '" alt="" loading="lazy">').join('') + '</span>' +
     '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + esc(meta.join(' · ')) + '</span>' +
     (d.place ? '<span class="place">' + esc(town(d.place)) + '</span>' : '') +
+    (d.summary ? '<span class="dsum">' + d.summary.split('\n').map(esc).join('<br>') + '</span>' : '') +
     (d.decided ? '<span class="day-bar"><i style="width:' + pct + '%"></i></span>' : '') + '</span>' + tag + '</button>';
 }
 
@@ -321,7 +322,7 @@ function daysByPlace(list) {
 
 function dayListHTML() {
   const q = S.daySearch.trim().toLowerCase();
-  const list = !q ? S.days : S.days.filter(d => [dayTitle(d), d.folder, d.day, (d.places || []).join(' ')].join(' ').toLowerCase().includes(q));
+  const list = !q ? S.days : S.days.filter(d => [dayTitle(d), d.folder, d.day, (d.places || []).join(' '), d.summary || ''].join(' ').toLowerCase().includes(q));
   const going = list.filter(d => d.decided && !d.finished);
   const rest = list.filter(d => !(d.decided && !d.finished));
   if (!list.length) return '<p class="note">No days match “' + esc(S.daySearch) + '”.</p>';
@@ -335,7 +336,7 @@ function vDays() {
   for (const d of S.days) { const y = yearOf(d); if (!years.includes(y)) years.push(y); }
   return '<div class="head"><h1>Days</h1><span>mycloud · Pictures · ' + S.days.length + ' days</span></div>' +
     '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>' +
-    '<div class="dtools"><input class="search" id="day-search" type="search" placeholder="Search dates, folders, places" value="' + esc(S.daySearch) + '" autocomplete="off">' +
+    '<div class="dtools"><input class="search" id="day-search" type="search" placeholder="Search days: dates, places, what you shot" value="' + esc(S.daySearch) + '" autocomplete="off">' +
     '<div class="seg" role="tablist"><button data-act="day-view" data-v="date" aria-selected="' + (S.dayView !== 'place') + '">Date</button>' +
     '<button data-act="day-view" data-v="place" aria-selected="' + (S.dayView === 'place') + '">Place</button></div></div>' +
     (S.dayView !== 'place' ? '<div class="yearbar">' + years.map(y => '<button data-act="jump-year" data-year="' + y + '">' + y + '</button>').join('') + '</div>' : '') +
@@ -521,7 +522,8 @@ function vSummary() {
     : b ? '<p class="note">Kept ' + keptN + ' of this shoot’s budget of ' + b + '.</p>' : '';
   const sendLabel = unsent ? 'Send ' + unsent + ' to Lightroom' : queued ? 'Waiting for Lightroom' : landed ? 'In Lightroom' : 'Send to Lightroom';
   return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far') +
-    '<div class="scroll"><div class="counts"><div><b>' + keep + '</b><span>Kept</span></div><div><b>' + hero + '</b><span>Hero</span></div>' +
+    '<div class="scroll">' + (S.day.summary ? '<p class="dsum-top">' + S.day.summary.split('\n').map(esc).join('<br>') + '</p>' : '') +
+      '<div class="counts"><div><b>' + keep + '</b><span>Kept</span></div><div><b>' + hero + '</b><span>Hero</span></div>' +
       '<div><b>' + rej + '</b><span>Rejected</span></div><div><b>' + none + '</b><span>Unflagged</span></div></div>' + trim +
       (lr.length ? '<p class="sec">Lightroom</p>' + lr.map(t => '<p class="note">' + esc(t) + '</p>').join('') : '') +
       (won.length ? '<p class="sec">Your Lightroom flag won</p>' + wonGrid +

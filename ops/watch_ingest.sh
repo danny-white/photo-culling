@@ -89,6 +89,11 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
         log "geotag FAILED for $folder (non-fatal, continuing)"
     fi
 
+    # Best-effort two-line day summary from the annotations (local text model). Not fatal.
+    if ! ./venv/bin/python photo_cull.py daysum --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
+        log "daysum FAILED for $folder (non-fatal, continuing)"
+    fi
+
     tsv="$INBOX/pending.tsv"
     if ! ./venv/bin/python photo_cull.py export --plugin-data "$tsv" --plugin-data-append --folder "$folder" \
             --db "$DB" --csv "$PROJ/trial_out/report.csv" >> "$LOG" 2>&1; then
