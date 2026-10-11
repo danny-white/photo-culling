@@ -35,6 +35,8 @@ review/           3. REVIEW — two complementary auditors of the culler's outpu
                                   generated verdict, correct/flag it, compare bursts, and
                                   monitor/steer a live run. Reads the DB read-only; your
                                   corrections go to a separate annotations.db.
+    mobile.py, stacks.py,         Culling Bay Mobile at /m: cull a day on your phone and
+    static/m/                     send pick/reject flags to Lightroom (review/README.md).
     sample_for_review.py      (b) ADVERSARIAL review — Opus audits qwen. Samples frames
     run_adversarial_review.sh     from the DB and has an LLM re-judge the culler's calls
     adversarial-review-*.md       against the images to find systematic errors. The MDs
