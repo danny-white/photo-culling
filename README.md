@@ -15,6 +15,35 @@ Everything is written to a **SQLite database** (`cull.db`) that is the source of
 so runs are resumable, failures are tracked, and the CSV report + XMP sidecars can be
 regenerated any time.
 
+## Project layout
+
+Three stages: **cull → output → review**.
+
+```
+photo_cull.py     1. CULL   — the culler: reads photos, runs the VLM + deterministic
+                              scoring, writes verdicts to the DB.
+dbshell.sh                    interactive SQLite helper for the DB.
+
+trial_out/        2. OUTPUT — a run's working dir. The DB (trial.db) is the source of
+    trial.db                  truth; also holds run.log, XMP/CSV exports, and RUNBOOK.md.
+                              ("trial_out" is just this run's dir; the default is cull.db
+                              in the project root.)
+
+review/           3. REVIEW — two complementary auditors of the culler's output:
+    server.py                 (a) HUMAN web app — the "Culling Bay". Serves a local,
+    static/                       keyboard-driven UI to eyeball each photo next to its
+                                  generated verdict, correct/flag it, compare bursts, and
+                                  monitor/steer a live run. Reads the DB read-only; your
+                                  corrections go to a separate annotations.db.
+    sample_for_review.py      (b) ADVERSARIAL review — Opus audits qwen. Samples frames
+    run_adversarial_review.sh     from the DB and has an LLM re-judge the culler's calls
+    adversarial-review-*.md       against the images to find systematic errors. The MDs
+    adversarial_review_driver.md   are the prompt, driver, and findings.
+```
+
+The web app audits *your* agreement with the AI; the adversarial pass has a stronger model
+audit the AI. Both feed prompt/threshold refinements back into stage 1.
+
 ## How it works (the short version)
 
 - **Reads ARW directly.** It pulls the camera's embedded JPEG preview out of each RAW

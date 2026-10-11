@@ -7,6 +7,7 @@ Usage:
 Defaults: N=15, OUTDIR=/tmp/rev_sample, DB=trial_out/trial.db
 Writes OUTDIR/NN.jpg previews (768px) + OUTDIR/meta.txt with qwen's outputs per frame.
 """
+import os
 import sys
 import json
 import sqlite3
@@ -22,13 +23,24 @@ OUT.mkdir(parents=True, exist_ok=True)
 for f in OUT.glob("*.jpg"):
     f.unlink()
 
+# Optional: restrict to frames (re)processed at/after REVIEW_SINCE (ISO ts). Lets an
+# audit target only the *current* prompt's outputs instead of stale old-prompt rows.
+SINCE = os.environ.get("REVIEW_SINCE", "").strip()
+where, params = "status='ok'", []
+if SINCE:
+    where += " AND processed_at >= ?"
+    params.append(SINCE)
+params.append(N)
+
 conn = sqlite3.connect(str(DB))
 conn.row_factory = sqlite3.Row
 conn.execute("PRAGMA query_only=1")
 rows = conn.execute(
-    """SELECT rowid AS id, path, filename, scene, subject, caption, tags, issues, aesthetic,
+    f"""SELECT rowid AS id, path, filename, scene, subject, caption, tags, issues, aesthetic,
        quality_stars, base_verdict, people_count, eyes_closed, sharpness, exposure_flag, camera
-       FROM images WHERE status='ok' ORDER BY RANDOM() LIMIT ?""", (N,)).fetchall()
+       FROM images WHERE {where} ORDER BY RANDOM() LIMIT ?""", params).fetchall()
+if SINCE:
+    print(f"[sample_for_review] REVIEW_SINCE={SINCE} -> {len(rows)} of N={N} frames matched")
 
 
 def jl(s):

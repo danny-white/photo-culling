@@ -22,24 +22,33 @@ local LrPathUtils       = import 'LrPathUtils'
 -- Move a fully-applied TSV into an 'applied/' sibling folder so it drops out of the file
 -- picker's default view -- keeps you from accidentally re-picking (harmless, but pointless)
 -- the same TSV next time, and keeps the inbox from growing unbounded as one-per-shoot TSVs
--- pile up. Copy-then-delete via plain io, not a hypothetical LrFileUtils.move (no such call
--- in the SDK) -- io.open/os.remove are already proven to work in this plugin (TSV reading).
+-- pile up. Copy via plain io (proven working -- same calls used to read the TSV), but delete
+-- via LrFileUtils.delete: Lightroom's sandboxed Lua strips os.remove/os.rename/os.execute
+-- entirely (calling them is "attempt to call field '...' (a nil value)", not a permission
+-- error), so the SDK call is the only way to actually delete a file. Whole thing is
+-- pcall-wrapped -- this step runs only after every photo's metadata is already written, so a
+-- cleanup failure here must never surface as a hard "sync failed" error.
 local function moveToApplied(path)
-    local dir = LrPathUtils.parent(path)
-    local appliedDir = LrPathUtils.child(dir, 'applied')
-    LrFileUtils.createDirectory(appliedDir)
-    local dest = LrPathUtils.child(appliedDir, LrPathUtils.leafName(path))
-    local src, rerr = io.open(path, 'rb')
-    if not src then return false, tostring(rerr) end
-    local data = src:read('*a')
-    src:close()
-    local out, werr = io.open(dest, 'wb')
-    if not out then return false, tostring(werr) end
-    out:write(data)
-    out:close()
-    local ok, remErr = os.remove(path)
-    if not ok then return false, tostring(remErr) end
-    return true, dest
+    local ok, result = LrTasks.pcall(function()
+        local dir = LrPathUtils.parent(path)
+        local appliedDir = LrPathUtils.child(dir, 'applied')
+        LrFileUtils.createDirectory(appliedDir)
+        local dest = LrPathUtils.child(appliedDir, LrPathUtils.leafName(path))
+        local src, rerr = io.open(path, 'rb')
+        if not src then error('open source failed: ' .. tostring(rerr)) end
+        local data = src:read('*a')
+        src:close()
+        local out, werr = io.open(dest, 'wb')
+        if not out then error('open dest failed: ' .. tostring(werr)) end
+        out:write(data)
+        out:close()
+        if not LrFileUtils.delete(path) then
+            error('LrFileUtils.delete returned false for ' .. path)
+        end
+        return dest
+    end)
+    if not ok then return false, tostring(result) end
+    return true, result
 end
 
 local BATCH_SIZE = 100  -- photos per write transaction; yield + update progress between batches

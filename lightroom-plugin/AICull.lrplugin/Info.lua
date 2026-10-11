@@ -17,6 +17,10 @@ return {
             title = 'Sync AI Cull Data (keywords + color label)…',
             file  = 'SyncAICull.lua',
         },
+        {
+            title = 'AI Semantic Search…',
+            file  = 'SemanticSearch.lua',
+        },
     },
     VERSION = { major = 1, minor = 0, revision = 0 },
 }

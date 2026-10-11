@@ -10,7 +10,7 @@ function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTi
 function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 1700); }
 
 const S = { view: "monitor", filter: "all", scene: "", stars: "", exposure: "", sort: "capture", order: "asc", q: "",
-  offset: 0, limit: 120, items: [], loupeIdx: -1, current: null, summary: null };
+  offset: 0, limit: 120, items: [], loupeIdx: -1, current: null, summary: null, semItems: [] };
 
 /* ------------------------------------------------ summary + filters */
 async function loadSummary() {
@@ -63,6 +63,32 @@ function refreshCard(i) {
   const c = $(`#grid .card[data-i="${i}"]`); if (!c || !S.items[i]) return;
   const tmp = document.createElement("div"); tmp.innerHTML = card(S.items[i], i);
   c.replaceWith(tmp.firstElementChild);
+}
+
+/* ------------------------------------------------ semantic search */
+let semSeq = 0;  // guards against a slow earlier query's response landing after a newer one
+async function runSemanticSearch() {
+  const q = $("#sem-q").value.trim(), grid = $("#sem-grid"), status = $("#sem-status");
+  if (!q) {
+    grid.innerHTML = '<div class="muted" style="padding:20px">Search by meaning, not just keywords &mdash; matches against each photo\'s AI caption/tags/scene, not filenames.</div>';
+    status.textContent = ""; S.semItems = []; return;
+  }
+  const seq = ++semSeq;
+  status.textContent = "Searching…";
+  const d = await api("/api/semantic_search?" + new URLSearchParams({ q, k: 60 }));
+  if (seq !== semSeq) return;
+  if (d.error) { grid.innerHTML = `<div class="muted" style="padding:20px">${esc(d.error)}</div>`; status.textContent = ""; return; }
+  S.semItems = d.results;
+  status.textContent = `${d.count} result${d.count === 1 ? "" : "s"}`;
+  grid.innerHTML = d.results.map((it, i) => semCard(it, i)).join("") ||
+    '<div class="muted" style="padding:20px">No matches.</div>';
+}
+function semCard(it, i) {
+  return `<div class="card" data-si="${i}">
+    <div class="corner"><span class="mini score">${Math.round(it.score * 100)}%</span></div>
+    <div class="thumb" style="background-image:url('/api/thumb/${it.id}?s=grid')"></div>
+    <div class="cap"><span class="fn">${esc(it.filename)}</span><span class="sub">${dash(it.subject)}</span></div>
+  </div>`;
 }
 
 /* ------------------------------------------------ loupe */
@@ -307,7 +333,9 @@ async function loadMonitor() {
         <button class="btn warn" id="i-pause" ${d.running ? "" : "disabled"}>Pause all (${d.sources.length})</button>
         <button class="btn" id="i-resume" ${d.running ? "disabled" : ""}>Resume</button>
         <button class="btn" id="i-redrive" ${d.running || !c.error ? "disabled" : ""}>Redrive ${c.error} errors</button>
-        <button class="btn" id="i-export">Export snapshot</button></div></div>
+        <button class="btn" id="i-export">Export snapshot</button>
+        <button class="btn ${d.timer.active ? "warn" : ""}" id="i-timer">${d.timer.active ? "Bulk runs: ON (turn off)" : "Bulk runs: OFF (turn on)"}</button></div>
+      <div class="muted" style="margin-top:6px">${d.timer.active ? "Timer is armed -- polls the inbox every 15 min and uses the GPU when there's work." : "Timer is off -- nothing will auto-start until you turn it back on."}</div></div>
     <div class="panel"><h2 class="h">Last processed</h2>${lastProcessedHtml(d.last_processed)}</div>
     </div>
     <div class="panel" style="margin-top:14px"><h2 class="h">Timeline</h2>${timelineHtml(d.recent5, d.next5)}</div>
@@ -332,6 +360,20 @@ async function loadMonitor() {
   $("#i-resume").onclick = () => act("resume");
   $("#i-redrive").onclick = () => act("redrive");
   $("#i-export").onclick = () => act("export");
+  $("#i-timer").onclick = () => act(d.timer.active ? "timer_off" : "timer_on",
+    d.timer.active ? "Turn off bulk runs? Any active run stops too (safe -- resumes exactly where it left off). Flip it back on any time." : null);
+  const lpImg = $("#monitor-body .lp-thumb");
+  if (lpImg) lpImg.onclick = () => openLightbox(d.last_processed.rowid, d.last_processed.filename);
+}
+function openLightbox(rowid, alt) {
+  const ov = document.createElement("div");
+  ov.className = "lightbox";
+  ov.innerHTML = `<img src="/api/thumb/${rowid}?s=loupe" alt="${esc(alt || "")}">`;
+  const close = () => { ov.remove(); document.removeEventListener("keydown", onKeyClose); };
+  const onKeyClose = (e) => { if (e.key === "Escape") close(); };
+  ov.onclick = close;
+  document.addEventListener("keydown", onKeyClose);
+  document.body.appendChild(ov);
 }
 function lastProcessedHtml(lp) {
   if (!lp) return '<div class="muted">nothing processed yet</div>';
@@ -340,8 +382,22 @@ function lastProcessedHtml(lp) {
     return `<div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:6px">${esc(lp.filename)} <span class="muted">${lp.shoot_date || ""} &middot; ${when}</span></div>
       <div class="errbox">[${esc(lp.error_class || "?")}] ${esc(lp.error_msg || "")}</div>`;
   }
+  const facts = [];
+  if (lp.scene) facts.push(lp.scene);
+  if (lp.indoor_outdoor && lp.indoor_outdoor !== "unknown") facts.push(lp.indoor_outdoor);
+  if (lp.time_of_day && lp.time_of_day !== "unknown") facts.push(lp.time_of_day.replace("_", " "));
+  if (lp.activity) facts.push(lp.activity);
+  if (lp.content_type && lp.content_type !== "photo") facts.push(lp.content_type);
+  if (lp.monochrome) facts.push("monochrome");
+  const factsLine = facts.length
+    ? `<div class="muted" style="margin-top:4px">${facts.map(esc).join(" &middot; ")}</div>` : "";
+  const textLine = lp.visible_text
+    ? `<div class="muted" style="margin-top:4px">&#128221; &ldquo;${esc(lp.visible_text)}&rdquo;</div>` : "";
+  const chips = [...(lp.tags || []), ...(lp.animals || [])]
+    .map(t => `<span class="tag">${esc(t)}</span>`).join("");
+
   return `<div style="display:flex;gap:12px">
-    <img src="/api/thumb/${lp.rowid}?s=grid" style="width:140px;height:auto;border-radius:var(--radius-sm);border:1px solid var(--line);flex:0 0 auto">
+    <img class="lp-thumb" src="/api/thumb/${lp.rowid}?s=grid" style="width:140px;height:auto;border-radius:var(--radius-sm);border:1px solid var(--line);flex:0 0 auto;cursor:zoom-in">
     <div style="min-width:0">
       <div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:4px">${esc(lp.filename)} <span class="muted">${esc(lp.shoot_date || "")} &middot; ${when}</span></div>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
@@ -349,6 +405,9 @@ function lastProcessedHtml(lp) {
         <span class="stars-mini">${"&#9733;".repeat(lp.quality_stars || 0)}</span>
         <span class="muted">${esc(lp.reason || "")}</span></div>
       <div class="cap" style="font-size:12.5px">${esc(lp.caption || lp.subject || "")}</div>
+      ${factsLine}
+      ${textLine}
+      ${chips ? `<div class="tags" style="margin-top:6px">${chips}</div>` : ""}
     </div></div>`;
 }
 function timelineRow(r, muted) {
@@ -384,6 +443,7 @@ function show(view) {
   $$(".view").forEach(v => v.classList.toggle("on", v.id === "view-" + view));
   $("#keybar").style.display = view === "review" ? "" : "none";
   if (view === "bursts") loadBursts();
+  else if (view === "search") { if ($("#sem-q").value.trim()) runSemanticSearch(); }
   else if (view === "feedback") loadFeedback();
   else if (view === "tune") loadTune();
   else if (view === "monitor") loadMonitor();
@@ -404,6 +464,12 @@ function onKey(e) {
 }
 $$("#tabs .tab").forEach(t => t.onclick = () => show(t.dataset.view));
 $("#grid").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openLoupe(+c.dataset.i); });
+$("#sem-grid").addEventListener("click", e => {
+  // #loupe lives inside #view-review (display:none while another tab is active), so hop back to
+  // Review first -- otherwise the loupe opens but stays invisible behind the hidden section.
+  const c = e.target.closest(".card"); if (c) { show("review"); openLoupeById(S.semItems[+c.dataset.si].id); }
+});
+$("#sem-q").oninput = debounce(runSemanticSearch, 400);
 $("#more").onclick = () => loadList(false);
 $("#scene").onchange = () => { S.scene = $("#scene").value; loadList(true); };
 $("#stars").onchange = () => { S.stars = $("#stars").value; loadList(true); };

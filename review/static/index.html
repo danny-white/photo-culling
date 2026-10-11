@@ -12,6 +12,7 @@
     <div class="brand"><span class="dot"></span> Culling&nbsp;Bay <small id="scope"></small></div>
     <nav class="tabs" id="tabs">
       <button class="tab" data-view="review">Review</button>
+      <button class="tab" data-view="search">Search</button>
       <button class="tab" data-view="bursts">Bursts</button>
       <button class="tab" data-view="feedback">Feedback</button>
       <button class="tab" data-view="tune">Tune</button>
@@ -36,6 +37,20 @@
       <div class="filters" id="filters"></div>
       <span class="spacer"></span>
       <select class="sel" id="scene"><option value="">all scenes</option></select>
+      <select class="sel" id="stars">
+        <option value="">any stars</option>
+        <option value="5">5&#9733;</option>
+        <option value="4+">4&#9733;+</option>
+        <option value="3+">3&#9733;+</option>
+        <option value="2+">2&#9733;+</option>
+        <option value="1">1&#9733;</option>
+      </select>
+      <select class="sel" id="exposure">
+        <option value="">any exposure</option>
+        <option value="over">overexposed</option>
+        <option value="under">underexposed</option>
+        <option value="ok">exposure ok</option>
+      </select>
       <select class="sel" id="sort">
         <option value="capture">capture time</option>
         <option value="sharpness">sharpness</option>
@@ -49,6 +64,17 @@
     <div class="grid" id="grid"></div>
     <div class="load-more"><button class="btn" id="more">Load more</button></div>
     <div id="loupe" style="display:none"></div>
+  </section>
+
+  <!-- SEARCH -->
+  <section class="view" id="view-search">
+    <div class="toolbar">
+      <input class="search" id="sem-q" placeholder="describe what you're looking for, e.g. &quot;dog running on the beach&quot;" autocomplete="off" style="flex:1">
+      <span class="muted" id="sem-status"></span>
+    </div>
+    <div class="grid" id="sem-grid">
+      <div class="muted" style="padding:20px">Search by meaning, not just keywords &mdash; matches against each photo's AI caption/tags/scene, not filenames.</div>
+    </div>
   </section>
 
   <!-- BURSTS -->

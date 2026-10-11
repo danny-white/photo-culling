@@ -47,6 +47,24 @@ can safely cover the **whole library at once**; you don't have to select one sho
 
 Your ratings and flags are never written, so cull however you like — before or after syncing.
 
+## AI Semantic Search
+
+**Library → Plug-in Extras → AI Semantic Search…** — type a description ("dog running on the
+beach"), and it finds photos by *meaning*, not filename/keyword matching. Under the hood: the
+Linux box embeds every photo's AI caption/tags/scene into a vector (`photo_cull.py embed`), and
+this command sends your query to `review/server.py`'s `/api/semantic_search`, which embeds it the
+same way and does a cosine-similarity nearest-neighbor search.
+
+Results land in a collection named **AI Search Results**, ranked best match first — if it doesn't
+look ranked, right-click the grid → **Sort → Custom Order**.
+
+This is a new code path: it talks to the review server over **HTTP**, not the SMB-mounted TSV
+files the sync command uses. It tries the Linux box's LAN address first, then falls back to
+Tailscale — both addresses are hardcoded near the top of `SemanticSearch.lua`
+(`LAN_URL`/`TAILSCALE_URL`); if the box's LAN IP ever changes, update it there. It also needs
+`review/server.py` actually running and reachable — if you get "Could not reach the search
+server," check that first.
+
 ## Notes / troubleshooting
 
 - **Nothing matched?** You probably didn't select the photos, or the TSV doesn't cover them yet

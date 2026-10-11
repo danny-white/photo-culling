@@ -5,7 +5,12 @@
 # file picker defaults there; applying it is still a manual click (Library -> Plug-in Extras ->
 # Sync AI Cull Data...).
 #
-# $INBOX is mounted as its OWN narrow CIFS mount (//192.168.1.5/Passport/AICullInbox), not the
+# All shoots processed since the last applied sync accumulate into one $INBOX/pending.tsv (merged
+# by shoot-folder+filename, not overwritten) -- one Lightroom sync catches up everything instead
+# of clicking through one TSV per shoot. The plugin moves pending.tsv to applied/ once a full,
+# uncanceled sync finishes, so the next poll after that starts a fresh pending.tsv.
+#
+# $INBOX is mounted as its OWN narrow CIFS mount (//mycloud/Passport/AICullInbox), not the
 # share root -- Pictures/ is structurally unreachable through it, so a bug here can't touch the
 # actual library. $LIBRARY_ROOT is a separate, read-only guest mount, used only for scanning.
 #
@@ -33,7 +38,7 @@ if ! mountpoint -q "$INBOX"; then
     log "ABORT: $INBOX is not mounted -- re-run the mount command and retry."
     exit 1
 fi
-if ! grep -q "^//192.168.1.5/Passport/AICullInbox " /proc/mounts; then
+if ! grep -q "^//mycloud/Passport/AICullInbox " /proc/mounts; then
     log "ABORT: $INBOX is mounted but not to the expected share path -- refusing to write."
     exit 1
 fi
@@ -73,8 +78,14 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
         continue
     fi
 
-    tsv="$INBOX/${name}.tsv"
-    if ! ./venv/bin/python photo_cull.py export --plugin-data "$tsv" --folder "$folder" \
+    # Best-effort semantic-search indexing. Not fatal -- the shoot still exports/marks done even
+    # if this fails (e.g. the embedding model isn't loaded); a later `embed` backfill catches it.
+    if ! ./venv/bin/python photo_cull.py embed --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
+        log "embed FAILED for $folder (non-fatal, continuing)"
+    fi
+
+    tsv="$INBOX/pending.tsv"
+    if ! ./venv/bin/python photo_cull.py export --plugin-data "$tsv" --plugin-data-append --folder "$folder" \
             --db "$DB" --csv "$PROJ/trial_out/report.csv" >> "$LOG" 2>&1; then
         log "export FAILED for $folder -- leaving unmarked, will retry next poll"
         continue

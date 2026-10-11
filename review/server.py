@@ -30,12 +30,14 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+import numpy as np
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 # Reuse the culler's image loading / thresholds.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -55,6 +57,7 @@ CFG = {
     "log": Path("trial_out/run.log"),
     "pidfile": None,          # defaults to <db>.pid
     "folders": [],            # for resume/redrive
+    "embed_base_url": "http://localhost:11434/v1",   # for embedding SEARCH QUERIES (semantic search)
 }
 
 # The prompt-refinement signals a reviewer can attach to a frame, each mapped to a
@@ -117,7 +120,7 @@ def annotations_map(paths):
 
 def row_public(r, ann=None):
     d = {k: r[k] for k in r.keys()}
-    for jcol in ("tags", "issues"):
+    for jcol in ("tags", "issues", "animals"):
         try:
             d[jcol] = json.loads(d[jcol]) if d.get(jcol) else []
         except (json.JSONDecodeError, TypeError):
@@ -354,6 +357,87 @@ def api_thumb(rowid):
     return send_file(cached, mimetype="image/jpeg", max_age=3600)
 
 
+# ---------------------------------------------------------------- semantic search
+# Brute-force cosine KNN over `embeddings` (34k x 768 floats ~= 100MB -- trivial to hold in RAM,
+# no vector DB needed at this scale). Cached in-process and refreshed only when the table's
+# (count, latest created_at) changes, since `embed` runs continuously in the background (ingest
+# watcher) as new shoots land.
+_EMBED_CACHE = {"count": -1, "latest": None, "matrix": None, "meta": []}
+_EMBED_CACHE_LOCK = threading.Lock()
+
+
+def _load_embed_cache():
+    con = db_ro()
+    snap = con.execute(
+        "SELECT COUNT(*) c, MAX(created_at) m FROM embeddings WHERE embed_version=?",
+        (pc.EMBED_VERSION,)).fetchone()
+    count, latest = snap["c"], snap["m"]
+    with _EMBED_CACHE_LOCK:
+        if count == _EMBED_CACHE["count"] and latest == _EMBED_CACHE["latest"]:
+            con.close()
+            return _EMBED_CACHE
+        rows = con.execute(
+            "SELECT e.path, e.vector, e.dims, i.rowid AS id, i.filename, i.caption, i.subject "
+            "FROM embeddings e JOIN images i ON i.path = e.path "
+            "WHERE e.embed_version=?", (pc.EMBED_VERSION,)).fetchall()
+        con.close()
+        if not rows:
+            _EMBED_CACHE.update(count=count, latest=latest, matrix=None, meta=[])
+            return _EMBED_CACHE
+        dims = rows[0]["dims"]
+        mat = np.zeros((len(rows), dims), dtype=np.float32)
+        meta = []
+        for i, r in enumerate(rows):
+            mat[i] = pc.unpack_vector(r["vector"])
+            meta.append({"id": r["id"], "path": r["path"], "filename": r["filename"],
+                         "caption": r["caption"], "subject": r["subject"],
+                         "shoot_folder": Path(r["path"]).parent.name})
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1  # guard a hypothetical all-zero vector, never divide by 0
+        mat /= norms  # pre-normalize so cosine similarity = a plain dot product at query time
+        _EMBED_CACHE.update(count=count, latest=latest, matrix=mat, meta=meta)
+    return _EMBED_CACHE
+
+
+@app.route("/api/semantic_search")
+def api_semantic_search():
+    """Text -> query embedding -> cosine KNN over the indexed photos. ?format=tsv returns
+    `shootFolder\\tfilename\\tscore\\tcaption` lines (no header) for the Lightroom plugin, which
+    already knows how to parse that shape from the AI-Cull sync TSV; default is JSON for the web UI."""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"error": "missing q"}), 400
+    k = min(max(int(request.args.get("k", 60)), 1), 300)
+    fmt = request.args.get("format", "json")
+
+    cache = _load_embed_cache()
+    if cache["matrix"] is None:
+        return jsonify({"error": "no embeddings indexed yet -- run `photo_cull.py embed`"}), 503
+
+    try:
+        qvec = np.asarray(pc.infer_embed(CFG["embed_base_url"], None, pc.EMBED_MODEL, q),
+                          dtype=np.float32)
+    except Exception as e:  # noqa: BLE001 - embedding server hiccup shouldn't 500 the page
+        return jsonify({"error": f"embed failed: {pc._exc_text(e)[:200]}"}), 502
+    qnorm = np.linalg.norm(qvec)
+    if qnorm > 0:
+        qvec = qvec / qnorm
+
+    scores = cache["matrix"] @ qvec
+    top = np.argsort(-scores)[:k]
+    results = [{**cache["meta"][i], "score": round(float(scores[i]), 4)} for i in top]
+
+    if fmt == "tsv":
+        lines = [f"{r['shoot_folder']}\t{r['filename']}\t{r['score']}\t"
+                 f"{(r['caption'] or '').replace(chr(9), ' ').replace(chr(10), ' ')}"
+                 for r in results]
+        return Response("\n".join(lines) + "\n", mimetype="text/plain")
+
+    for r in results:
+        r.pop("path", None)  # never leak absolute NAS paths to the web client
+    return jsonify({"query": q, "count": len(results), "results": results})
+
+
 # ---------------------------------------------------------------- annotations
 @app.route("/api/annotate", methods=["POST"])
 def api_annotate():
@@ -408,6 +492,41 @@ def _active_runs():
             folders.append(t)
         runs.append({"pid": int(pid), "elapsed_s": int(etimes), "folders": folders})
     return runs
+
+
+def _active_watchers():
+    """Live ops/watch_ingest.sh instances. Its for-loop moves on to the NEXT ready shoot folder
+    as soon as its current photo_cull.py child exits -- so turning the timer off has to kill this
+    parent too, not just whatever child it's driving right now, or it just spawns another one."""
+    try:
+        out = subprocess.run(["ps", "-eo", "pid,args"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return []
+    pids = []
+    for line in out.splitlines()[1:]:
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid, args = parts
+        if "watch_ingest.sh" in args and "grep" not in args:
+            pids.append(int(pid))
+    return pids
+
+
+TIMER_UNIT = "photo-cull-ingest.timer"
+SERVICE_UNIT = "photo-cull-ingest.service"
+
+
+def _timer_status():
+    def q(prop):
+        try:
+            out = subprocess.run(["systemctl", "--user", "is-" + prop, TIMER_UNIT],
+                                 capture_output=True, text=True, timeout=5)
+            return out.stdout.strip()
+        except Exception:
+            return "unknown"
+    return {"active": q("active") == "active", "enabled": q("enabled") == "enabled"}
 
 
 def _shoot_key(path):
@@ -470,10 +589,11 @@ def api_monitor():
     attention.sort(key=lambda f: f["last"] or "", reverse=True)
 
     last = con.execute(
-        "SELECT rowid, filename, path, status, base_verdict, quality_stars, caption, subject, "
-        "reason, capture_ts, error_class, error_msg, processed_at FROM images "
+        "SELECT rowid, filename, path, status, base_verdict, quality_stars, caption, subject, scene, "
+        "reason, capture_ts, error_class, error_msg, processed_at, tags, activity, indoor_outdoor, "
+        "time_of_day, animals, content_type, visible_text, monochrome FROM images "
         "WHERE processed_at IS NOT NULL ORDER BY processed_at DESC LIMIT 1").fetchone()
-    last_processed = dict(last) if last else None
+    last_processed = row_public(last) if last else None
     if last_processed:
         last_processed["shoot_date"] = _shoot_date(last_processed["path"], last_processed["capture_ts"])
 
@@ -528,6 +648,7 @@ def api_monitor():
         "last_processed": last_processed,
         "recent5": recent5,
         "next5": next5,
+        "timer": _timer_status(),
     })
 
 
@@ -555,6 +676,24 @@ def api_intervene():
         logf = open(CFG["log"], "a")
         subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
         return jsonify({"ok": True, "msg": f"{action} started"})
+    if action == "timer_off":
+        subprocess.run(["systemctl", "--user", "stop", TIMER_UNIT], timeout=10)
+        runs = _active_runs()
+        for r in runs:
+            os.kill(r["pid"], signal.SIGINT)
+        for pid in _active_watchers():
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        extra = f" -- interrupted {len(runs)} active run(s)" if runs else ""
+        return jsonify({"ok": True, "msg": "Bulk runs turned off" + extra})
+    if action == "timer_on":
+        subprocess.run(["systemctl", "--user", "start", TIMER_UNIT], timeout=10)
+        # --no-block: this is a oneshot service that can run for a long time (a big backlog) --
+        # a normal `start` waits for it to finish, which would hang this HTTP request.
+        subprocess.run(["systemctl", "--user", "start", "--no-block", SERVICE_UNIT], timeout=10)
+        return jsonify({"ok": True, "msg": "Bulk runs turned on -- kicking off a poll now"})
     if action == "export":
         snap = CFG["db"].with_suffix(".export-snapshot.db")
         src = sqlite3.connect(str(CFG["db"])); dst = sqlite3.connect(str(snap))
@@ -682,12 +821,15 @@ def main():
     ap.add_argument("--folders", nargs="*", default=[], help="source folders, to enable resume/redrive from the UI")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--embed-base-url", default="http://localhost:11434/v1",
+                    help="OpenAI-compatible base URL for embedding semantic-search queries (default: local Ollama).")
     a = ap.parse_args()
     CFG["db"] = a.db
     CFG["annotations"] = a.annotations or a.db.with_suffix(".annotations.db")
     CFG["log"] = a.log
     CFG["pidfile"] = a.pidfile
     CFG["folders"] = a.folders
+    CFG["embed_base_url"] = a.embed_base_url
     anno().close()  # ensure the annotations table exists
     if a.server_pidfile:
         a.server_pidfile.write_text(str(os.getpid()))

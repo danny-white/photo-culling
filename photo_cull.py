@@ -50,6 +50,9 @@ from xml.sax.saxutils import escape as xml_escape
 
 import numpy as np
 from PIL import Image, ImageOps
+import pillow_heif
+
+pillow_heif.register_heif_opener()
 
 # exifread logs "File format not recognized." for ISO-BMFF raws (e.g. CR3); we fall back to
 # exiftool for those, so silence that noisy per-file warning.
@@ -64,6 +67,8 @@ CSV_DEFAULT = "cull.csv"
 
 MODEL_PRIMARY = "qwen3.5:9b"      # best quality; fits 8 GB once the image is downscaled
 MODEL_FALLBACK = "qwen3.5:4b"     # faster / smaller; used by --fast and as an OOM fallback
+
+EMBED_MODEL = "nomic-embed-text"  # text embedding model for semantic search (see `embed` subcommand)
 
 MAX_EDGE = 1536                   # long-edge px sent to the VLM (controls VRAM + speed)
 MAX_EDGE_OOM = 1024              # smaller retry if the primary size OOMs
@@ -81,6 +86,7 @@ BLOWN_PCT_SEVERE = 15.0
 CRUSHED_PCT_MAX = 30.0          # % of pixels at/near pure black before "underexposed"
 MEAN_LUM_LOW = 35              # overall very dark
 MEAN_LUM_HIGH = 225           # overall very bright
+MONOCHROME_SAT_MAX = 12.0    # mean HSV saturation (0-255) below which a frame reads as B&W
 
 BURST_GAP_S = 2.0               # frames within this many seconds are grouped as a burst
 PHASH_NEAR = 6                  # perceptual-hash Hamming distance treated as a near-duplicate
@@ -129,6 +135,13 @@ CREATE TABLE IF NOT EXISTS images (
     keep_hint       INTEGER,                   -- qwen's boolean "worth keeping?"; a derive() input
     tags            TEXT,                      -- JSON array
     issues          TEXT,                      -- JSON array
+    activity        TEXT,
+    indoor_outdoor  TEXT,                      -- indoor | outdoor | unknown
+    time_of_day     TEXT,                      -- day | golden_hour | blue_hour | night | unknown
+    animals         TEXT,                      -- JSON array
+    content_type    TEXT,                      -- photo | screenshot | document | graphic
+    visible_text    TEXT,                      -- OCR of legible signage/text only, never guessed
+    monochrome      INTEGER,                   -- CV-measured (mean HSV saturation), not VLM
 
     phash           TEXT,
     burst_id        INTEGER,
@@ -179,7 +192,21 @@ CREATE TABLE IF NOT EXISTS analyses (
     verdict         TEXT,
     color_label     TEXT,
     reason          TEXT,
+    duration_s      REAL,                      -- wall time of the infer_openai() call itself, for A/B speed comparisons
     PRIMARY KEY (path, model, prompt_version)
+);
+
+-- Semantic-search vectors, one row per (photo x embed_version) -- versioned the same way prompts
+-- are, so changing the embed model or the text recipe (build_embed_text) just means a fresh
+-- embed_version and a re-embed, never a migration. vector is float32 packed bytes (array('f')).
+CREATE TABLE IF NOT EXISTS embeddings (
+    path            TEXT NOT NULL,
+    embed_version   TEXT NOT NULL,
+    model           TEXT,
+    dims            INTEGER,
+    vector          BLOB,
+    created_at      TEXT,
+    PRIMARY KEY (path, embed_version)
 );
 """
 
@@ -193,9 +220,17 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # Upgrade DBs created before these columns were added: SCHEMA's CREATE TABLE IF NOT EXISTS
     # defines them for fresh DBs, but won't add them to an already-existing images table.
     for col, decl in (("prompt_version", "TEXT"), ("harness_version", "TEXT"),
-                      ("keep_hint", "INTEGER"), ("user_rating", "INTEGER"), ("user_label", "TEXT")):
+                      ("keep_hint", "INTEGER"), ("user_rating", "INTEGER"), ("user_label", "TEXT"),
+                      ("activity", "TEXT"), ("indoor_outdoor", "TEXT"), ("time_of_day", "TEXT"),
+                      ("animals", "TEXT"), ("content_type", "TEXT"), ("visible_text", "TEXT"),
+                      ("monochrome", "INTEGER")):
         try:
             conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass  # column already present
+    for col, decl in (("duration_s", "REAL"),):
+        try:
+            conn.execute(f"ALTER TABLE analyses ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
             pass  # column already present
     conn.commit()
@@ -436,7 +471,8 @@ def jpeg_bytes(im: Image.Image) -> bytes:
 # ----------------------------------------------------------------------------
 
 def cv_metrics(im: Image.Image) -> dict:
-    """Sharpness (variance of a 4-neighbour Laplacian) + exposure from the histogram."""
+    """Sharpness (variance of a 4-neighbour Laplacian) + exposure from the histogram +
+    monochrome (mean HSV saturation) — all deterministic, no VLM confabulation risk."""
     g = np.asarray(im.convert("L"), dtype=np.float64)
     lap = (-4 * g[1:-1, 1:-1] + g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:])
     sharp = float(lap.var())
@@ -452,12 +488,17 @@ def cv_metrics(im: Image.Image) -> dict:
         flag = "under"
     else:
         flag = "ok"
+
+    sat = np.asarray(im.convert("HSV"))[:, :, 1]
+    monochrome = bool(sat.mean() < MONOCHROME_SAT_MAX)
+
     return {
         "sharpness": round(sharp, 1),
         "blown_pct": round(blown, 2),
         "crushed_pct": round(crushed, 2),
         "mean_lum": round(mean_lum, 1),
         "exposure_flag": flag,
+        "monochrome": int(monochrome),
     }
 
 
@@ -482,9 +523,17 @@ VLM_SCHEMA = {
         "tags": {"type": "array", "items": {"type": "string"}},
         "issues": {"type": "array", "items": {"type": "string"}},
         "keep_hint": {"type": "boolean"},
+        "activity": {"type": "string"},
+        "indoor_outdoor": {"type": "string"},
+        "time_of_day": {"type": "string"},
+        "animals": {"type": "array", "items": {"type": "string"}},
+        "content_type": {"type": "string"},
+        "visible_text": {"type": "string"},
     },
     "required": ["caption", "subject", "scene", "people_count", "eyes_closed",
-                 "aesthetic", "tags", "issues", "keep_hint"],
+                 "aesthetic", "tags", "issues", "keep_hint",
+                 "activity", "indoor_outdoor", "time_of_day", "animals",
+                 "content_type", "visible_text"],
 }
 
 VLM_PROMPT = (
@@ -510,6 +559,18 @@ VLM_PROMPT = (
     "power lines across the frame, poles, cranes, signs, a stray limb, a merge (a pole growing "
     "out of a head), or a horizon line through a person. Empty list only if truly clean.\n"
     "- keep_hint: true if this looks worth keeping as a photograph.\n"
+    "- activity: what the subject is doing, a few words (e.g. 'hiking a ridge trail', 'blowing "
+    "out birthday candles'). Empty string if nothing identifiable is happening.\n"
+    "- indoor_outdoor: one of indoor, outdoor, unknown.\n"
+    "- time_of_day: one of day, golden_hour, blue_hour, night, unknown. Only golden_hour/blue_hour "
+    "if the warm/cool cast is unmistakable; default to day or night otherwise.\n"
+    "- animals: any animals clearly visible (e.g. ['dog']); empty list if none.\n"
+    "- content_type: one of photo, screenshot, document, graphic. 'photo' unless this is "
+    "obviously a screen capture, a scanned/photographed document or receipt, or a graphic/meme.\n"
+    "- visible_text: transcribe short legible text ONLY if you can actually read it clearly — a "
+    "sign, menu, plaque, license plate, or similar. Do NOT guess, complete, or infer text you "
+    "can't read cleanly, and do NOT name a location from it beyond what's literally written. "
+    "Empty string if there's no legible text.\n"
     "Return only JSON."
 )
 
@@ -565,6 +626,11 @@ def _as_taglist(x, limit):
     return out[:limit]
 
 
+def _as_enum(x, choices, default):
+    v = str(x or "").strip().lower().replace(" ", "_")
+    return v if v in choices else default
+
+
 def coerce_vlm(d: dict) -> dict:
     return {
         "caption": _as_str(d.get("caption"), 300),
@@ -576,6 +642,12 @@ def coerce_vlm(d: dict) -> dict:
         "tags": _as_taglist(d.get("tags"), 8),
         "issues": _as_taglist(d.get("issues"), 6),
         "keep_hint": _as_bool(d.get("keep_hint")),
+        "activity": _as_str(d.get("activity"), 80),
+        "indoor_outdoor": _as_enum(d.get("indoor_outdoor"), {"indoor", "outdoor"}, "unknown"),
+        "time_of_day": _as_enum(d.get("time_of_day"), {"day", "golden_hour", "blue_hour", "night"}, "unknown"),
+        "animals": _as_taglist(d.get("animals"), 5),
+        "content_type": _as_enum(d.get("content_type"), {"photo", "screenshot", "document", "graphic"}, "photo"),
+        "visible_text": _as_str(d.get("visible_text"), 200),
     }
 
 
@@ -614,7 +686,7 @@ def analyze_vlm(client, work: Image.Image, fast: bool) -> tuple[dict, str]:
 
 
 def infer_openai(base_url: str, api_key: "str | None", model: str, jpeg: bytes,
-                 timeout: float = CALL_TIMEOUT) -> str:
+                 timeout: float = CALL_TIMEOUT, think: "bool | None" = None) -> str:
     """One OpenAI-compatible /chat/completions call with an inline image — the pluggable backend.
     Works against vLLM, LM Studio, or Ollama's OpenAI endpoint (base_url like http://host:port/v1).
     Returns the raw assistant text (JSON per VLM_PROMPT); caller runs it through coerce_vlm."""
@@ -631,6 +703,8 @@ def infer_openai(base_url: str, api_key: "str | None", model: str, jpeg: bytes,
         ]}],
         "response_format": {"type": "json_object"},
     }
+    if think is not None:
+        body["think"] = think  # Ollama extension: skip chain-of-thought on thinking-capable models
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -642,6 +716,63 @@ def infer_openai(base_url: str, api_key: "str | None", model: str, jpeg: bytes,
     except urllib.error.HTTPError as e:                       # surface the server's real message
         raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
     return data["choices"][0]["message"]["content"]
+
+
+# ----------------------------------------------------------------------------
+# Semantic search: text embeddings over the VLM's own caption/tags/scene output
+# ----------------------------------------------------------------------------
+
+EMBED_RECIPE_VERSION = "v1"  # bump when build_embed_text()'s field selection changes
+EMBED_VERSION = f"{EMBED_MODEL}:{EMBED_RECIPE_VERSION}"  # composite key for the embeddings table
+
+
+def build_embed_text(row: dict) -> str:
+    """Flatten a photo's already-generated VLM fields into one text blob to embed. Reuses the
+    caption/subject/scene/tags/etc already produced during `run` -- no extra model call needed
+    beyond the embedding itself, and search recall tracks whatever the VLM prompt actually asks for."""
+    tags = []
+    try:
+        tags = json.loads(row.get("tags") or "[]")
+    except (TypeError, ValueError):
+        pass
+    bits = [row.get("caption") or ""]
+    for label, key in (("Subject", "subject"), ("Scene", "scene"), ("Activity", "activity"),
+                        ("Setting", "indoor_outdoor"), ("Time", "time_of_day"),
+                        ("Animals", "animals"), ("Contains", "content_type")):
+        val = (row.get(key) or "").strip()
+        if val and val.lower() not in ("none", "n/a", "unknown", "no"):
+            bits.append(f"{label}: {val}.")
+    if tags:
+        bits.append("Tags: " + ", ".join(str(t) for t in tags) + ".")
+    return " ".join(b for b in bits if b).strip()
+
+
+def infer_embed(base_url: str, api_key: "str | None", model: str, text: str,
+                timeout: float = 30) -> list:
+    """One OpenAI-compatible /embeddings call -- same base_url convention as infer_openai
+    (Ollama's /v1 endpoint by default)."""
+    import urllib.error
+    import urllib.request
+    body = {"model": model, "input": text}
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(base_url.rstrip("/") + "/embeddings",
+                                 data=json.dumps(body).encode(), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
+    return data["data"][0]["embedding"]
+
+
+def pack_vector(vec) -> bytes:
+    return np.asarray(vec, dtype=np.float32).tobytes()
+
+
+def unpack_vector(blob: bytes) -> np.ndarray:
+    return np.frombuffer(blob, dtype=np.float32)
 
 
 # ----------------------------------------------------------------------------
@@ -754,6 +885,12 @@ def process_one(client, path: Path, fast: bool) -> dict:
         "keep_hint": int(vlm["keep_hint"]),
         "tags": json.dumps(vlm["tags"]),
         "issues": json.dumps(vlm["issues"]),
+        "activity": vlm["activity"],
+        "indoor_outdoor": vlm["indoor_outdoor"],
+        "time_of_day": vlm["time_of_day"],
+        "animals": json.dumps(vlm["animals"]),
+        "content_type": vlm["content_type"],
+        "visible_text": vlm["visible_text"],
         "phash": phash,
         **verdict,
     }
@@ -823,8 +960,9 @@ def cluster_bursts(conn: sqlite3.Connection, burst_gap: float):
 
 CSV_COLUMNS = [
     "filename", "verdict", "quality_stars", "color_label", "aesthetic",
-    "sharpness", "exposure_flag", "blown_pct", "crushed_pct",
+    "sharpness", "exposure_flag", "blown_pct", "crushed_pct", "monochrome",
     "subject", "scene", "caption", "tags", "issues",
+    "activity", "indoor_outdoor", "time_of_day", "animals", "content_type", "visible_text",
     "people_count", "eyes_closed", "keep_hint", "is_best_in_burst", "burst_id",
     "reason", "user_rating", "user_label", "status", "error_class", "error_msg", "model_used",
     "prompt_version", "harness_version", "path",
@@ -839,7 +977,7 @@ def export_csv(conn: sqlite3.Connection, csv_path: Path):
         w.writeheader()
         for r in rows:
             d = dict(r)
-            for jcol in ("tags", "issues"):
+            for jcol in ("tags", "issues", "animals"):
                 if d.get(jcol):
                     try:
                         d[jcol] = ", ".join(json.loads(d[jcol]))
@@ -888,6 +1026,20 @@ def build_keywords(row: dict) -> tuple[list, list]:
         kws.append(f"Stars-{row['quality_stars']}")     # e.g. Stars-3  (search "Stars")
     if row["is_best_in_burst"] and (row["burst_size"] or 1) > 1:
         kws.append("pick-best")
+    if row.get("activity"):
+        kws.append(row["activity"].lower())
+    if row.get("indoor_outdoor") in ("indoor", "outdoor"):
+        kws.append(row["indoor_outdoor"].capitalize())  # Indoor / Outdoor
+    if row.get("time_of_day") and row["time_of_day"] != "unknown":
+        kws.append(f"Time-{row['time_of_day'].replace('_', '')}")  # e.g. Time-goldenhour
+    if row.get("animals"):
+        kws += [a.lower() for a in json.loads(row["animals"])]
+    if row.get("content_type") and row["content_type"] != "photo":
+        kws.append(f"Type-{row['content_type']}")       # e.g. Type-screenshot (photos stay untagged)
+    if row.get("visible_text"):
+        kws.append(row["visible_text"][:80])
+    if row.get("monochrome"):
+        kws.append("Monochrome")
     seen, out = set(), []                               # de-dup, preserve order
     for t in kws:
         if t and t not in seen:
@@ -1193,7 +1345,7 @@ def cmd_status(args):
 
 
 def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
-                      folders: "list[Path] | None" = None) -> int:
+                      folders: "list[Path] | None" = None, append: bool = False) -> int:
     """Write a TSV for the Lightroom 'AI Cull Sync' plugin — one ok photo per line:
         <shootFolder>\\t<filename>\\t<colorLabel>\\t<kw1|kw2|...>\\t<caption>
     The plugin applies ONLY these (color label + keywords + caption) to the catalog, never
@@ -1201,9 +1353,27 @@ def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
     (Stars-N, Cull-*, …). Caption goes into LrC's Caption field, IPTC-safe and independent of
     your ratings/flags. Matched by (shootFolder, filename) -- not filename alone -- since Sony
     resets its file counter across shoots, so this TSV can safely cover the WHOLE library in one
-    sync (select All Photographs), not just one shoot at a time."""
+    sync (select All Photographs), not just one shoot at a time.
+
+    append=True merges into an existing out_path instead of overwriting it -- keyed by
+    (shootFolder, filename), so re-running the same shoot just refreshes its rows in place. Lets
+    the ingest watcher accumulate many shoots into one pending TSV between Lightroom syncs,
+    instead of leaving one file per shoot for you to click through."""
     folders = [Path(f).resolve() for f in folders] if folders else None
-    lines = []
+    rows: "dict[tuple, str]" = {}
+    order = []
+
+    if append and Path(out_path).exists():
+        for line in Path(out_path).read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            key = (parts[0], parts[1])
+            rows[key] = line
+            order.append(key)
+
     for row in (dict(r) for r in conn.execute("SELECT * FROM images WHERE status='ok'")):
         path = Path(row["path"])
         if folders and not any(_is_under(path, f) for f in folders):
@@ -1213,7 +1383,12 @@ def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
         label = (row["color_label"] or "").replace("\t", " ")
         caption = (row["caption"] or "").replace("\t", " ").replace("\n", " ")
         shoot_folder = path.parent.name.replace("\t", " ")
-        lines.append(f"{shoot_folder}\t{row['filename']}\t{label}\t{kws}\t{caption}")
+        key = (shoot_folder, row["filename"])
+        if key not in rows:
+            order.append(key)
+        rows[key] = f"{shoot_folder}\t{row['filename']}\t{label}\t{kws}\t{caption}"
+
+    lines = [rows[k] for k in order]
     Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(lines)
 
@@ -1226,8 +1401,9 @@ def cmd_export(args):
     n = export_csv(conn, args.csv)
     print(f"Wrote {n} rows to {args.csv}")
     if args.plugin_data:
-        m = write_plugin_data(conn, args.plugin_data, args.folder)
-        print(f"Wrote {m} row(s) to {args.plugin_data}  (for the Lightroom AI-Cull plugin).")
+        m = write_plugin_data(conn, args.plugin_data, args.folder, append=args.plugin_data_append)
+        verb = "row(s) now in" if args.plugin_data_append else "row(s) to"
+        print(f"{'Merged' if args.plugin_data_append else 'Wrote'} {m} {verb} {args.plugin_data}  (for the Lightroom AI-Cull plugin).")
     if args.xmp or args.xmp_dir:
         stats = write_xmp_sidecars(conn, force=args.force_xmp, xmp_dir=args.xmp_dir,
                                    merge=args.merge, folders=args.folder, ai_rating=args.ai_rating)
@@ -1389,7 +1565,8 @@ def cmd_feedback(args):
 def cmd_analyze(args):
     """Run a model over a folder's `ok` images via an OpenAI-compatible endpoint and store its
     outputs in `analyses` (path, model, prompt_version) for A/B comparison. Reuses the CV metrics
-    already in `images` and the same VLM_PROMPT, so only the model's judgment varies. Idempotent."""
+    already in `images` and the same VLM_PROMPT, so only the model's judgment varies. Resumable:
+    skips paths already analyzed by this model+prompt_version unless --force."""
     if not args.db.exists():
         sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
     conn = connect(args.db)
@@ -1398,8 +1575,15 @@ def cmd_analyze(args):
     hv = harness_version()
     folders = [Path(f).resolve() for f in args.folder] if args.folder else None
 
+    done_paths = set()
+    if not args.force:
+        done_paths = {r["path"] for r in conn.execute(
+            "SELECT path FROM analyses WHERE model=? AND prompt_version=? AND status='ok'",
+            (args.model, VLM_PROMPT_VERSION))}
+
     rows = [dict(r) for r in conn.execute(
-        "SELECT path, sharpness, exposure_flag, blown_pct FROM images WHERE status='ok'")]
+        "SELECT path, sharpness, exposure_flag, blown_pct FROM images WHERE status='ok'")
+        if r["path"] not in done_paths]
     if folders:
         rows = [r for r in rows if any(_is_under(Path(r["path"]), f) for f in folders)]
     if args.limit:
@@ -1416,9 +1600,12 @@ def cmd_analyze(args):
         rec = {"path": path, "model": args.model, "prompt_version": VLM_PROMPT_VERSION,
                "harness_version": hv,
                "processed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        t_call = time.time()
         try:
             work = to_working(load_source(Path(path)), MAX_EDGE)
-            raw = infer_openai(args.base_url, api_key, args.model, jpeg_bytes(work), CALL_TIMEOUT)
+            raw = infer_openai(args.base_url, api_key, args.model, jpeg_bytes(work), CALL_TIMEOUT,
+                               think=(False if args.no_think else None))
+            rec["duration_s"] = round(time.time() - t_call, 2)
             vlm = coerce_vlm(extract_json(raw))
             cv = {"sharpness": r["sharpness"], "exposure_flag": r["exposure_flag"],
                   "blown_pct": r["blown_pct"]}
@@ -1429,8 +1616,9 @@ def cmd_analyze(args):
                         "keep_hint": int(vlm["keep_hint"]), "tags": json.dumps(vlm["tags"]),
                         "issues": json.dumps(vlm["issues"]), **d})
             done += 1
-            tag = f"{d['verdict']:6s} {d['quality_stars']}* aes={vlm['aesthetic']} {vlm['subject'][:24]}"
+            tag = f"{d['verdict']:6s} {d['quality_stars']}* aes={vlm['aesthetic']} {vlm['subject'][:24]} ({rec['duration_s']}s)"
         except Exception as e:  # noqa: BLE001
+            rec["duration_s"] = round(time.time() - t_call, 2)
             rec.update({"status": "error", "error_class": "model", "error_msg": _exc_text(e)[:500]})
             errs += 1
             tag = f"ERROR {_exc_text(e)[:70]}"
@@ -1442,6 +1630,64 @@ def cmd_analyze(args):
     fol = (" --folder " + " ".join(str(f) for f in args.folder)) if args.folder else ""
     print(f"\nDone: {done} ok / {errs} error in {_fmt_eta(time.time() - t0)}.  "
           f"Next: photo_cull.py compare --model '{args.model}'{fol}")
+
+
+def cmd_embed(args):
+    """Embed each `ok` image's caption/tags/etc (build_embed_text) into `embeddings`, for semantic
+    search (see review/server.py's /api/semantic_search). Resumable: skips paths already embedded
+    at the current EMBED_VERSION unless --force. Cheap/fast (~60-80ms/image, text-only) compared to
+    the VLM pass -- fine to run inline right after `run`, e.g. from the ingest watcher."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    conn = connect(args.db)
+    folders = [Path(f).resolve() for f in args.folder] if args.folder else None
+    api_key = args.api_key or os.environ.get("VLM_API_KEY")
+
+    done_paths = set()
+    if not args.force:
+        done_paths = {r["path"] for r in conn.execute(
+            "SELECT path FROM embeddings WHERE embed_version=?", (EMBED_VERSION,))}
+
+    rows = [dict(r) for r in conn.execute(
+        "SELECT path, caption, subject, scene, activity, indoor_outdoor, time_of_day, "
+        "animals, content_type, tags FROM images WHERE status='ok'")
+        if r["path"] not in done_paths]
+    if folders:
+        rows = [r for r in rows if any(_is_under(Path(r["path"]), f) for f in folders)]
+    if args.limit:
+        rows = rows[: args.limit]
+    if not rows:
+        print(f"Nothing to embed (all ok images already at embed_version={EMBED_VERSION}).")
+        return
+    print(f"Embedding {len(rows)} image(s) with '{EMBED_MODEL}' via {args.base_url}  "
+          f"(embed_version {EMBED_VERSION}) -> embeddings.")
+
+    done = errs = skipped = 0
+    t0 = time.time()
+    for i, r in enumerate(rows, 1):
+        path = r["path"]
+        text = build_embed_text(r)
+        if not text:
+            skipped += 1
+            continue  # nothing to embed (e.g. blank caption) -- leave unindexed, not an error
+        try:
+            vec = infer_embed(args.base_url, api_key, EMBED_MODEL, text)
+            conn.execute(
+                "INSERT OR REPLACE INTO embeddings(path, embed_version, model, dims, vector, created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (path, EMBED_VERSION, EMBED_MODEL, len(vec), pack_vector(vec),
+                 datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            conn.commit()
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            errs += 1
+            print(f"[{i}/{len(rows)}] {Path(path).name:24s} -> ERROR {_exc_text(e)[:70]}")
+            continue
+        if i % 200 == 0 or i == len(rows):
+            elapsed = time.time() - t0
+            eta = (elapsed / i) * (len(rows) - i)
+            print(f"[{i}/{len(rows)}] embedded  ({elapsed/i*1000:.0f}ms/img, ETA {_fmt_eta(eta)})")
+    print(f"\nDone: {done} ok / {skipped} skipped (no text) / {errs} error in {_fmt_eta(time.time() - t0)}.")
 
 
 def cmd_compare(args):
@@ -1541,6 +1787,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Also write a TSV (filename, color label, keywords) for the Lightroom "
                         "AI-Cull plugin, which merges those into your catalog WITHOUT touching your "
                         "ratings/flags. Respects --folder.")
+    e.add_argument("--plugin-data-append", action="store_true",
+                   help="If --plugin-data's file already exists, merge new rows into it (keyed by "
+                        "shoot folder + filename) instead of overwriting -- lets several runs pile "
+                        "up into one TSV for a single Lightroom sync.")
     e.add_argument("--ai-rating", action="store_true",
                    help="Also write the AI's star suggestion to xmp:Rating (fills blanks only; merge "
                         "still preserves any rating you set). OFF by default so your star distribution "
@@ -1570,7 +1820,25 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--api-key", default=None, help="Bearer key if the endpoint needs one (else env VLM_API_KEY).")
     an.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
     an.add_argument("--limit", type=int, help="Analyze at most N images (handy for a quick trial).")
+    an.add_argument("--force", action="store_true",
+                    help="Reprocess paths already analyzed by this model+prompt_version too "
+                         "(default: skip them, so a killed run resumes for free).")
+    an.add_argument("--no-think", action="store_true",
+                    help="Skip chain-of-thought on thinking-capable models (Ollama 'think:false' "
+                         "extension) — much faster, e.g. qwen3.6:35b-a3b.")
     an.set_defaults(func=cmd_analyze)
+
+    em = sub.add_parser("embed", help="Embed each ok image's caption/tags/etc into `embeddings`, "
+                        "for semantic search (review/server.py's /api/semantic_search).")
+    em.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    em.add_argument("--base-url", default="http://localhost:11434/v1",
+                    help="OpenAI-compatible base URL for the embedding model (default: local Ollama).")
+    em.add_argument("--api-key", default=None, help="Bearer key if the endpoint needs one (else env VLM_API_KEY).")
+    em.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    em.add_argument("--limit", type=int, help="Embed at most N images (handy for a quick trial).")
+    em.add_argument("--force", action="store_true",
+                    help="Re-embed paths already at the current EMBED_VERSION too (default: skip them).")
+    em.set_defaults(func=cmd_embed)
 
     cp = sub.add_parser("compare", help="Compare a model in `analyses` vs the images baseline (and "
                         "vs your LR ratings).")
