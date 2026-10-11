@@ -13,7 +13,8 @@ const view = $('#view');
 const reduced = () => window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 const NOTE_PREFIX = 'Burst reject · kept ';
 const THRESH = 80;          // px of vertical drag that commits a keep or reject
-const PICKER_STRIP_MAX = 6; // bursts up to this size open as a filmstrip; bigger ones as a duel
+const PICKER_STRIP_MAX = 6; // bursts up to this size open as a filmstrip; bigger ones as a knock-out grid
+const BAND_MIN = 80;        // px: a 1:1 band shorter than this isn't worth showing
 
 const IC = {
   x: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>',
@@ -292,6 +293,7 @@ function shapeCard(card, id) {
   card.classList.toggle('k-fill', ar < 1);
   card.classList.toggle('k-land', ar >= 1);
   card.style.aspectRatio = ar < 1 ? '' : ar.toFixed(4);
+  if (ar < 1) dropBand();   // a vertical photo uses the height itself
 }
 function bindPhotos(root) {
   for (const p of root.querySelectorAll('.photo')) {
@@ -547,48 +549,61 @@ function vCull() {
   const ar = AR[f.id] || 1.5;
   const cls = 'card ' + (ar < 1 ? 'k-fill' : 'k-land') + (burst ? ' is-stack' : '') + (st.done ? ' st-' + st.v : '');
   const left = n - doneCount(), togo = left + (left === 1 ? ' stack' : ' stacks') + ' to go';
+  // Under a landscape photo, the RAW at 1:1 where the camera focused (or the centre), in the
+  // space an upright phone leaves; loadBand() sizes it and drops it when there's no room.
+  const band = ar >= 1 ? '<div class="band" id="band"><img alt="" draggable="false"><span class="bd">1:1 at ' +
+    (f.af ? 'the AF point' : 'the centre') + '</span><span class="band-load">Decoding the RAW…</span></div>' : '';
   return top(backBtn('days', 'Days'), dayTitle(S.day), S.matches ? '' : togo,
       '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>',
       S.matches ? '<button class="mchip" data-act="matches">' + S.matches.n + ' match' + (S.matches.n === 1 ? '' : 'es') + ' first</button> · ' + left + ' to go' : '') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' + budgetBar() +
-    '<div class="stage" id="stage"><div class="' + cls + '"' + (ar < 1 ? '' : ' style="aspect-ratio:' + ar.toFixed(4) + '"') + '>' +
-      photo(f, '<div class="tint"></div>' + stLine(s, st) + '<div class="badges">' + badges + '</div>' + chip + '<div class="stamp"><span>KEEP</span></div>') + '</div>' +
-      '<div class="fname">' + esc([f.file].concat(f.partners).join(' + ')) + ' · ' + (S.cursor + 1) + '/' + n + '</div></div>' +
+    '<div class="stage' + (band ? ' has-band' : '') + '" id="stage"><div class="' + cls + '"' + (ar < 1 ? '' : ' style="aspect-ratio:' + ar.toFixed(4) + '"') + '>' +
+      photo(f, '<div class="tint"></div>' + afBox(f) + stLine(s, st) + '<div class="badges">' + badges + '</div>' + chip + '<div class="stamp"><span>KEEP</span></div>') + '</div>' +
+      band + '<div class="fname">' + esc([f.file].concat(f.partners).join(' + ')) + ' · ' + (S.cursor + 1) + '/' + n + '</div></div>' +
     strip +
     '<div class="bar"><button class="pb pb-rej' + on('reject') + '" data-act="reject">' + IC.x + '<span>Reject</span></button>' +
       '<button class="pb pb-undo" data-act="undo"' + (S.hist.length ? '' : ' disabled') + '>' + IC.undo + '<span>Undo</span></button>' +
       (burst ? '<button class="pb pb-all' + (sugg && !st.done ? ' sugg' : '') + on('keep-all') + '" data-act="keep-all">' + IC.stack + '<span>Keep all ' + s.frames.length + '</span></button>'
         : '<button class="pb pb-hero' + on('hero') + '" data-act="hero">' + IC.star + '<span>Hero</span></button>') +
-      '<button class="pb pb-keep' + on('keep') + '" data-act="keep">' + IC.check + '<span>' + (burst ? 'Keep frame' : 'Keep') + '</span></button></div>' +
-    '<div class="hint">Swipe ↑ keep · ↓ reject · ← → browse · double-tap for focus</div>';
+      (burst ? '<button class="pb pb-keep' + on('keep') + '" data-act="choose">' + IC.stack + '<span>Choose</span></button></div>'
+        : '<button class="pb pb-keep' + on('keep') + '" data-act="keep">' + IC.check + '<span>Keep</span></button></div>') +
+    '<div class="hint">Swipe ↑ ' + (burst ? 'open the burst' : 'keep') + ' · ↓ reject · ← → browse · double-tap for focus</div>';
 }
 
 function vStrip() {
   const s = S.stacks[S.cursor], fr = s.frames, pk = S.picker, f = fr[pk.view], on = pk.sel.has(f.id);
   const n = pk.sel.size, m = frameMark(f);
   const lrBadge = lrMark(f) && !(m && m.text.endsWith('in Lightroom')) ? '<span class="bd bd-lr">' + esc(lrWord(f)) + '</span>' : '';
-  return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, 'Tick the keepers') +
-    '<div class="pk-main" id="pk-main"><div class="pk-box">' + photo(f) + '</div>' +
+  // Linked 1:1: every frame shows the RAW at the same spot, the lead frame's AF point, so a swipe
+  // flips frames with the crop held still (loadLinked fills it in).
+  const main = pk.linked && pk.box ? '<div class="pk-box lk"><img alt="" draggable="false">' +
+      '<span class="lk-load">Decoding the RAW…</span></div><span class="bd pk-cap">1:1 · the same spot on every frame</span>'
+    : '<div class="pk-box">' + photo(f, afBox(f)) + '</div>';
+  return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, 'Tick the keepers',
+      '<div class="tools"><button class="pk-11' + (pk.linked ? ' on' : '') + '" data-act="linked" aria-pressed="' + !!pk.linked + '" aria-label="Compare at 1:1">1:1</button></div>') +
+    '<div class="pk-main' + (pk.linked ? ' is-linked' : '') + '" id="pk-main">' + main +
       '<div class="pk-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + lrBadge + '</div>' +
       (m ? '<span class="pk-flag ' + m.v + '">' + esc(m.text) + (m.stars ? ' ' + starText(m.stars) : '') + '</span>' : '') +
       '<button class="pk-tick' + (on ? ' on' : '') + '" data-act="tick" aria-pressed="' + on + '" aria-label="Keep ' + esc(f.file) + '">' + IC.check + '</button>' +
       '<span class="pk-id">' + esc(stem(f.file)) + ' · ' + (pk.view + 1) + '/' + fr.length + '</span></div>' +
     '<div class="pk-strip">' + fr.map((x, i) => '<button class="pk-th' + (i === pk.view ? ' cur' : '') + '" data-act="view" data-i="' + i + '" aria-label="Show ' + esc(x.file) + '">' +
       thumb(x) + (x.id === s.lead ? '<i class="dot"></i>' : '') + (pk.sel.has(x.id) ? '<b>' + IC.check + '</b>' : '') + '</button>').join('') + '</div>' +
-    '<p class="pk-note">A dot marks the sharpest frame. Swipe to look, double-tap to check focus, ✓ to keep.</p>' +
+    '<p class="pk-note">A dot marks the sharpest frame. Swipe to look, 1:1 to compare the same spot, ✓ to keep.</p>' +
     '<div class="foot"><button class="pb2" data-act="pk-reject">Reject all ' + fr.length + '</button>' +
       '<button class="pb2 pri" data-act="pk-keep"' + (n ? '' : ' disabled') + '>' + (n ? 'Keep ' + n + ' · reject ' + (fr.length - n) : 'Tick a keeper') + '</button></div>';
 }
 
-function vDuel() {
-  const s = S.stacks[S.cursor], fr = s.frames, pk = S.picker, A = fr[pk.champ], B = fr[pk.idx];
-  const lab = (f, tag) => '<span class="du-tag">' + tag + '</span><span class="du-id">' + esc(stem(f.file)) + '</span>' +
-    '<span class="du-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + '</span>';
-  return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Winner stays', 'Round ' + pk.idx + ' of ' + (fr.length - 1) + ' · tap the better frame') +
-    '<div class="du"><button class="du-f" data-act="duel-win" data-w="champ" aria-label="' + esc(A.file) + ' is better"><div class="pk-box">' + photo(A) + '</div>' + lab(A, 'Holding') + '</button>' +
-    '<button class="du-f" data-act="duel-win" data-w="chal" aria-label="' + esc(B.file) + ' is better"><div class="pk-box">' + photo(B) + '</div>' + lab(B, 'Challenger') + '</button></div>' +
-    '<div class="du-kept">' + (pk.keepers.length ? 'Also keeping ' + pk.keepers.length : '') + '</div>' +
-    '<div class="foot"><button class="pb2" data-act="duel-both">Keep both</button><button class="pb2 pri" data-act="duel-done">Finish: keep ' + (1 + pk.keepers.length) + '</button></div>';
+// Bursts of more than six: every frame at once, tap the weak ones out, keep what is left (like
+// Lightroom's Survey view). A double-tap checks a frame's focus instead.
+function vKnock() {
+  const s = S.stacks[S.cursor], fr = s.frames, pk = S.picker, left = fr.length - pk.out.size;
+  return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, left + ' left · tap the weaker frames out') +
+    '<div class="ko">' + fr.map((f, i) => '<button class="ko-t' + (pk.out.has(f.id) ? ' out' : '') + '" style="aspect-ratio:' + (AR[f.id] || 1.5).toFixed(4) +
+      '" data-act="ko" data-i="' + i + '" aria-pressed="' + pk.out.has(f.id) + '" aria-label="' + esc(f.file) + (pk.out.has(f.id) ? ', out' : '') + '">' +
+      thumb(f) + (f.id === s.lead ? '<i class="dot"></i>' : '') + '<b>' + IC.x + '</b></button>').join('') + '</div>' +
+    '<p class="pk-note">The dot marks the sharpest. Tap again to bring a frame back; double-tap to check its focus.</p>' +
+    '<div class="foot"><button class="pb2" data-act="pk-reject">Reject all ' + fr.length + '</button>' +
+      '<button class="pb2 pri" data-act="ko-keep"' + (left ? '' : ' disabled') + '>Keep the ' + left + ' left</button></div>';
 }
 
 const clamp01 = v => Math.min(1, Math.max(0, v));
@@ -606,7 +621,8 @@ function openFocus(id, u, v) {
 }
 function vFocus() {
   const f = frameById(S.focus.id), fromCard = S.focus.ret === 'cull', m = frameMark(f);
-  return top(backBtn('close-focus', 'Back'), 'Focus · ' + stem(f.file), '1:1 from the RAW · drag to look around') +
+  const atAF = f.af && Math.abs(f.af[0] - S.focus.u) < 1e-3 && Math.abs(f.af[1] - S.focus.v) < 1e-3;
+  return top(backBtn('close-focus', 'Back'), 'Focus · ' + stem(f.file), (atAF ? 'At the camera’s AF point' : '1:1 from the RAW') + ' · drag to look around') +
     (m ? '<div class="fz-st ' + m.v + '">' + (m.v === 'reject' ? '✕ ' : '✓ ') + esc(m.text) + (m.stars ? ' ' + starText(m.stars) : '') + '</div>' : '') +
     '<div class="fz" id="fz"><img alt="" draggable="false"><div class="fz-load">Decoding the RAW…</div></div>' +
     '<div class="fz-cap">Double-tap the photo to go back.</div>' +
@@ -750,7 +766,7 @@ function draw(anim) {
   const scr = S.screen;
   view.innerHTML = scr === 'days' ? vDays() : scr === 'loading' ? vLoading('Loading the day…')
     : scr === 'error' ? vLoading(S.error || 'Something went wrong')
-    : scr === 'picker' ? (S.picker.m === 'strip' ? vStrip() : vDuel())
+    : scr === 'picker' ? (S.picker.m === 'strip' ? vStrip() : vKnock())
     : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : vCull();
   view.classList.toggle('no-chrome', !S.chrome);
   bindPhotos(view);
@@ -758,9 +774,11 @@ function draw(anim) {
     bindStage();
     const c = $('.card', view);
     if (c && anim && !reduced()) c.classList.add('enter-' + anim);
+    loadBand();
     setTimeout(prefetch, 80);
   }
-  if (scr === 'picker' && S.picker.m === 'strip') bindPickerSwipe();
+  if (scr === 'picker' && S.picker.m === 'strip') { bindPickerSwipe(); loadLinked(); }
+  else if (scr !== 'cull') keepCrops([]);
   if (scr === 'focus') requestAnimationFrame(loadFocus);
 }
 function prefetch() {
@@ -773,13 +791,114 @@ function prefetch() {
     if (k <= 3) for (const f of s.frames.slice(0, 6)) new Image().src = img(f.id, 'thumb');
   }
 }
+function bandUrls() {   // this card's band and the next two landscape cards', for keepCrops
+  const out = [];
+  for (let k = 0; k <= 2 && S.bandSize; k++) {
+    const s = S.stacks[S.cursor + k];
+    if (!s) break;
+    const v = shown(s);
+    if ((AR[v.id] || 1.5) >= 1) out.push(cropUrl(v, spotOf(v), S.bandSize));
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------- 1:1 crops */
+// A crop is a full RAW decode on the PC, a second or more each. They go through one queue, one at
+// a time, and the ones for cards you've moved past are cancelled: a browser opens only six
+// connections to the PC, and saving a tap must never wait behind them.
+const CROPS = { done: new Map(), queue: [], live: null };
+function getCrop(url, urgent) {
+  if (CROPS.done.has(url)) return Promise.resolve(CROPS.done.get(url));
+  let job = (CROPS.live && CROPS.live.url === url ? CROPS.live : null) || CROPS.queue.find(j => j.url === url);
+  if (!job) {
+    job = { url, waiters: [] };
+    if (urgent) CROPS.queue.unshift(job); else CROPS.queue.push(job);
+  } else if (urgent && CROPS.queue.includes(job)) {
+    CROPS.queue.splice(CROPS.queue.indexOf(job), 1); CROPS.queue.unshift(job);
+  }
+  const p = new Promise((res, rej) => job.waiters.push({ res, rej }));
+  pumpCrops();
+  return p;
+}
+function keepCrops(urls) {   // cancel every crop not in urls
+  const keep = new Set(urls);
+  for (const j of CROPS.queue.filter(j => !keep.has(j.url))) j.waiters.forEach(w => w.rej(new Error('cancelled')));
+  CROPS.queue = CROPS.queue.filter(j => keep.has(j.url));
+  if (CROPS.live && !keep.has(CROPS.live.url)) CROPS.live.ctrl.abort();
+}
+async function pumpCrops() {
+  if (CROPS.live || !CROPS.queue.length) return;
+  const job = CROPS.live = CROPS.queue.shift();
+  job.ctrl = new AbortController();
+  try {
+    const r = await fetch(job.url, { signal: job.ctrl.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const u = URL.createObjectURL(await r.blob());
+    CROPS.done.set(job.url, u);
+    while (CROPS.done.size > 24) { const [k, old] = CROPS.done.entries().next().value; URL.revokeObjectURL(old); CROPS.done.delete(k); }
+    job.waiters.forEach(w => w.res(u));
+  } catch (e) {
+    job.waiters.forEach(w => w.rej(e));
+  }
+  CROPS.live = null;
+  pumpCrops();
+}
+const spotOf = f => f.af || [0.5, 0.5];
+const cropUrl = (f, spot, sz) => '/m/api/crop/' + f.id + '?x=' + spot[0].toFixed(4) + '&y=' + spot[1].toFixed(4) + '&w=' + sz.w + '&h=' + sz.h;
+const afBox = f => (f.af ? '<span class="af" style="left:' + (f.af[0] * 100).toFixed(2) + '%;top:' + (f.af[1] * 100).toFixed(2) + '%"></span>' : '');
+function devSize(el) {   // an element's size in device pixels: one RAW pixel each is 1:1
+  const r = el.getBoundingClientRect(), dpr = Math.min(3, window.devicePixelRatio || 1);
+  return { w: Math.min(2400, Math.round(r.width * dpr)), h: Math.min(2400, Math.round(r.height * dpr)) };
+}
+function dropBand() {
+  const band = $('#band', view);
+  if (band) { band.remove(); $('#stage', view).classList.remove('has-band'); }
+}
+function showCrop(box, url, urgent) {
+  const im = $('img', box), load = $('.band-load, .lk-load', box);
+  getCrop(url, urgent).then(u => {
+    if (!box.isConnected) return;
+    im.onload = () => { load.hidden = true; };
+    im.src = u;
+  }).catch(e => { if (box.isConnected && e.message !== 'cancelled' && e.name !== 'AbortError') load.textContent = 'Could not decode this frame'; });
+}
+function loadBand() {
+  const band = $('#band', view), s = S.stacks[S.cursor];
+  if (!band || !s) { keepCrops([]); return; }
+  if (band.getBoundingClientRect().height < BAND_MIN) { keepCrops([]); return dropBand(); }
+  const f = shown(s);
+  S.bandSize = devSize(band);
+  const urls = bandUrls();
+  keepCrops(urls);
+  showCrop(band, cropUrl(f, spotOf(f), S.bandSize), true);
+  for (const u of urls.slice(1)) getCrop(u).catch(() => {});   // so the next bands are there on arrival
+}
+function linkedUrls() {
+  const s = S.stacks[S.cursor], pk = S.picker, spot = spotOf(leadOf(s));
+  const order = s.frames.slice(pk.view).concat(s.frames.slice(0, pk.view));   // nearest first
+  return order.map(f => cropUrl(f, spot, pk.box));
+}
+function loadLinked() {
+  const box = $('.pk-box.lk', view);
+  if (!box) { keepCrops([]); return; }
+  const urls = linkedUrls();
+  keepCrops(urls);
+  showCrop(box, urls[0], true);
+  for (const u of urls.slice(1)) getCrop(u).catch(() => {});
+}
+function toggleLinked() {
+  const pk = S.picker;
+  pk.linked = !pk.linked;
+  if (pk.linked) pk.box = devSize($('#pk-main', view));
+  draw();
+}
 
 /* ---------------------------------------------------------------- gestures */
 function setStamp(card, a, k) {
   const st = $('.stamp', card), tint = $('.tint', card);
   if (!st) return;
   st.dataset.a = a;
-  st.firstChild.textContent = a === 'reject' ? 'REJECT' : a === 'hero' ? 'HERO' : a === 'all' ? 'KEEP ALL' : 'KEEP';
+  st.firstChild.textContent = a === 'reject' ? 'REJECT' : a === 'hero' ? 'HERO' : a === 'all' ? 'KEEP ALL' : a === 'open' ? 'CHOOSE' : 'KEEP';
   st.style.opacity = k;
   tint.style.background = a === 'reject' ? 'var(--reject)' : 'var(--keep)';
   tint.style.opacity = k * .25;
@@ -805,10 +924,13 @@ function go(d) {
 let lastTap = 0, tapT = null;
 function tap(x, y) {
   const now = performance.now();
-  if (now - lastTap < 300) {            // double-tap: a 1:1 crop of that spot from the RAW
+  if (now - lastTap < 300) {            // double-tap: 1:1 from the RAW where the camera focused, else there
     clearTimeout(tapT); lastTap = 0;
     const el = $('.card img', view), s = S.stacks[S.cursor];
-    if (el && s) { const p = imagePoint(el, x, y); openFocus(shown(s).id, p.u, p.v); }
+    if (el && s) {
+      const f = shown(s), p = f.af ? { u: f.af[0], v: f.af[1] } : imagePoint(el, x, y);
+      openFocus(f.id, p.u, p.v);
+    }
     return;
   }
   lastTap = now;
@@ -832,7 +954,7 @@ function bindStage() {
     if (st.axis === 'y') {
       st.d = dy; st.kind = 'decide';
       card.style.transform = 'translateY(' + dy + 'px)';
-      setStamp(card, dy < 0 ? 'keep' : 'reject', Math.min(1, Math.abs(dy) / THRESH));
+      setStamp(card, dy >= 0 ? 'reject' : isBurst() ? 'open' : 'keep', Math.min(1, Math.abs(dy) / THRESH));
     } else {
       st.d = dx; st.kind = 'browse';
       card.style.transform = 'translateX(' + dx * .7 + 'px)';
@@ -842,6 +964,7 @@ function bindStage() {
     if (!st) return;
     const s = st; st = null;
     if (!s.axis) { reset(); return tap(s.x, s.y); }
+    if (s.kind === 'decide' && s.d <= -THRESH && isBurst()) { reset(); return openPicker(true); }
     if (s.kind === 'decide' && Math.abs(s.d) >= THRESH) return flyOut(s.d < 0 ? 'keep' : 'reject');
     if (s.kind === 'browse' && Math.abs(s.d) >= 70) return go(s.d < 0 ? 1 : -1);
     reset();
@@ -862,7 +985,8 @@ function bindPickerSwipe() {
     if (now - lastAt < 300) {           // double-tap: focus check on this frame
       lastAt = 0;
       const el = $('.photo img', m), f = S.stacks[S.cursor].frames[S.picker.view];
-      if (el) { const p = imagePoint(el, e.clientX, e.clientY); openFocus(f.id, p.u, p.v); }
+      if (S.picker.linked) { const sp = spotOf(leadOf(S.stacks[S.cursor])); openFocus(f.id, sp[0], sp[1]); }
+      else if (el) { const p = f.af ? { u: f.af[0], v: f.af[1] } : imagePoint(el, e.clientX, e.clientY); openFocus(f.id, p.u, p.v); }
       return;
     }
     lastAt = now;
@@ -954,20 +1078,33 @@ async function resetDo(btn) {
   toast('Started over: cleared ' + body.cleared + (body.withdrawn ? ', took ' + body.withdrawn + ' back out of the inbox' : ''));
 }
 
-function openPicker() {
+const isBurst = () => { const s = S.stacks[S.cursor]; return !!s && s.frames.length > 1; };
+// A swipe up or Choose opens a burst on its first frame in shooting order: you see every frame
+// before keeping one (the Sharpest was your pick in only 41% of one-pick bursts).
+function openPicker(fromStart) {
   const s = S.stacks[S.cursor];
   if (!s || s.frames.length < 2) return;
+  const picked = s.frames.filter(f => isPick(S.dec[f.id]));
   if (s.frames.length <= PICKER_STRIP_MAX) {
-    S.picker = { m: 'strip', sel: new Set(s.frames.filter(f => isPick(S.dec[f.id])).map(f => f.id)), view: s.frames.indexOf(shown(s)) };
-  } else {
-    S.picker = { m: 'duel', champ: 0, idx: 1, keepers: [] };
+    S.picker = { m: 'strip', sel: new Set(picked.map(f => f.id)), view: fromStart ? 0 : s.frames.indexOf(shown(s)) };
+  } else {   // coming back to a decided burst, the frames you didn't keep start out
+    S.picker = { m: 'knock', out: new Set(picked.length ? s.frames.filter(f => !isPick(S.dec[f.id])).map(f => f.id) : []) };
   }
   S.screen = 'picker';
   draw();
 }
-function finishDuel() {
-  const s = S.stacks[S.cursor], pk = S.picker;
-  keepFrames(s, [s.frames[pk.champ]].concat(pk.keepers.map(i => s.frames[i])), false, 'burst');
+let koTap = { i: -1, at: 0 };
+function knockTap(i) {
+  const s = S.stacks[S.cursor], f = s.frames[i], out = S.picker.out, now = performance.now();
+  if (koTap.i === i && now - koTap.at < 300) {   // double-tap: undo the first tap's toggle, check focus
+    koTap = { i: -1, at: 0 };
+    out.has(f.id) ? out.delete(f.id) : out.add(f.id);
+    const sp = spotOf(f);
+    return openFocus(f.id, sp[0], sp[1]);
+  }
+  koTap = { i, at: now };
+  out.has(f.id) ? out.delete(f.id) : out.add(f.id);
+  draw();
 }
 
 /* ---------------------------------------------------------------- input */
@@ -999,6 +1136,10 @@ document.addEventListener('click', e => {
     }
     case 'day-view': S.dayView = b.dataset.v; store('cbm-dayview', S.dayView); return draw();
     case 'days': return showDays();
+    case 'choose': return openPicker(true);
+    case 'linked': return toggleLinked();
+    case 'ko': return knockTap(+b.dataset.i);
+    case 'ko-keep': { const keeps = s.frames.filter(f => !S.picker.out.has(f.id)); if (keeps.length) keepFrames(s, keeps, false, 'burst'); return; }
     case 'keep': case 'reject': case 'hero':
       if (S.screen === 'focus') { S.focus = null; S.screen = 'cull'; return decide(a); }
       return flyOut(a);
@@ -1021,9 +1162,6 @@ document.addEventListener('click', e => {
     case 'tick': { const f = s.frames[S.picker.view]; S.picker.sel.has(f.id) ? S.picker.sel.delete(f.id) : S.picker.sel.add(f.id); return draw(); }
     case 'pk-keep': { const keeps = s.frames.filter(f => S.picker.sel.has(f.id)); if (keeps.length) keepFrames(s, keeps, false, 'burst'); return; }
     case 'pk-reject': return decide('reject');
-    case 'duel-win': { const pk = S.picker; if (b.dataset.w === 'chal') pk.champ = pk.idx; pk.idx++; return pk.idx >= s.frames.length ? finishDuel() : draw(); }
-    case 'duel-both': { const pk = S.picker; pk.keepers.push(pk.idx); pk.idx++; return pk.idx >= s.frames.length ? finishDuel() : draw(); }
-    case 'duel-done': return finishDuel();
     case 'drop': {
       const st = S.stacks[+b.dataset.stack], name = stem(shown(st).file);
       act('Dropped ' + name, st.frames.map(f => ({ id: f.id, flag: 'reject', note: '', via: 'card' })), { screen: 'summary' });
@@ -1056,7 +1194,7 @@ document.addEventListener('keydown', e => {
   if (S.screen === 'picker' && S.picker.m === 'strip') { if (k === 'ArrowLeft' || k === 'ArrowRight') { e.preventDefault(); stripView(S.picker.view + (k === 'ArrowRight' ? 1 : -1)); } return; }
   if (S.screen !== 'cull') return;
   const s = S.stacks[S.cursor], burst = s && s.frames.length > 1;
-  if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); flyOut('keep'); }
+  if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); burst ? openPicker(true) : flyOut('keep'); }
   else if (k === 'ArrowDown' || k === 'x') { e.preventDefault(); flyOut('reject'); }
   else if (k === 'ArrowRight') { e.preventDefault(); go(1); }
   else if (k === 'ArrowLeft') { e.preventDefault(); go(-1); }
@@ -1064,7 +1202,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'h' && !burst) flyOut('hero');
   else if (k === 'b' || k === 'Enter') openPicker();
   else if (k === 'i') openSheet();
-  else if (k === 'f') openFocus(shown(s).id, 0.5, 0.5);
+  else if (k === 'f') { const sp = spotOf(shown(s)); openFocus(shown(s).id, sp[0], sp[1]); }
 });
 
 function route() {

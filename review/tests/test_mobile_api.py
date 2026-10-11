@@ -78,11 +78,18 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(bracket["kind"], "bracket")
         lead = next(f for f in bracket["frames"] if f["id"] == bracket["lead"])
         self.assertEqual(lead["file"], "DSC05040.ARW")          # the normal exposure, not the brightest
-        burst = by_file["DSC05036.ARW"]
+        # DSC05036 was its own press: the camera's sequence numbers split it from the burst after it,
+        # which the 2-second gap rule had joined
+        self.assertEqual(by_file["DSC05036.ARW"]["kind"], "single")
+        burst = by_file["DSC05037.ARW"]
         self.assertEqual(burst["kind"], "burst")
-        self.assertEqual(len(burst["frames"]), 4)
+        self.assertEqual(len(burst["frames"]), 3)
         lead = next(f for f in burst["frames"] if f["id"] == burst["lead"])
         self.assertEqual(lead["file"], "DSC05039.ARW")          # sharpness 445, the burst's highest
+        five = by_file["DSC05051.ARW"]                          # numbered 1, 2, 3, 2, 5 by the camera
+        self.assertEqual((five["kind"], len(five["frames"])), ("bracket", 5))
+        self.assertEqual(len(st), 16)
+        self.assertTrue(all(f["af"] and 0 <= f["af"][0] <= 1 for s in st for f in s["frames"]))
         self.assertIsNone(body["progress"])
         self.assertEqual(body["budget"], {"stacks": 5, "per_hour": 15, "hours": 0.19})   # an 11-minute shoot
         self.assertTrue(all(f["decision"] is None for s in st for f in s["frames"]))

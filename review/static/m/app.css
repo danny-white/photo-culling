@@ -60,6 +60,17 @@ button{font:inherit;color:inherit}
 .stline span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .stline em{font-style:normal;color:var(--hint);letter-spacing:.05em;flex:none}
 .stline~.chip{bottom:40px}
+/* where the camera focused, and the RAW at 1:1 there in the space under a landscape photo */
+.af{position:absolute;width:9%;aspect-ratio:3/2;transform:translate(-50%,-50%);border:2px solid var(--hint);border-radius:2px;box-shadow:0 0 0 1px rgba(0,0,0,.45);pointer-events:none;transition:opacity .2s}
+#view.no-chrome .af{opacity:0}
+.stage.has-band{justify-content:flex-start;gap:6px}
+.stage.has-band .fname{display:none}
+.stage.has-band .card.is-stack{margin-top:14px}
+.band{position:relative;flex:1 1 0;min-height:0;background:#000;overflow:hidden}
+.band img{width:100%;height:100%;object-fit:cover;display:block}
+.band .bd{position:absolute;left:8px;top:8px;transition:opacity .2s}
+#view.no-chrome .band .bd{opacity:0}
+.band-load,.lk-load{position:absolute;inset:0;display:grid;place-items:center;font-size:12.5px;color:var(--muted)}
 .badges{position:absolute;left:8px;top:8px;display:flex;flex-wrap:wrap;gap:4px;max-width:70%;transition:opacity .2s}
 .bd{display:inline-flex;align-items:center;gap:5px;font:600 11px/1 var(--body);padding:5px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:var(--hint)}
 .bd-dot::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--hint)}
@@ -157,6 +168,11 @@ button{font:inherit;color:inherit}
 /* burst picker */
 .pk-main{flex:1;min-height:0;position:relative;background:#000;touch-action:pan-y}
 .pk-box{position:absolute;inset:0}
+.pk-11{font:700 12px/1 var(--mono);padding:7px 9px;border-radius:8px;border:1.5px solid var(--accent);background:none;color:var(--accent);cursor:pointer}
+.pk-11.on{background:var(--accent);color:var(--on-accent)}
+.pk-box.lk img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
+.pk-cap{position:absolute;left:8px;bottom:14px}
+.pk-main.is-linked .pk-id{bottom:40px}
 .pk-flag{position:absolute;right:8px;top:8px;font:700 11px/1 var(--body);padding:5px 8px;border-radius:999px}
 .pk-flag.keep{background:var(--keep);color:#05140C} .pk-flag.hero{background:var(--hint);color:#1A1200} .pk-flag.reject{background:var(--reject);color:#fff}
 .pk-tick{position:absolute;right:12px;bottom:12px;width:46px;height:46px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);color:transparent;display:grid;place-items:center;cursor:pointer;padding:0}
@@ -181,14 +197,15 @@ button{font:inherit;color:inherit}
 .pb2.on-keep{background:var(--keep);color:#05140C}
 .link{background:none;border:0;padding:0;color:var(--muted);font:500 13px/1.3 var(--body);text-decoration:underline;cursor:pointer}
 
-/* duel */
-.du{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:4px 0}
-.du-f{position:relative;border:0;padding:0;background:#000;cursor:pointer;display:grid;place-items:center;overflow:hidden;min-height:0;color:#fff}
-.du-f .pk-box{position:absolute;inset:0}
-.du-tag{position:absolute;left:8px;top:8px;font:700 10.5px/1 var(--body);padding:5px 8px;border-radius:999px;background:rgba(0,0,0,.62)}
-.du-id{position:absolute;right:8px;bottom:8px;font:500 10.5px/1 var(--mono);opacity:.85}
-.du-bd{position:absolute;left:8px;bottom:8px;display:flex;gap:4px}
-.du-kept{text-align:center;font-size:11.5px;color:var(--muted);min-height:16px;flex:none}
+/* knock-out grid: bursts of more than six */
+.ko{flex:1;min-height:0;overflow-y:auto;padding:4px 10px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;align-content:start;-webkit-overflow-scrolling:touch}
+.ko-t{position:relative;border:0;padding:0;background:#000;border-radius:5px;overflow:hidden;cursor:pointer}
+.ko-t img{width:100%;height:100%;object-fit:cover;display:block;transition:opacity .15s}
+.ko-t b{position:absolute;inset:0;display:none;place-items:center}
+.ko-t b svg{width:26px;height:26px;padding:5px;border-radius:50%;background:var(--reject);color:#fff}
+.ko-t.out img{opacity:.22}
+.ko-t.out b{display:grid}
+.ko-t .dot{position:absolute;left:5px;bottom:5px;width:7px;height:7px;border-radius:50%;background:var(--hint)}
 
 /* focus */
 .fz{flex:1;min-height:0;position:relative;overflow:hidden;background:#000;touch-action:none}

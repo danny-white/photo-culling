@@ -88,7 +88,7 @@ CREATE INDEX IF NOT EXISTS lr_state_day ON lr_state(day);
 """
 
 ROW_COLS = ("rowid, path, filename, capture_ts, camera, sharpness, exposure_flag, mean_lum, "
-            "blown_pct, phash, place")
+            "blown_pct, phash, place, drive, seq, ev, af_u, af_v")
 DETAIL_COLS = "rowid, lens, caption, blown_pct, mean_lum, place"
 FLAGS = ("pick", "reject", "none")
 VIAS = ("sweep", "card", "burst", "rescue")
@@ -797,6 +797,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 "SELECT COUNT(*) FROM images i WHERE status='ok' AND COALESCE(processed_at, '') < ? AND NOT EXISTS "
                 "(SELECT 1 FROM embeddings e WHERE e.path = i.path AND e.embed_version = ?)",
                 (cutoff, pc.CLIP_VERSION)).fetchone()[0]
+            noshot = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND shot_checked IS NULL "
+                                 "AND COALESCE(processed_at, '') < ?", (cutoff,)).fetchone()[0]
             ungeo = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND gps_checked IS NULL "
                                 "AND COALESCE(processed_at, '') < ?", (cutoff,)).fetchone()[0]
             folders: dict[str, str] = {}
@@ -837,6 +839,10 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         if ungeo:
             alert("warn", f"{ungeo:,} photos not geotagged", "Their GPS and nearest town were never read.",
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py geotag --db trial_out/trial.db")
+        if noshot:
+            alert("warn", f"{noshot:,} photos without shot info", "Their drive mode and AF point were never read, "
+                  "so their stacks use the 2-second rule and the focus check opens at the centre.",
+                  "cd ~/photo-culling && ./venv/bin/python photo_cull.py shotinfo --db trial_out/trial.db")
         if unsummed:
             alert("warn", f"{len(unsummed)} day{'s' if len(unsummed) > 1 else ''} without a summary",
                   ", ".join(os.path.basename(f) for f in unsummed[:4]) + (" …" if len(unsummed) > 4 else ""),
@@ -878,7 +884,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             folder = (re.search(r" for (\S+)", msg) or [None, ""])[1]
             recent.append({"at": at.isoformat(timespec="seconds"), "step": step, "folder": folder, "what": msg[:160]})
         for r in recent:
-            r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "geotag": not ungeo, "daysum": not unsummed,
+            r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "geotag": not ungeo, "shotinfo": not noshot, "daysum": not unsummed,
                              "inbox": check_mount and not mount}.get(
                 r["step"], bool(r["folder"]) and done_after.get(r["folder"], "") > r["at"])
         for step in ("run", "export"):
@@ -889,7 +895,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         status = "bad" if any(a["level"] == "bad" for a in alerts) else "warn" if alerts else "ok"
         return jsonify({
             "status": status, "alerts": alerts, "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "index": {"ok": ok, "unindexed": unindexed, "no_picture": nopic, "ungeotagged": ungeo, "unsummarised": len(unsummed),
+            "index": {"ok": ok, "unindexed": unindexed, "no_picture": nopic, "no_shot_info": noshot, "ungeotagged": ungeo, "unsummarised": len(unsummed),
                       "days": len(folders), "caption_errors": errored},
             "model": model, "last_ingest": last, "recent": recent[-8:],
         })

@@ -15,10 +15,60 @@ import stacks  # noqa: E402
 _ids = iter(range(1, 10_000))
 
 
-def row(filename, ts, sharp=200.0, flag="ok", lum=100.0, camera="SONY ILCE-7RM3", phash="0" * 16, blown=0.0):
+def row(filename, ts, sharp=200.0, flag="ok", lum=100.0, camera="SONY ILCE-7RM3", phash="0" * 16, blown=0.0,
+        drive=None, seq=None, ev=None, af=None):
     return {"rowid": next(_ids), "filename": filename, "path": "/mnt/passport/Pictures/2026/2026-10-01/" + filename,
             "capture_ts": ts, "camera": camera, "sharpness": sharp, "exposure_flag": flag,
-            "mean_lum": lum, "phash": phash, "blown_pct": blown}
+            "mean_lum": lum, "phash": phash, "blown_pct": blown, "drive": drive, "seq": seq, "ev": ev,
+            "af_u": af[0] if af else None, "af_v": af[1] if af else None}
+
+
+class CameraTags(unittest.TestCase):
+    """Sony numbers the frames of each shutter press; the stacks follow the presses."""
+    def sizes(self, rows):
+        return [len(g) for g in stacks.group_bursts(stacks.pair_frames(rows))]
+
+    def test_a_new_press_starts_a_new_stack_however_close(self):
+        rows = [row("A.ARW", 0, drive="continuous", seq=1), row("B.ARW", .1, drive="continuous", seq=2),
+                row("C.ARW", .9, drive="continuous", seq=1),            # a second press 0.8 s later
+                row("D.ARW", 1.5, drive="single", seq=0), row("E.ARW", 2.0, drive="single", seq=0)]
+        self.assertEqual(self.sizes(rows), [2, 1, 1, 1])
+
+    def test_a_press_stays_whole_through_a_buffer_stall(self):
+        rows = [row("A.ARW", 0, drive="continuous", seq=1), row("B.ARW", 0.1, drive="continuous", seq=2),
+                row("C.ARW", 4.0, drive="continuous", seq=3)]
+        self.assertEqual(self.sizes(rows), [3])
+
+    def test_untagged_frames_keep_the_gap_rule(self):
+        rows = [row("A.CR2", 0, camera="Canon"), row("B.CR2", 1, camera="Canon"),
+                row("C.CR2", 1.5, camera="Canon", drive="continuous"), row("D.CR2", 2.0, camera="Canon", drive="continuous")]
+        self.assertEqual(self.sizes(rows), [4])
+
+    def test_a_tagged_bracket_is_exact_and_leads_with_the_base_exposure(self):
+        rows = [row("A.ARW", 0, drive="bracket", seq=1, ev=-0.7, lum=100, sharp=100),
+                row("B.ARW", .3, drive="bracket", seq=2, ev=-3.7, lum=95, sharp=400),
+                row("C.ARW", .6, drive="bracket", seq=3, ev=2.3, lum=105, sharp=100),
+                row("D.ARW", .9, drive="bracket", seq=1, ev=-0.7)]    # the next bracket
+        s = stacks.build_stacks(rows)
+        self.assertEqual([(x["kind"], len(x["frames"])) for x in s], [("bracket", 3), ("single", 1)])
+        self.assertEqual(s[0]["lead"], s[0]["frames"][0]["id"], "the base exposure, not the sharpest")
+
+    def test_a_five_frame_bracket_with_sonys_odd_numbers_stays_whole(self):
+        rows = [row(f"{c}.ARW", 24 + i * .2, drive="bracket", seq=n) for i, (c, n) in enumerate(zip("ABCDE", (1, 2, 3, 3, 5)))]
+        rows.append(row("F.ARW", 45, drive="continuous", seq=1))
+        s = stacks.build_stacks(rows)
+        self.assertEqual([(x["kind"], len(x["frames"])) for x in s], [("bracket", 5), ("single", 1)])
+        self.assertEqual(s[0]["lead"], s[0]["frames"][0]["id"])
+
+    def test_a_canon_bracket_never_runs_into_other_frames(self):
+        rows = [row("A.CR2", 0, camera="Canon", drive="continuous"), row("B.CR2", .5, camera="Canon", drive="bracket"),
+                row("C.CR2", 1, camera="Canon", drive="bracket"), row("D.CR2", 1.5, camera="Canon", drive="bracket")]
+        s = stacks.build_stacks(rows)
+        self.assertEqual([(x["kind"], len(x["frames"])) for x in s], [("single", 1), ("bracket", 3)])
+
+    def test_frames_carry_their_af_point(self):
+        s = stacks.build_stacks([row("A.ARW", 0, af=(.25, .6)), row("B.ARW", 10)])
+        self.assertEqual([f["af"] for x in s for f in x["frames"]], [[.25, .6], None])
 
 
 class Constants(unittest.TestCase):

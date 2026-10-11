@@ -95,6 +95,12 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
         log "geotag FAILED for $folder (non-fatal, continuing)"
     fi
 
+    # Best-effort drive mode, sequence and AF point from the camera's tags, for Culling Bay's
+    # exact bursts and brackets and its focus check. Not fatal either.
+    if ! ./venv/bin/python photo_cull.py shotinfo --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
+        log "shotinfo FAILED for $folder (non-fatal, continuing)"
+    fi
+
     # Best-effort two-line day summary from the annotations (local text model). Not fatal.
     if ! ./venv/bin/python photo_cull.py daysum --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
         log "daysum FAILED for $folder (non-fatal, continuing)"

@@ -240,16 +240,21 @@ def connect(db_path: Path) -> sqlite3.Connection:
                       ("animals", "TEXT"), ("content_type", "TEXT"), ("visible_text", "TEXT"),
                       ("monochrome", "INTEGER"),
                       ("gps_lat", "REAL"), ("gps_lon", "REAL"), ("gps_checked", "INTEGER"),
-                      ("place", "TEXT")):
+                      ("place", "TEXT"),
+                      # how the shot was taken, from the camera's own tags (cmd_shotinfo)
+                      ("drive", "TEXT"), ("seq", "INTEGER"), ("ev", "REAL"),
+                      ("af_u", "REAL"), ("af_v", "REAL"), ("shot_checked", "INTEGER")):
         try:
             conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
-        except sqlite3.OperationalError:
-            pass  # column already present
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e):   # e.g. "database is locked": fail now, not on first use
+                raise
     for col, decl in (("duration_s", "REAL"),):
         try:
             conn.execute(f"ALTER TABLE analyses ADD COLUMN {col} {decl}")
-        except sqlite3.OperationalError:
-            pass  # column already present
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e):
+                raise
     conn.commit()
     return conn
 
@@ -1820,6 +1825,7 @@ def cmd_embed_images(args):
     chunk = 64   # read ahead a chunk at a time, so loaded previews never pile up in memory
     with ThreadPoolExecutor(args.workers) as ex:
         for start in range(0, len(paths), chunk):
+            rows = []
             for p, im, err in ex.map(load, paths[start:start + chunk]):
                 if err is None:
                     try:
@@ -1830,13 +1836,13 @@ def cmd_embed_images(args):
                     errs += 1
                     print(f"{Path(p).name:24s} -> ERROR {_exc_text(err)[:70]}")
                     continue
-                conn.execute(
-                    "INSERT OR REPLACE INTO embeddings(path, embed_version, model, dims, vector, created_at) "
-                    "VALUES(?,?,?,?,?,?)",
-                    (p, CLIP_VERSION, CLIP_MODEL, len(vec), pack_vector(vec),
-                     datetime.now(timezone.utc).isoformat(timespec="seconds")))
-                done += 1
+                rows.append((p, CLIP_VERSION, CLIP_MODEL, len(vec), pack_vector(vec),
+                             datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            # one short write per chunk: the ingest watcher writes to this database too
+            conn.executemany("INSERT OR REPLACE INTO embeddings(path, embed_version, model, dims, vector, created_at) "
+                             "VALUES(?,?,?,?,?,?)", rows)
             conn.commit()
+            done += len(rows)
             n = min(start + chunk, len(paths))
             if n % 1024 == 0 or n == len(paths):
                 elapsed = time.time() - t0
@@ -1956,6 +1962,139 @@ def cmd_geotag(args):
         print(f"[{min(i + 2000, len(paths))}/{len(paths)}] {found} with GPS so far "
               f"({_fmt_eta(time.time() - t0)})", flush=True)
     print(f"Done: {found} of {len(paths)} image(s) have GPS.")
+
+
+# ----------------------------------------------------------------------------
+# Shot info: drive mode, sequence and AF point, from the camera's own tags
+# ----------------------------------------------------------------------------
+# For Culling Bay: exact bursts and brackets where the camera says so (Sony counts frames within
+# each press of the shutter; Canon marks AEB brackets), and the AF point, for the focus check.
+# Checked on the library's cameras on 2026-10-11: the A7R III writes FocusLocation, ReleaseMode
+# and SequenceNumber; Canon bodies write AF points relative to the centre, a drive and a bracket
+# mode (their SequenceNumber stays 0); the Nikon D40 and D60 name their AF point.
+
+SHOT_TAGS = ["-Make", "-Orientation#", "-FocusLocation", "-AFPointsInFocus", "-AFAreaXPositions",
+             "-AFAreaYPositions", "-AFImageWidth", "-AFImageHeight", "-AFPoint", "-ReleaseMode",
+             "-SequenceNumber", "-ExposureCompensation#", "-ContinuousDrive", "-BracketMode", "-ShootingMode"]
+NIKON_AF = {"center": (.5, .5), "left": (.3, .5), "right": (.7, .5), "top": (.5, .3), "upper": (.5, .3),
+            "bottom": (.5, .7), "lower": (.5, .7)}
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def upright(u: float, v: float, orientation) -> tuple[float, float]:
+    """A point as fractions of the sensor frame -> fractions of the upright photo."""
+    o = int(_num(orientation) or 1)
+    if o == 6:       # rotated 90 clockwise to view
+        return 1 - v, u
+    if o == 8:       # rotated 90 anticlockwise
+        return v, 1 - u
+    if o == 3:
+        return 1 - u, 1 - v
+    return u, v
+
+
+def parse_shot(t: dict) -> dict:
+    """One file's tags (name -> text, '-' when absent) -> {drive, seq, ev, af_u, af_v}."""
+    make = (t.get("Make") or "").lower()
+    val = lambda k: "" if t.get(k) in (None, "-") else str(t[k])
+    drive = None
+    if "sony" in make and val("ReleaseMode"):
+        rm = val("ReleaseMode").lower()
+        drive = "bracket" if "bracket" in rm else "continuous" if "continuous" in rm else "single"
+    elif "canon" in make and (val("ContinuousDrive") or val("BracketMode")):
+        bm, cd = val("BracketMode").lower(), val("ContinuousDrive").lower()
+        drive = "bracket" if bm and bm != "off" else "continuous" if cd.startswith("continuous") else "single"
+    elif "nikon" in make and val("ShootingMode"):
+        sm = val("ShootingMode").lower()
+        drive = "bracket" if "bracket" in sm else "continuous" if "continuous" in sm else "single"
+    seq = _num(val("SequenceNumber")) if "sony" in make else None
+    af = None
+    fl = [_num(x) for x in val("FocusLocation").split()]
+    if len(fl) == 4 and None not in fl and fl[0] and fl[1] and (fl[2] or fl[3]):
+        af = (fl[2] / fl[0], fl[3] / fl[1])
+    elif val("AFAreaXPositions") and val("AFPointsInFocus"):
+        xs = [_num(x) for x in val("AFAreaXPositions").split()]
+        ys = [_num(y) for y in val("AFAreaYPositions").split()]
+        w, h = _num(val("AFImageWidth")), _num(val("AFImageHeight"))
+        idx = [int(i) for i in re.findall(r"\d+", val("AFPointsInFocus")) if int(i) < min(len(xs), len(ys))]
+        if idx and w and h:   # Canon: offsets from the centre, y pointing up
+            af = (sum(w / 2 + xs[i] for i in idx) / len(idx) / w, sum(h / 2 - ys[i] for i in idx) / len(idx) / h)
+    elif val("AFPoint"):
+        u, v = .5, .5
+        for word, (wu, wv) in NIKON_AF.items():
+            if word in val("AFPoint").lower():
+                u, v = (wu if wu != .5 else u), (wv if wv != .5 else v)
+        af = (u, v) if val("AFPoint").lower() not in ("none", "(none)", "") else None
+    if af and not (0 <= af[0] <= 1 and 0 <= af[1] <= 1):
+        af = None
+    if af:
+        af = upright(af[0], af[1], t.get("Orientation"))
+    return {"drive": drive, "seq": int(seq) if seq is not None else None, "ev": _num(val("ExposureCompensation")),
+            "af_u": round(af[0], 4) if af else None, "af_v": round(af[1], 4) if af else None}
+
+
+def read_shot_info(paths: "list[str]") -> "dict[str, dict]":
+    """{path: parse_shot(...)} for every file exiftool could read; same batching as read_gps."""
+    from concurrent.futures import ThreadPoolExecutor
+    names = [t.lstrip("-").rstrip("#") for t in SHOT_TAGS]
+
+    def run(batch):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("\n".join(batch) + "\n")
+            argfile = fh.name
+        try:
+            return subprocess.run(["exiftool", "-T", "-fast", "-FilePath"] + SHOT_TAGS + ["-@", argfile],
+                                  capture_output=True, text=True, timeout=900).stdout
+        finally:
+            os.unlink(argfile)
+
+    out = {}
+    with ThreadPoolExecutor(4) as pool:
+        outputs = list(pool.map(run, [paths[i:i + 500] for i in range(0, len(paths), 500)]))
+    for stdout in outputs:
+        for line in stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) != len(names) + 1:
+                continue
+            out[parts[0]] = parse_shot(dict(zip(names, parts[1:])))
+    return out
+
+
+def cmd_shotinfo(args):
+    """Read drive mode, sequence number, exposure compensation and AF point for each ok image not
+    yet checked (or all with --force). Resumable; the ingest watcher runs it for each new shoot."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    conn = connect(args.db)
+    q = "SELECT path FROM images WHERE status='ok'" + ("" if args.force else " AND shot_checked IS NULL")
+    paths = [r["path"] for r in conn.execute(q + " ORDER BY path DESC")]
+    if args.folder:
+        folders = [Path(f).resolve() for f in args.folder]
+        paths = [p for p in paths if any(_is_under(Path(p), f) for f in folders)]
+    if not paths:
+        print("Nothing to read.")
+        return
+    t0, drives, afs = time.time(), 0, 0
+    for i in range(0, len(paths), 2000):
+        chunk = paths[i:i + 2000]
+        info = read_shot_info(chunk)
+        rows = []
+        for p in chunk:
+            s = info.get(p, {})
+            rows.append((s.get("drive"), s.get("seq"), s.get("ev"), s.get("af_u"), s.get("af_v"), p))
+            drives += s.get("drive") is not None
+            afs += s.get("af_u") is not None
+        conn.executemany("UPDATE images SET drive=?, seq=?, ev=?, af_u=?, af_v=?, shot_checked=1 WHERE path=?", rows)
+        conn.commit()
+        print(f"[{min(i + 2000, len(paths))}/{len(paths)}] {drives} with a drive mode, {afs} with an AF point "
+              f"({_fmt_eta(time.time() - t0)})", flush=True)
+    print(f"Done: {drives} of {len(paths)} image(s) have a drive mode, {afs} an AF point.")
 
 
 # ----------------------------------------------------------------------------
@@ -2232,6 +2371,13 @@ def build_parser() -> argparse.ArgumentParser:
     ei.add_argument("--workers", type=int, default=4, help="Photos read from disk at once (default 4).")
     ei.add_argument("--threads", type=int, default=4, help="CPU threads for the model (default 4).")
     ei.set_defaults(func=cmd_embed_images)
+
+    si = sub.add_parser("shotinfo", help="Read drive mode, sequence and AF point from the camera's tags, "
+                        "for Culling Bay's exact bursts and brackets and its focus check.")
+    si.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    si.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    si.add_argument("--force", action="store_true", help="Read images already checked too.")
+    si.set_defaults(func=cmd_shotinfo)
 
     gt = sub.add_parser("geotag", help="Read GPS from EXIF and name the nearest town (offline, "
                         "GeoNames) into gps_lat/gps_lon/place, for Culling Bay's places.")

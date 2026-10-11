@@ -4,10 +4,14 @@ Pure functions over rows from trial.db (no Flask, no DB handle), so they are uni
 review/tests/test_stacks.py. The rules follow the design doc ("How a day becomes stacks"):
 
   1. pairs    a JPEG with the same stem as a RAW in the folder rides along with the RAW
-  2. bursts   consecutive frames from one camera within BURST_GAP_S, grouped after pairing
-  3. kinds    'single', 'burst', 'bracket' (an exposure bracket: dark, normal and bright frames
-              in one burst) or 'pano' (frames that slide one way; confirmed from pixels)
-  4. lead     the sharpest frame; in a bracket, the sharpest normally exposed frame
+  2. bursts   where the camera numbers its frames (Sony's SequenceNumber, read by photo_cull.py
+              shotinfo), exactly one shutter press; otherwise consecutive frames from one camera
+              within BURST_GAP_S, grouped after pairing
+  3. kinds    'single', 'burst', 'bracket' (an exposure bracket: from the camera's drive mode where
+              it says so, else dark, normal and bright frames in one burst) or 'pano' (frames that
+              slide one way; confirmed from pixels)
+  4. lead     the sharpest frame; in a bracket, the base exposure (the camera's first frame where
+              it tags the bracket), else the sharpest normally exposed frame
   5. badges   measured only: Softer (than the sharpest frame of its burst), Blown, Dark -- never the AI's verdicts
 
 Brackets and panoramas both suggest "Keep all": an HDR or panorama merge needs every frame.
@@ -20,6 +24,7 @@ import os
 import numpy as np
 
 BURST_GAP_S = 2.0            # photo_cull.BURST_GAP_S
+PRESS_GAP_S = 60.0           # frames of one press further apart than this are a counter oddity, not one press
 RAW_EXTENSIONS = {".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2", ".pef", ".srw"}
 
 BRACKET_MIN_FRAMES = 3
@@ -61,15 +66,34 @@ def pair_frames(rows: list[dict]) -> list[dict]:
     return frames
 
 
+def same_press(prev: dict, f: dict) -> bool | None:
+    """Whether f continues prev's stack by the camera's own tags, or None when they can't say.
+    Sony numbers the frames of each press from 1: a frame numbered 1 is a new press, however close
+    in time (on 1 Oct the gap rule put a separate press into the next burst), and a press stays
+    whole through a buffer stall longer than the gap. Only the 1 is reliable: a 5-frame bracket on
+    1 Oct read 1, 2, 3, 3, 5. Single shots read 0. A bracket never runs into other frames."""
+    if prev.get("drive") is None or f.get("drive") is None or prev.get("camera") != f.get("camera"):
+        return None
+    if prev.get("seq") is not None and f.get("seq") is not None:
+        dt = (f["capture_ts"] - prev["capture_ts"]) if f["capture_ts"] is not None and prev["capture_ts"] is not None else None
+        return f["seq"] > 1 and f["drive"] == prev["drive"] and dt is not None and 0 <= dt <= PRESS_GAP_S
+    if (f["drive"] == "bracket") != (prev["drive"] == "bracket"):
+        return False
+    return None
+
+
 def group_bursts(frames: list[dict], gap: float = BURST_GAP_S) -> list[list[dict]]:
-    """Consecutive frames from one camera within `gap` seconds. Frames without a capture time or
-    camera (unreadable EXIF, e.g. CR3 today) stay single, as in photo_cull.cluster_bursts."""
+    """One shutter press where the camera's tags say (same_press); otherwise consecutive frames
+    from one camera within `gap` seconds. Frames without a capture time or camera (unreadable
+    EXIF) stay single, as in photo_cull.cluster_bursts."""
     groups: list[list[dict]] = []
     prev = None
     for f in frames:
-        same = (prev is not None and f["capture_ts"] is not None and prev["capture_ts"] is not None
-                and f.get("camera") and prev.get("camera") == f.get("camera")
-                and f["capture_ts"] - prev["capture_ts"] <= gap)
+        same = None if prev is None else same_press(prev, f)
+        if same is None:
+            same = (prev is not None and f["capture_ts"] is not None and prev["capture_ts"] is not None
+                    and f.get("camera") and prev.get("camera") == f.get("camera")
+                    and f["capture_ts"] - prev["capture_ts"] <= gap)
         if same:
             groups[-1].append(f)
         else:
@@ -79,6 +103,8 @@ def group_bursts(frames: list[dict], gap: float = BURST_GAP_S) -> list[list[dict
 
 
 def is_bracket(group: list[dict]) -> bool:
+    if len(group) >= 2 and all(f.get("drive") == "bracket" for f in group):
+        return True                        # the camera says so
     if len(group) < BRACKET_MIN_FRAMES:
         return False
     lums = [f["mean_lum"] for f in group if f.get("mean_lum") is not None]
@@ -94,6 +120,8 @@ def _sharp(f: dict) -> float:
 def lead_of(group: list[dict], bracket: bool) -> dict:
     """The sharpest frame; ties go to the earlier one. In a bracket, the sharpest normally
     exposed frame, or failing that the one nearest the bracket's middle brightness."""
+    if bracket and all(f.get("drive") == "bracket" for f in group):
+        return group[0]   # the camera shoots the base exposure first (Sony; Canon's default AEB order)
     if bracket:
         normal = [f for f in group if f.get("exposure_flag") == "ok"]
         if normal:
@@ -214,6 +242,7 @@ def build_stacks(rows: list[dict]) -> list[dict]:
                 "partner_ids": [p["rowid"] for p in f["partners"]],
                 "path": f["path"],
                 "sharpness": f.get("sharpness"),
+                "af": [f["af_u"], f["af_v"]] if f.get("af_u") is not None else None,   # AF point, upright fractions
                 "badges": badges_of(f, group, bracket),
             } for f in group],
         })

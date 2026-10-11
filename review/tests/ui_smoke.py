@@ -189,19 +189,24 @@ def main():
 
         wd.click(f'.day[data-day="{DAY}"]')
         wd.wait("document.querySelector('.card')")
-        # one pass: the 3 stacks already kept in Lightroom are skipped, and count toward the budget
-        check(wd.text("#budget") == "Kept 3 of 5" and "8 stacks to go" in wd.text(".top .t"),
-              f"one pass; Lightroom stacks skipped and counted: {wd.text('#budget')} / {wd.text('.top .t small')}")
+        # one pass: the 3 stacks already kept in Lightroom are skipped, and count toward the budget.
+        # Stacks follow the camera's own tags: each Sony shutter press is one stack (16 on this day).
+        day_json = json.loads(urllib.request.urlopen(app + "api/day/" + DAY, timeout=300).read())
+        af_of = {f["file"]: f["af"] for st in day_json["stacks"] for f in st["frames"]}
+        check(len(day_json["stacks"]) == 16 and wd.text("#budget") == "Kept 3 of 5" and "13 stacks to go" in wd.text(".top .t"),
+              f"one pass; Lightroom stacks skipped and counted: {len(day_json['stacks'])} stacks, {wd.text('#budget')} / {wd.text('.top .t small')}")
 
-        # first card: the 4-frame burst led by its sharpest frame
-        check("Sharpest" in wd.text(".badges"), "burst card shows Sharpest: " + wd.text(".badges"))
+        def keep_any():   # Keep on a single, Keep all on a burst or bracket
+            wd.click('.bar [data-act="keep"]') if wd.js("return !!document.querySelector('.bar [data-act=\"keep\"]')") else wd.click('[data-act="keep-all"]')
+
+        # first card: a single frame, with the AF box and the 1:1 band under it
         loaded(".card img")
         h = wd.js("return document.querySelector('.card').getBoundingClientRect().height")
-        check(h > 150, f"card is laid out: {h:.0f} px tall")
+        check(h > 150 and wd.js("return !!document.querySelector('.card .af')"), f"card is laid out: {h:.0f} px tall, with its AF box")
         fit = wd.js("const p=document.querySelector('.card .photo'), i=p.querySelector('img'), r=p.getBoundingClientRect(); return [r.width/r.height, i.naturalWidth/i.naturalHeight];")
         check(abs(fit[0] - fit[1]) < 0.02, f"the photo box has the photo's own shape: {fit[0]:.3f} vs {fit[1]:.3f}")
         shot("3-card")
-        # double-tap: a 1:1 crop from the RAW, then back
+        # double-tap: a 1:1 crop from the RAW at the camera's AF point, then back
         r = wd.js("const b=document.querySelector('.card img').getBoundingClientRect(); return [b.x+b.width*0.3, b.y+b.height*0.6];")
         tapx, tapy = int(r[0]), int(r[1])
         tapping = [{"type": "pointerMove", "duration": 0, "x": tapx, "y": tapy}, {"type": "pointerDown", "button": 0},
@@ -213,79 +218,91 @@ def main():
         loaded("#fz img")
         crop = wd.js("const i=document.querySelector('#fz img'); return [i.naturalWidth, i.naturalHeight, decodeURIComponent(i.src)];")
         q = dict(kv.split("=") for kv in crop[2].split("?")[1].split("&"))
-        check(crop[0] > 400 and abs(float(q["x"]) - 0.3) < 0.02 and abs(float(q["y"]) - 0.6) < 0.02,
-              f"focus crop {crop[0]}x{crop[1]} at the tapped spot in {time.time() - t0:.1f}s: " + crop[2].split("?")[1])
+        af = af_of["DSC05036.ARW"]
+        check(crop[0] > 400 and abs(float(q["x"]) - af[0]) < 0.001 and abs(float(q["y"]) - af[1]) < 0.001,
+              f"focus crop {crop[0]}x{crop[1]} at the AF point in {time.time() - t0:.1f}s: " + crop[2].split("?")[1])
         shot("3b-focus")
         wd.click('[data-act="close-focus"]')
         wd.wait("document.querySelector('.card')")
+        wd.click('.bar [data-act="keep"]')
+        wd.wait("document.querySelector('#toast').textContent.startsWith('Kept DSC05036')")
 
-        wd.click('[data-act="keep"]')
+        # a burst: Choose opens it on its first frame; keep the sharpest from the picker
+        wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
+        check("Sharpest" in wd.text(".badges") and wd.text('.bar [data-act="choose"]') == "Choose",
+              "burst card shows Sharpest, and Choose: " + wd.text(".badges"))
+        wd.click('.bar [data-act="choose"]')
+        wd.wait("document.querySelector('.pk-strip')")
+        check(wd.text(".pk-id").endswith("1/3"), "Choose opens the burst on its first frame: " + wd.text(".pk-id"))
+        shot("5-picker")
+        wd.click('[data-act="view"][data-i="2"]'); wd.click('[data-act="tick"]'); wd.click('[data-act="pk-keep"]')
         wd.wait("document.querySelector('#toast').textContent.includes('rejected with a note')")
-        check("Kept DSC05039 · 3 rejected with a note" in wd.text("#toast"), "keep frame: " + wd.text("#toast"))
+        check("Kept DSC05039 · 2 rejected with a note" in wd.text("#toast"), "keep frame: " + wd.text("#toast"))
         wd.click('#toast [data-act="undo"]')                              # undo puts the burst back
         wd.wait("document.querySelector('#toast').textContent.includes('Undone')")
         wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
-        check(wd.text("#budget") == "Kept 3 of 5" and "Sharpest" in wd.text(".badges"), "undo puts the burst back: " + wd.text("#budget"))
-        wd.click('[data-act="keep"]')
+        check(wd.text("#budget") == "Kept 4 of 5" and "Sharpest" in wd.text(".badges"), "undo puts the burst back: " + wd.text("#budget"))
+        wd.click('.bar [data-act="choose"]'); wd.wait("document.querySelector('.pk-strip')")
+        wd.click('[data-act="view"][data-i="2"]'); wd.click('[data-act="tick"]'); wd.click('[data-act="pk-keep"]')
         wd.wait("document.querySelector('#toast').textContent.startsWith('Kept DSC05039')")   # not the "Undone: Kept…" toast
 
-        # the bracket suggests Keep all
-        wd.wait("document.querySelector('.card')")
+        # the bracket (from the camera's tags) suggests Keep all; the sixth keep is one over
+        wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
         check(wd.js("return !!document.querySelector('.pb-all.sugg')") and "bracket" in wd.text(".badges"),
               "bracket card suggests Keep all: " + wd.text(".badges"))
         wd.click('[data-act="keep-all"]')
         wd.wait("document.querySelector('#toast').textContent.includes('Kept all')")
-        check("bracket" in wd.text("#toast"), "keep all: " + wd.text("#toast"))
-
-        # a swipe up keeps
-        wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
-        before = wd.text(".fname")
-        wd.drag(".card", -220)
-        wd.wait("document.querySelector('#toast').textContent.includes('Kept') && document.querySelector('.fname') && document.querySelector('.fname').textContent !== arguments[0]".replace("arguments[0]", json.dumps(before)))
-        check(True, "swipe up kept " + before.split(" ")[0])
-        check(wd.text("#budget") == "Kept 6 · 1 over 5" and wd.js("return document.querySelector('#budget').classList.contains('over')")
-              and "1 over this shoot" in wd.text("#toast"), "the sixth keep is one over: " + wd.text("#budget") + " / " + wd.text("#toast"))
+        check("bracket" in wd.text("#toast") and wd.text("#budget") == "Kept 6 · 1 over 5"
+              and wd.js("return document.querySelector('#budget').classList.contains('over')") and "1 over this shoot" in wd.text("#toast"),
+              "keep all; the sixth keep is one over: " + wd.text("#toast") + " / " + wd.text("#budget"))
         shot("2-over")
 
+        # a swipe up on a bracket opens it rather than keeping a frame unseen
+        wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
+        wd.drag(".card", -150)
+        wd.wait("document.querySelector('.pk-strip')")
+        check(wd.text(".pk-id").endswith("1/3"), "swipe up opens the bracket: " + wd.text(".pk-id"))
+        wd.click('[data-act="close-picker"]'); wd.wait("document.querySelector('.card')")
+        wd.click('.bar [data-act="reject"]')
+        wd.wait("document.querySelector('#toast').textContent.includes('Rejected all 3')")
+
         # the details sheet
+        wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
         wd.click('[data-act="info"]')
         wd.wait("!document.querySelector('#sheet').hidden")
         loaded(".card img")
         sheet = wd.text("#sheet")
-        check("verdicts stay off the phone" in sheet and "AI: " not in sheet, "details sheet: " + sheet[:80])
+        check("verdicts stay off the phone" in sheet and "AI: " not in sheet and "More like this" in sheet, "details sheet: " + sheet[:80])
         shot("4-sheet")
         wd.click('[data-act="close-sheet"]')
 
-        # a burst through the picker, if one is left; then finish the day
+        # the rest of the day: one bracket through the picker, one outright reject, the rest kept
         for _ in range(40):
             if wd.js("return !!document.querySelector('[data-act=\"send\"]')"):
                 break
+            wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
             if wd.js("return !!document.querySelector('.chip[data-act=\"picker\"]')") and not wd.js("return window.__picked"):
                 wd.click('.chip[data-act="picker"]')
-                wd.wait("document.querySelector('.pk-strip') || document.querySelector('.du')")
-                if wd.js("return !!document.querySelector('.pk-strip')"):
-                    shot("5-picker")
-                    wd.click('[data-act="pk-keep"]') if wd.js("return !document.querySelector('[data-act=\"pk-keep\"]').disabled") else (wd.click('[data-act="tick"]'), wd.click('[data-act="pk-keep"]'))
-                else:
-                    wd.click('[data-act="duel-done"]')
+                wd.wait("document.querySelector('.pk-strip')")
+                wd.click('[data-act="tick"]'); wd.click('[data-act="pk-keep"]')
                 wd.js("window.__picked = true")
                 wd.wait("document.querySelector('.card') || document.querySelector('[data-act=\"send\"]')")
                 continue
             if "DSC05061" in wd.text(".fname"):                            # one outright reject
-                wd.click('[data-act="reject"]')
+                wd.click('.bar [data-act="reject"]')
             else:
-                wd.click('[data-act="keep"]')
-            time.sleep(0.25)
+                keep_any()
+            time.sleep(0.3)
         check(wd.js("return !!document.querySelector('[data-act=\"send\"]')"), "reached the rejects review")
         secs = wd.js("return [...document.querySelectorAll('.sec')].map(e => e.textContent)")
         kept_sec = next((x for x in secs if x.startswith("Kept · ")), None)
-        check(kept_sec == "Kept · 10 of 5" and "From bursts · similar frame kept" in secs and "Rejected outright" in secs,
+        check(kept_sec == "Kept · 14 of 5" and "From bursts · similar frame kept" in secs and "Rejected outright" in secs,
               "review lists the kept stacks to trim: %s" % secs)
         shot("6-summary")
         wd.click(".sm-th.kept")                                           # trim: drop one kept stack
         wd.wait("document.querySelector('#toast').textContent.includes('Dropped')")
         secs = wd.js("return [...document.querySelectorAll('.sec')].map(e => e.textContent)")
-        check("Kept · 9 of 5" in secs, "trimming drops a stack: " + wd.text("#toast"))
+        check("Kept · 13 of 5" in secs, "trimming drops a stack: " + wd.text("#toast"))
         n = wd.js("return document.querySelectorAll('.sm-th[data-act=\"rescue\"]').length")
         wd.click('.sm-th[data-act="rescue"]')
         wd.wait(f"document.querySelectorAll('.sm-th[data-act=\"rescue\"]').length === {n - 1}")
@@ -310,7 +327,7 @@ def main():
         # going back to a decided stack shows the decision on the photo (the dropped burst)
         line = wd.text(".stline")
         check(wd.js("return document.querySelector('.card').classList.contains('st-reject') && !!document.querySelector('.pb-rej.on')")
-              and line.startswith("Rejected · all 4 frames"), "a decided stack shows its decision: " + line)
+              and line.startswith("Rejected"), "a decided stack shows its decision: " + line)
         wd.click('.top [data-act="grid"]')                                # the same button on a card
         wd.wait("document.querySelector('.gv-grid')")
         wd.click('.top [data-act="grid"]')                                # ...and back
@@ -362,10 +379,10 @@ def main():
         wd.click(f'.day[data-day="{DAY2}"]')
         wd.wait("document.querySelector('.card')")
         fresh = wd.text(".top .t small")
-        wd.click('[data-act="reject"]')
+        wd.click('.bar [data-act="reject"]')
         wd.wait("document.querySelector('#toast').textContent.includes('Rejected')")
         wd.wait("document.querySelector('.card') && !document.querySelector('.card').style.transform")
-        wd.click('[data-act="keep"]')
+        keep_any()
         wd.wait("document.querySelector('#toast').textContent.includes('Kept')")
         wd.wait("JSON.parse(localStorage.getItem('cbm-queue') || '[]').length === 0", timeout=10)
         con = sqlite3.connect(tmp / "annotations.db")
