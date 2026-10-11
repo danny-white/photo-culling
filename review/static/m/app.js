@@ -142,6 +142,17 @@ const firstOpen = (from = 0) => {
   return -1;
 };
 const markOf = f => (S.dec[f.id] ? S.dec[f.id].flag : 'none');
+// One frame's decision for the marks on a photo: the phone's, else your Lightroom flag or stars.
+function frameMark(f) {
+  const d = S.dec[f.id], lrStars = (f.lr && f.lr.rating) || 0;
+  if (d && d.flag === 'reject') return { v: 'reject', text: 'Rejected', stars: 0 };
+  if (d && d.flag === 'pick') return { v: d.stars === 5 ? 'hero' : 'keep', text: d.stars === 5 ? 'Hero' : 'Kept', stars: d.stars || lrStars };
+  const m = lrMark(f);
+  if (m === 'reject') return { v: 'reject', text: 'Rejected in Lightroom', stars: 0 };
+  if (m) return { v: 'keep', text: m === 'pick' ? 'Picked in Lightroom' : 'Rated in Lightroom', stars: lrStars };
+  return null;
+}
+const starText = n => (n ? '★'.repeat(n) : '');
 const doneCount = () => S.stacks.filter(s => status(s).done).length;
 const lrDone = () => S.stacks.filter(s => status(s).src === 'lr').length;
 function dayTitle(d) {
@@ -255,6 +266,74 @@ function openSheet() {
 }
 $('#sheet').addEventListener('click', e => { if (e.target.id === 'sheet') closeSheet(); });
 
+/* ---------------------------------------------------------------- photo boxes */
+// Every large photo sits in a box sized to the photo's own shape, fitted into the space around
+// it, so outlines, the status line and badges land on the photo, not on letterbox bars. Shapes
+// are learned from any image of the frame that has loaded (thumbnails, prefetches).
+const AR = {};
+function noteAR(id, im) { if (im.naturalWidth && im.naturalHeight) AR[id] = im.naturalWidth / im.naturalHeight; }
+document.addEventListener('load', e => { const t = e.target; if (t.tagName === 'IMG' && t.dataset.fid) noteAR(t.dataset.fid, t); }, true);
+const photo = (f, inner) => '<div class="photo" data-fid="' + f.id + '"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) +
+  '" draggable="false" data-fid="' + f.id + '">' + (inner || '') + '</div>';
+const thumb = (f, cls) => '<img src="' + img(f.id, 'thumb') + '" alt="" data-fid="' + f.id + '"' + (cls ? ' class="' + cls + '"' : '') + ' loading="lazy">';
+function fitPhoto(p) {
+  const box = p.parentElement, W = box.clientWidth, H = box.clientHeight, ar = AR[p.dataset.fid] || 1.5;
+  if (!W || !H) return;
+  let w = W, h = W / ar;
+  if (h > H) { h = H; w = H * ar; }
+  p.style.width = Math.floor(w) + 'px';
+  p.style.height = Math.floor(h) + 'px';
+}
+// A card is as tall as a landscape photo needs; a vertical photo takes all the height there is.
+function shapeCard(card, id) {
+  const ar = AR[id];
+  if (!card || !ar) return;
+  card.classList.toggle('k-fill', ar < 1);
+  card.classList.toggle('k-land', ar >= 1);
+  card.style.aspectRatio = ar < 1 ? '' : ar.toFixed(4);
+}
+function bindPhotos(root) {
+  for (const p of root.querySelectorAll('.photo')) {
+    const im = p.querySelector('img'), id = p.dataset.fid;
+    const ready = () => { noteAR(id, im); shapeCard(p.closest('.card'), id); fitPhoto(p); };
+    if (im.complete && im.naturalWidth) ready(); else { im.addEventListener('load', ready, { once: true }); fitPhoto(p); }
+  }
+}
+window.addEventListener('resize', () => { for (const p of view.querySelectorAll('.photo')) fitPhoto(p); });
+function loadShape(id, ms) {   // the photo's shape before its card is drawn, so it doesn't jump
+  if (AR[id]) return Promise.resolve();
+  return new Promise(res => {
+    const im = new Image(), t = setTimeout(res, ms);
+    im.onload = () => { noteAR(id, im); clearTimeout(t); res(); };
+    im.onerror = () => { clearTimeout(t); res(); };
+    im.src = img(id, 'view');
+  });
+}
+
+// What a decided stack shows when you come back to it: a line on the photo, and its outline.
+function stLine(s, st) {
+  if (!st.done) return '';
+  const n = s.frames.length, f = shown(s);
+  let t, stars = 0;
+  if (st.src === 'lr') {
+    const m = frameMark(st.frame || f) || { text: 'Rejected in Lightroom', stars: 0 };
+    t = st.v === 'reject' && n > 1 ? 'Rejected in Lightroom · all ' + n + ' frames' : m.text;
+    stars = m.stars;
+  } else if (st.v === 'reject') {
+    t = n > 1 ? 'Rejected · all ' + n + ' frames' : 'Rejected';
+  } else {
+    const k = s.frames.filter(x => isPick(S.dec[x.id])).length;
+    t = n === 1 ? (st.v === 'hero' ? 'Hero' : 'Kept')
+      : k === n ? 'Kept all ' + n + (s.kind === 'bracket' ? ' · bracket' : s.kind === 'pano' ? ' · panorama' : '')
+      : k > 1 ? 'Kept ' + k + ' of ' + n + ' · ' + (n - k) + ' rejected'
+      : 'Kept ' + stem(f.file) + ' · ' + (n - 1) + ' other' + (n > 2 ? 's' : '') + ' rejected';
+    stars = (frameMark(f) || {}).stars || 0;
+  }
+  if (s.frames.some(x => S.dec[x.id] && S.dec[x.id].state === 'conflict')) t += ' · your Lightroom flag won';
+  return '<div class="stline ' + st.v + '"><i>' + (st.v === 'reject' ? IC.x : IC.check) + '</i><span>' + esc(t) + '</span>' +
+    (stars ? '<em>' + starText(stars) + '</em>' : '') + '</div>';
+}
+
 /* ---------------------------------------------------------------- views */
 const top = (left, title, sub, right) =>
   '<div class="top">' + left + '<div class="t">' + esc(title) + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</div>' + (right || '<span class="sp"></span>') + '</div>' +
@@ -363,8 +442,6 @@ const overNote = () => { const b = budgetOf(), over = keptCount() - b; return b 
 function vCull() {
   const s = S.stacks[S.cursor], f = shown(s), st = status(s), n = S.stacks.length;
   const burst = s.frames.length > 1, sugg = s.kind === 'pano' || s.kind === 'bracket';
-  const pill = !st.done ? '' : st.src === 'lr' ? '<span class="pill p-lr p-' + st.v + '">' + esc(st.v === 'reject' ? 'Rejected in Lightroom' : lrWord(st.frame)) + '</span>'
-    : '<span class="pill p-' + st.v + '">' + ({ keep: 'Kept', hero: 'Hero', reject: 'Rejected' })[st.v] + '</span>';
   const lrHere = st.src !== 'lr' && lrMark(f) ? '<span class="bd bd-lr">' + esc(lrWord(f)) + '</span>' : '';
   const chip = burst ? '<button class="chip" data-act="picker" aria-label="Open burst of ' + s.frames.length + '">' + IC.stack + '<span>' + s.frames.length + '</span></button>'
     : f.partners.length ? '<span class="chip static">RAW + ' + esc(f.partners.map(p => p.split('.').pop().toUpperCase()).join(' + ')) + '</span>' : '';
@@ -372,37 +449,46 @@ function vCull() {
     : s.kind === 'bracket' ? '<span class="bd bd-dot">Looks like a bracket</span>'
     : burst && f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') +
     f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + lrHere;
-  const strip = burst ? '<button class="strip" data-act="picker">' + s.frames.slice(0, 6).map(x =>
-      '<img src="' + img(x.id, 'thumb') + '" alt="" class="m-' + markOf(x) + '">').join('') +
+  const strip = burst ? '<button class="strip" data-act="picker">' + s.frames.slice(0, 6).map(x => thumb(x, 'm-' + markOf(x))).join('') +
       (s.frames.length > 6 ? '<span class="more">+' + (s.frames.length - 6) + '</span>' : '') + '<span class="strip-l">Choose</span></button>'
     : '<div class="strip empty" aria-hidden="true"></div>';
+  // The button that made the decision shows pressed when you come back to the stack.
+  const kept = s.frames.filter(x => isPick(S.dec[x.id])).length;
+  const pressed = a => !st.done ? false : a === 'reject' ? st.v === 'reject' : st.v === 'reject' ? false
+    : a === 'hero' ? st.v === 'hero'
+    : a === 'keep-all' ? st.src !== 'lr' && kept === s.frames.length
+    : st.v !== 'hero' && (st.src === 'lr' || !burst || kept < s.frames.length);
+  const on = a => (pressed(a) ? ' on' : '');
+  const ar = AR[f.id] || 1.5;
+  const cls = 'card ' + (ar < 1 ? 'k-fill' : 'k-land') + (burst ? ' is-stack' : '') + (st.done ? ' st-' + st.v : '');
   const left = n - doneCount();
   return top(backBtn('days', 'Days'), dayTitle(S.day), left + (left === 1 ? ' stack' : ' stacks') + ' to go',
       '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="reset-ask" aria-label="Start this day over">' + IC.restart + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' + budgetBar() +
-    '<div class="stage" id="stage"><div class="card' + (burst ? ' is-stack' : '') + '"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) + '" draggable="false"><div class="tint"></div>' +
-      '<div class="badges">' + badges + '</div>' + pill + chip + '<div class="stamp"><span>KEEP</span></div></div>' +
+    '<div class="stage" id="stage"><div class="' + cls + '"' + (ar < 1 ? '' : ' style="aspect-ratio:' + ar.toFixed(4) + '"') + '>' +
+      photo(f, '<div class="tint"></div>' + stLine(s, st) + '<div class="badges">' + badges + '</div>' + chip + '<div class="stamp"><span>KEEP</span></div>') + '</div>' +
       '<div class="fname">' + esc([f.file].concat(f.partners).join(' + ')) + ' · ' + (S.cursor + 1) + '/' + n + '</div></div>' +
     strip +
-    '<div class="bar"><button class="pb pb-rej" data-act="reject">' + IC.x + '<span>Reject</span></button>' +
+    '<div class="bar"><button class="pb pb-rej' + on('reject') + '" data-act="reject">' + IC.x + '<span>Reject</span></button>' +
       '<button class="pb pb-undo" data-act="undo"' + (S.hist.length ? '' : ' disabled') + '>' + IC.undo + '<span>Undo</span></button>' +
-      (burst ? '<button class="pb pb-all' + (sugg ? ' sugg' : '') + '" data-act="keep-all">' + IC.stack + '<span>Keep all ' + s.frames.length + '</span></button>'
-        : '<button class="pb pb-hero" data-act="hero">' + IC.star + '<span>Hero</span></button>') +
-      '<button class="pb pb-keep" data-act="keep">' + IC.check + '<span>' + (burst ? 'Keep frame' : 'Keep') + '</span></button></div>' +
+      (burst ? '<button class="pb pb-all' + (sugg && !st.done ? ' sugg' : '') + on('keep-all') + '" data-act="keep-all">' + IC.stack + '<span>Keep all ' + s.frames.length + '</span></button>'
+        : '<button class="pb pb-hero' + on('hero') + '" data-act="hero">' + IC.star + '<span>Hero</span></button>') +
+      '<button class="pb pb-keep' + on('keep') + '" data-act="keep">' + IC.check + '<span>' + (burst ? 'Keep frame' : 'Keep') + '</span></button></div>' +
     '<div class="hint">Swipe ↑ keep · ↓ reject · ← → browse · double-tap for focus</div>';
 }
 
 function vStrip() {
   const s = S.stacks[S.cursor], fr = s.frames, pk = S.picker, f = fr[pk.view], on = pk.sel.has(f.id);
-  const n = pk.sel.size;
+  const n = pk.sel.size, m = frameMark(f);
+  const lrBadge = lrMark(f) && !(m && m.text.endsWith('in Lightroom')) ? '<span class="bd bd-lr">' + esc(lrWord(f)) + '</span>' : '';
   return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, 'Tick the keepers') +
-    '<div class="pk-main" id="pk-main"><div class="pk-frame"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) + '" draggable="false">' +
-      '<div class="pk-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') +
-        (lrMark(f) ? '<span class="bd bd-lr">' + esc(lrWord(f)) + '</span>' : '') + '</div>' +
+    '<div class="pk-main" id="pk-main"><div class="pk-box">' + photo(f) + '</div>' +
+      '<div class="pk-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + lrBadge + '</div>' +
+      (m ? '<span class="pk-flag ' + m.v + '">' + esc(m.text) + (m.stars ? ' ' + starText(m.stars) : '') + '</span>' : '') +
       '<button class="pk-tick' + (on ? ' on' : '') + '" data-act="tick" aria-pressed="' + on + '" aria-label="Keep ' + esc(f.file) + '">' + IC.check + '</button>' +
-      '<span class="pk-id">' + esc(stem(f.file)) + ' · ' + (pk.view + 1) + '/' + fr.length + '</span></div></div>' +
+      '<span class="pk-id">' + esc(stem(f.file)) + ' · ' + (pk.view + 1) + '/' + fr.length + '</span></div>' +
     '<div class="pk-strip">' + fr.map((x, i) => '<button class="pk-th' + (i === pk.view ? ' cur' : '') + '" data-act="view" data-i="' + i + '" aria-label="Show ' + esc(x.file) + '">' +
-      '<img src="' + img(x.id, 'thumb') + '" alt="">' + (x.id === s.lead ? '<i class="dot"></i>' : '') + (pk.sel.has(x.id) ? '<b>' + IC.check + '</b>' : '') + '</button>').join('') + '</div>' +
+      thumb(x) + (x.id === s.lead ? '<i class="dot"></i>' : '') + (pk.sel.has(x.id) ? '<b>' + IC.check + '</b>' : '') + '</button>').join('') + '</div>' +
     '<p class="pk-note">A dot marks the sharpest frame. Swipe to look, double-tap to check focus, ✓ to keep.</p>' +
     '<div class="foot"><button class="pb2" data-act="pk-reject">Reject all ' + fr.length + '</button>' +
       '<button class="pb2 pri" data-act="pk-keep"' + (n ? '' : ' disabled') + '>' + (n ? 'Keep ' + n + ' · reject ' + (fr.length - n) : 'Tick a keeper') + '</button></div>';
@@ -413,8 +499,8 @@ function vDuel() {
   const lab = (f, tag) => '<span class="du-tag">' + tag + '</span><span class="du-id">' + esc(stem(f.file)) + '</span>' +
     '<span class="du-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + '</span>';
   return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Winner stays', 'Round ' + pk.idx + ' of ' + (fr.length - 1) + ' · tap the better frame') +
-    '<div class="du"><button class="du-f" data-act="duel-win" data-w="champ" aria-label="' + esc(A.file) + ' is better"><img src="' + img(A.id, 'view') + '" alt="">' + lab(A, 'Holding') + '</button>' +
-    '<button class="du-f" data-act="duel-win" data-w="chal" aria-label="' + esc(B.file) + ' is better"><img src="' + img(B.id, 'view') + '" alt="">' + lab(B, 'Challenger') + '</button></div>' +
+    '<div class="du"><button class="du-f" data-act="duel-win" data-w="champ" aria-label="' + esc(A.file) + ' is better"><div class="pk-box">' + photo(A) + '</div>' + lab(A, 'Holding') + '</button>' +
+    '<button class="du-f" data-act="duel-win" data-w="chal" aria-label="' + esc(B.file) + ' is better"><div class="pk-box">' + photo(B) + '</div>' + lab(B, 'Challenger') + '</button></div>' +
     '<div class="du-kept">' + (pk.keepers.length ? 'Also keeping ' + pk.keepers.length : '') + '</div>' +
     '<div class="foot"><button class="pb2" data-act="duel-both">Keep both</button><button class="pb2 pri" data-act="duel-done">Finish: keep ' + (1 + pk.keepers.length) + '</button></div>';
 }
@@ -433,11 +519,13 @@ function openFocus(id, u, v) {
   draw();
 }
 function vFocus() {
-  const f = frameById(S.focus.id), fromCard = S.focus.ret === 'cull';
+  const f = frameById(S.focus.id), fromCard = S.focus.ret === 'cull', m = frameMark(f);
   return top(backBtn('close-focus', 'Back'), 'Focus · ' + stem(f.file), '1:1 from the RAW · drag to look around') +
+    (m ? '<div class="fz-st ' + m.v + '">' + (m.v === 'reject' ? '✕ ' : '✓ ') + esc(m.text) + (m.stars ? ' ' + starText(m.stars) : '') + '</div>' : '') +
     '<div class="fz" id="fz"><img alt="" draggable="false"><div class="fz-load">Decoding the RAW…</div></div>' +
     '<div class="fz-cap">Double-tap the photo to go back.</div>' +
-    (fromCard ? '<div class="foot"><button class="pb2" data-act="reject">Reject</button><button class="pb2 pri" data-act="keep">Keep</button></div>' : '');
+    (fromCard ? '<div class="foot"><button class="pb2' + (m && m.v === 'reject' ? ' on-rej' : '') + '" data-act="reject">Reject</button>' +
+      '<button class="pb2 pri' + (m && m.v !== 'reject' ? ' on-keep' : '') + '" data-act="keep">Keep</button></div>' : '');
 }
 function loadFocus() {
   const box = $('#fz', view);
@@ -503,7 +591,7 @@ function vGrid() {
   const tile = x => {
     const stars = (x.f.lr && x.f.lr.rating) || (S.dec[x.f.id] && S.dec[x.f.id].stars) || 0;
     return '<button class="gv-t m-' + x.m + '" data-act="grid-open" data-stack="' + x.si + '" aria-label="' + esc(x.f.file + ', ' + ({ pick: 'picked', hero: 'hero', reject: 'rejected', none: 'unflagged' })[x.m]) + '">' +
-      '<img src="' + img(x.f.id, 'thumb') + '" alt="" loading="lazy">' +
+      thumb(x.f) +
       (x.s.frames.length > 1 ? '<span class="gv-n">' + (x.fi + 1) + '/' + x.s.frames.length + '</span>' : '') +
       (stars ? '<span class="gv-s">' + '★'.repeat(stars) + '</span>' : '') +
       (x.m === 'pick' || x.m === 'hero' ? '<b>' + (x.m === 'hero' ? IC.star : IC.check) + '</b>' : '') + '</button>';
@@ -537,7 +625,7 @@ function vSummary() {
   const skipped = lrDone();
   const fromBurst = rejects.filter(f => S.dec[f.id].note), outright = rejects.filter(f => !S.dec[f.id].note);
   const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="rescue" data-id="' + f.id + '" aria-label="Rescue ' + esc(f.file) + '">' +
-    '<img src="' + img(f.id, 'thumb') + '" alt="" loading="lazy"><b>' + IC.x + '</b></button>').join('') + '</div>';
+    thumb(f) + '<b>' + IC.x + '</b></button>').join('') + '</div>';
   const open = firstOpen(0);
   const decided = all.map(f => S.dec[f.id]).filter(Boolean);
   const by = st => decided.filter(d => d.state === st).length;
@@ -579,6 +667,7 @@ function draw(anim) {
     : scr === 'picker' ? (S.picker.m === 'strip' ? vStrip() : vDuel())
     : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : vCull();
   view.classList.toggle('no-chrome', !S.chrome);
+  bindPhotos(view);
   if (scr === 'cull') {
     bindStage();
     const c = $('.card', view);
@@ -592,7 +681,9 @@ function prefetch() {
   for (let k = 1; k <= 10; k++) {
     const s = S.stacks[S.cursor + k];
     if (!s) break;
-    new Image().src = img(shown(s).id, 'view');
+    const v = shown(s), im = new Image();
+    if (!AR[v.id]) im.onload = () => noteAR(v.id, im);   // so its card is drawn the right shape
+    im.src = img(v.id, 'view');
     if (k <= 3) for (const f of s.frames.slice(0, 6)) new Image().src = img(f.id, 'thumb');
   }
 }
@@ -684,7 +775,7 @@ function bindPickerSwipe() {
     const now = performance.now();
     if (now - lastAt < 300) {           // double-tap: focus check on this frame
       lastAt = 0;
-      const el = $('.pk-frame img', m), f = S.stacks[S.cursor].frames[S.picker.view];
+      const el = $('.photo img', m), f = S.stacks[S.cursor].frames[S.picker.view];
       if (el) { const p = imagePoint(el, e.clientX, e.clientY); openFocus(f.id, p.u, p.v); }
       return;
     }
@@ -713,7 +804,7 @@ async function openDay(day) {
   S.pass = 2;                       // one pass now; the server still records pass and position
   S.cursor = p ? Math.min(p.cursor, S.stacks.length - 1) : 0;
   const i = status(S.stacks[S.cursor]).done ? firstOpen(S.cursor) : S.cursor;
-  if (i < 0) S.screen = 'summary'; else { S.cursor = i; S.screen = 'cull'; }
+  if (i < 0) S.screen = 'summary'; else { S.cursor = i; S.screen = 'cull'; await loadShape(shown(S.stacks[i]).id, 1500); }
   const hash = '#/day/' + day;
   if (location.hash !== hash) history.replaceState(null, '', hash);
   draw();

@@ -36,23 +36,33 @@ button{font:inherit;color:inherit}
 
 /* card */
 .stage{flex:1;min-height:0;display:flex;flex-direction:column;justify-content:center;gap:8px;position:relative;touch-action:none;overflow:hidden}
-.card{position:relative;width:100%;aspect-ratio:3/2;will-change:transform;background:#000;max-height:100%}
-.card.portrait{aspect-ratio:2/3;width:auto;height:100%;max-height:100%;margin:0 auto}
-.card.is-stack::before,.card.is-stack::after{content:"";position:absolute;border-radius:5px 5px 0 0;pointer-events:none}
-.card.is-stack::before{left:12px;right:12px;top:-7px;height:7px;background:#3A3D42}
-.card.is-stack::after{left:26px;right:26px;top:-13px;height:6px;background:#26282C}
-.card img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none;-webkit-user-drag:none}
+/* A card is as tall as a landscape photo needs (its own ratio, set inline); a vertical photo
+   takes all the height there is. The photo box inside is sized to the photo by app.js. */
+.card{position:relative;width:100%;will-change:transform;max-height:100%}
+.card.k-land{aspect-ratio:3/2}
+.card.k-fill{flex:1 1 0;min-height:0}
+.card.k-fill.is-stack{margin-top:14px}
+.photo{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#000}
+.photo>img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;-webkit-user-drag:none}
+.card.is-stack .photo::before,.card.is-stack .photo::after{content:"";position:absolute;border-radius:5px 5px 0 0;pointer-events:none}
+.card.is-stack .photo::before{left:12px;right:12px;top:-7px;height:7px;background:#3A3D42}
+.card.is-stack .photo::after{left:26px;right:26px;top:-13px;height:6px;background:#26282C}
 .tint{position:absolute;inset:0;opacity:0;pointer-events:none}
+/* a decided stack: outlined in its colour, rejects greyed, and a status line along the bottom */
+.card.st-keep .photo{outline:3px solid var(--keep);outline-offset:-3px}
+.card.st-hero .photo{outline:3px solid var(--hint);outline-offset:-3px}
+.card.st-reject .photo{outline:3px solid var(--reject);outline-offset:-3px}
+.card.st-reject .photo>img{filter:grayscale(1) brightness(.72)}
+.stline{position:absolute;left:0;right:0;bottom:0;padding:24px 10px 9px;display:flex;gap:7px;align-items:center;font:700 12px/1.2 var(--body);color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.82));pointer-events:none;transition:opacity .2s}
+.stline i{flex:none;width:18px;height:18px;border-radius:50%;display:grid;place-items:center;color:#0B0B0B}
+.stline i svg{width:12px;height:12px}
+.stline.keep i{background:var(--keep)} .stline.hero i{background:var(--hint)} .stline.reject i{background:var(--reject);color:#fff}
+.stline span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stline em{font-style:normal;color:var(--hint);letter-spacing:.05em;flex:none}
+.stline~.chip{bottom:40px}
 .badges{position:absolute;left:8px;top:8px;display:flex;flex-wrap:wrap;gap:4px;max-width:70%;transition:opacity .2s}
 .bd{display:inline-flex;align-items:center;gap:5px;font:600 11px/1 var(--body);padding:5px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:var(--hint)}
 .bd-dot::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--hint)}
-.pill{position:absolute;right:8px;top:8px;font:700 11px/1 var(--body);padding:5px 8px;border-radius:999px;transition:opacity .2s}
-.p-keep{background:var(--keep);color:#05140C}
-.p-hero{background:var(--hint);color:#1A1200}
-.p-reject{background:var(--reject);color:#fff}
-.p-lr{background:rgba(0,0,0,.62)}
-.p-lr.p-keep{color:var(--keep);box-shadow:inset 0 0 0 1.5px var(--keep)}
-.p-lr.p-reject{color:var(--reject);box-shadow:inset 0 0 0 1.5px var(--reject)}
 .bd-lr{color:#fff;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.55)}
 .chip{position:absolute;right:8px;bottom:8px;display:flex;align-items:center;gap:5px;font:700 12px/1 var(--body);padding:7px 10px;border-radius:999px;border:0;background:rgba(0,0,0,.62);color:#fff;cursor:pointer;transition:opacity .2s}
 .chip svg{width:15px;height:15px}
@@ -63,10 +73,11 @@ button{font:inherit;color:inherit}
 .stamp[data-a="hero"] span{color:var(--hint)}
 .stamp[data-a="reject"] span{color:var(--reject)}
 .fname{text-align:center;font:500 10.5px/1 var(--mono);color:var(--muted);transition:opacity .2s}
-#view.no-chrome .badges,#view.no-chrome .pill,#view.no-chrome .chip,#view.no-chrome .fname{opacity:0}
+#view.no-chrome .badges,#view.no-chrome .stline,#view.no-chrome .chip,#view.no-chrome .fname{opacity:0}
+#view.no-chrome .card.st-reject .photo>img{filter:none}
 
 .strip{flex:none;height:50px;margin:6px 12px 4px;display:flex;align-items:center;gap:4px;padding:6px 8px;border-radius:12px;background:var(--panel);border:0;cursor:pointer;overflow:hidden}
-.strip img{width:36px;height:24px;object-fit:cover;border-radius:3px;flex:none}
+.strip img{width:36px;height:24px;object-fit:contain;background:#000;border-radius:3px;flex:none}
 .strip img.m-reject{opacity:.3}
 .strip img.m-pick{box-shadow:0 0 0 2px var(--keep)}
 .strip .more{font-size:11px;color:var(--muted);flex:none}
@@ -81,6 +92,7 @@ button{font:inherit;color:inherit}
 .pb-undo{flex:.75;color:var(--muted)}
 .pb:disabled{opacity:.35;cursor:default}
 .pb:active:not(:disabled){background:var(--raise)}
+.pb.on{background:var(--raise);background:color-mix(in srgb,currentColor 18%,var(--panel));box-shadow:inset 0 0 0 1.5px currentColor}
 .hint{flex:none;text-align:center;font-size:11px;color:var(--muted);padding:6px 8px 6px}
 
 /* days */
@@ -135,9 +147,10 @@ button{font:inherit;color:inherit}
 .gv-tools .seg button{flex:1}
 
 /* burst picker */
-.pk-main{flex:1;min-height:0;display:grid;place-items:center;background:#000;touch-action:pan-y}
-.pk-frame{position:relative;width:100%;height:100%;display:grid;place-items:center}
-.pk-frame img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+.pk-main{flex:1;min-height:0;position:relative;background:#000;touch-action:pan-y}
+.pk-box{position:absolute;inset:0}
+.pk-flag{position:absolute;right:8px;top:8px;font:700 11px/1 var(--body);padding:5px 8px;border-radius:999px}
+.pk-flag.keep{background:var(--keep);color:#05140C} .pk-flag.hero{background:var(--hint);color:#1A1200} .pk-flag.reject{background:var(--reject);color:#fff}
 .pk-tick{position:absolute;right:12px;bottom:12px;width:46px;height:46px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);color:transparent;display:grid;place-items:center;cursor:pointer;padding:0}
 .pk-tick.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .pk-tick svg{width:24px;height:24px}
@@ -145,7 +158,7 @@ button{font:inherit;color:inherit}
 .pk-bd{position:absolute;left:8px;top:8px;display:flex;gap:4px}
 .pk-strip{display:flex;gap:7px;overflow-x:auto;padding:12px 12px 16px;flex:none}
 .pk-th{position:relative;flex:none;width:62px;height:42px;padding:0;border:2px solid transparent;border-radius:6px;background:#000;cursor:pointer}
-.pk-th img{width:100%;height:100%;object-fit:cover;border-radius:4px;display:block}
+.pk-th img{width:100%;height:100%;object-fit:contain;border-radius:4px;display:block}
 .pk-th.cur{border-color:#fff}
 .pk-th .dot{position:absolute;left:50%;bottom:-10px;width:5px;height:5px;margin-left:-2.5px;border-radius:50%;background:var(--hint)}
 .pk-th b{position:absolute;right:-6px;top:-6px;width:18px;height:18px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:grid;place-items:center}
@@ -156,12 +169,14 @@ button{font:inherit;color:inherit}
 .pb2.pri{background:var(--ink);color:var(--bg)}
 .pb2:disabled{opacity:.4;cursor:default}
 .pb2.danger{background:var(--reject);color:#fff}
+.pb2.on-rej{color:var(--reject);box-shadow:inset 0 0 0 2px var(--reject)}
+.pb2.on-keep{background:var(--keep);color:#05140C}
 .link{background:none;border:0;padding:0;color:var(--muted);font:500 13px/1.3 var(--body);text-decoration:underline;cursor:pointer}
 
 /* duel */
 .du{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:4px 0}
 .du-f{position:relative;border:0;padding:0;background:#000;cursor:pointer;display:grid;place-items:center;overflow:hidden;min-height:0;color:#fff}
-.du-f img{width:100%;height:100%;object-fit:contain;display:block}
+.du-f .pk-box{position:absolute;inset:0}
 .du-tag{position:absolute;left:8px;top:8px;font:700 10.5px/1 var(--body);padding:5px 8px;border-radius:999px;background:rgba(0,0,0,.62)}
 .du-id{position:absolute;right:8px;bottom:8px;font:500 10.5px/1 var(--mono);opacity:.85}
 .du-bd{position:absolute;left:8px;bottom:8px;display:flex;gap:4px}
@@ -171,6 +186,8 @@ button{font:inherit;color:inherit}
 .fz{flex:1;min-height:0;position:relative;overflow:hidden;background:#000;touch-action:none}
 .fz img{position:absolute;left:0;top:0;transform-origin:0 0;max-width:none;-webkit-user-drag:none;pointer-events:none}
 .fz-load{position:absolute;inset:0;display:grid;place-items:center;font-size:12.5px;color:var(--muted);background:rgba(0,0,0,.6)}
+.fz-st{flex:none;text-align:center;font:700 12.5px/1 var(--body);padding:0 0 8px}
+.fz-st.keep{color:var(--keep)} .fz-st.hero{color:var(--hint)} .fz-st.reject{color:var(--reject)}
 .fz-cap{flex:none;text-align:center;font-size:11.5px;color:var(--muted);padding:6px 10px}
 
 /* summary */

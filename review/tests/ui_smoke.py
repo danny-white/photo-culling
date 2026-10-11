@@ -189,6 +189,8 @@ def main():
         loaded(".card img")
         h = wd.js("return document.querySelector('.card').getBoundingClientRect().height")
         check(h > 150, f"card is laid out: {h:.0f} px tall")
+        fit = wd.js("const p=document.querySelector('.card .photo'), i=p.querySelector('img'), r=p.getBoundingClientRect(); return [r.width/r.height, i.naturalWidth/i.naturalHeight];")
+        check(abs(fit[0] - fit[1]) < 0.02, f"the photo box has the photo's own shape: {fit[0]:.3f} vs {fit[1]:.3f}")
         shot("3-card")
         # double-tap: a 1:1 crop from the RAW, then back
         r = wd.js("const b=document.querySelector('.card img').getBoundingClientRect(); return [b.x+b.width*0.3, b.y+b.height*0.6];")
@@ -296,6 +298,10 @@ def main():
         wd.click('[data-act="grid-filter"][data-f="all"]')
         wd.click('.gv-t')
         wd.wait("document.querySelector('.card')")
+        # going back to a decided stack shows the decision on the photo (the dropped burst)
+        line = wd.text(".stline")
+        check(wd.js("return document.querySelector('.card').classList.contains('st-reject') && !!document.querySelector('.pb-rej.on')")
+              and line.startswith("Rejected · all 4 frames"), "a decided stack shows its decision: " + line)
         wd.click('.top [data-act="grid"]')                                # the same button on a card
         wd.wait("document.querySelector('.gv-grid')")
         wd.click('.top [data-act="grid"]')                                # ...and back
