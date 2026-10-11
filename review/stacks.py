@@ -14,6 +14,7 @@ Brackets and panoramas both suggest "Keep all": an HDR or panorama merge needs e
 """
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -26,6 +27,9 @@ BRACKET_LUM_SPREAD = 60.0    # mean luminance (0-255) between darkest and bright
 SOFT_RELATIVE = 0.35         # soft = under 35% of the sharpest normally exposed frame in its burst
 BLOWN_PCT = 15.0             # photo_cull.BLOWN_PCT_SEVERE: share of pure-white pixels
 DARK_LUM = 35.0              # photo_cull.MEAN_LUM_LOW: overall very dark
+KEEP_PER_HOUR = 15          # pass 1's soft budget: stacks to keep per hour of shooting
+SHOOTING_GAP_CAP_S = 600     # a pause longer than 10 minutes counts as 10: lunch is not shooting
+KEEP_FLOOR = 5               # even a five-minute shoot may keep five
 PANO_MIN_FRAMES = 3
 PANO_PHASH_BITS = 20         # adjacent frames differ by at least this many of 64 phash bits
 PANO_MIN_SHIFT = 0.08        # and slide at least this fraction of the frame, all the same way
@@ -176,6 +180,19 @@ def pano_confirmed(greys: list[np.ndarray]) -> bool:
                 and all(abs(v) > abs(c) for v, c in zip(along, across))):
             return True
     return False
+
+
+def shooting_hours(rows: list[dict]) -> float:
+    """Time spent shooting: the gaps between consecutive frames, each capped at
+    SHOOTING_GAP_CAP_S. First-to-last wall-clock time was tried and dropped: idle hours gave half
+    the days no squeeze at all, and folders with broken timestamps spanned thousands of hours."""
+    ts = sorted(r["capture_ts"] for r in rows if r.get("capture_ts") is not None)
+    return sum(min(b - a, SHOOTING_GAP_CAP_S) for a, b in zip(ts, ts[1:])) / 3600
+
+
+def keep_budget(rows: list[dict]) -> int:
+    """Pass 1's soft limit: KEEP_PER_HOUR stacks per hour of shooting, at least KEEP_FLOOR."""
+    return max(KEEP_FLOOR, math.ceil(KEEP_PER_HOUR * shooting_hours(rows)))
 
 
 def build_stacks(rows: list[dict]) -> list[dict]:

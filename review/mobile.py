@@ -477,6 +477,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 f["place"] = det.get("place")
         return jsonify({
             "day": day, "folder": day.rsplit("/", 1)[-1], "date": day_date(day),
+            "budget": {"stacks": stacks.keep_budget(rows), "per_hour": stacks.KEEP_PER_HOUR,
+                       "hours": round(stacks.shooting_hours(rows), 2)},
             "stacks": day_stacks,
             "progress": {"pass": ds["pass"], "cursor": ds["cursor"]} if ds else None,
         })

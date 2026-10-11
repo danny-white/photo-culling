@@ -43,8 +43,11 @@ Cull a day from the NAS on your phone, then send the flags to Lightroom. Open
 `http://100.82.57.4:8000/m/` over Tailscale (or the `tailscale serve` HTTPS address, which
 also lets it install to the Home Screen with an offline app shell).
 
-- **Pass 1, the sweep:** every stack of the day in a grid; tap the obvious misses.
-- **Pass 2, the cards:** one stack per card. Swipe up to keep the frame, down to reject the
+- **Pass 1, pick your best:** every stack of the day in a grid; tap the ones to keep. A soft
+  budget of 15 stacks per hour of shooting (pauses over 10 minutes don't count; at least 5)
+  shows as a counter and asks once if you go over. Stacks you kept in Lightroom count toward
+  it. Whatever you don't pick is rejected when pass 2 starts; rescue any in the review.
+- **Pass 2, the cards:** only the bursts you picked, one per card. Swipe up to keep the frame, down to reject the
   burst, sideways to browse. Bursts open as a filmstrip (up to 6 frames) or a winner-stays
   duel. Keeping one frame rejects the rest with the note `Burst reject · kept DSC05039`.
   Double-tap for a 1:1 crop from the RAW.

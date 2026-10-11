@@ -81,6 +81,7 @@ class MobileApi(unittest.TestCase):
         lead = next(f for f in burst["frames"] if f["id"] == burst["lead"])
         self.assertEqual(lead["file"], "DSC05039.ARW")          # sharpness 445, the burst's highest
         self.assertIsNone(body["progress"])
+        self.assertEqual(body["budget"], {"stacks": 5, "per_hour": 15, "hours": 0.19})   # an 11-minute shoot
         self.assertTrue(all(f["decision"] is None for s in st for f in s["frames"]))
         self.assertNotIn("path", st[0]["frames"][0])            # library paths stay on the server
 

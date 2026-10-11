@@ -177,18 +177,35 @@ def main():
         tiles = wd.js("return document.querySelectorAll('.sw-t').length")
         check(tiles > 5, f"sweep grid: {tiles} tiles")
         greyed = wd.js("return [...document.querySelectorAll('.sw-t.done')].map(t => t.textContent)")
-        check(greyed == ["In Lightroom", "2In Lightroom", "3In Lightroom"] and "3 already flagged or rated in Lightroom" in wd.text(".note"),
-              f"sweep greys out stacks culled in Lightroom: {greyed}")
-        wd.click('.sw-t[data-i="1"]'); wd.click('.sw-t[data-i="7"]')
-        check(wd.text('[data-act="sweep-done"]') == "Reject 2, start pass 2", "sweep footer: " + wd.text('[data-act="sweep-done"]'))
+        check(greyed == ["In Lightroom", "2In Lightroom", "3In Lightroom"] and "count toward it" in wd.text(".note"),
+              f"pass 1 greys out stacks culled in Lightroom: {greyed}")
+        # pass 1 is selection against a budget: an 11-minute shoot gets 5, and 3 are kept in Lightroom
+        check(wd.text("#budget") == "3 of 5 picked" and wd.text('[data-act="sweep-done"]') == "Tap your best to start",
+              "budget before picking: " + wd.text("#budget"))
+        for i in (0, 1, 3, 4):
+            wd.click(f'.sw-t[data-i="{i}"]')
+        check(wd.text("#budget") == "7 picked · 2 over 5" and wd.js("return document.querySelector('#budget').classList.contains('over')"),
+              "soft limit shows the overshoot: " + wd.text("#budget"))
+        check(wd.text('[data-act="sweep-done"]') == "Keep 4, reject 4 · start pass 2", "pass 1 footer: " + wd.text('[data-act="sweep-done"]'))
         shot("2-sweep")
         wd.click('[data-act="sweep-done"]')
+        wd.wait("!document.querySelector('#sheet').hidden")
+        check("7 picked, 2 over this shoot" in wd.text("#sheet"), "over the budget asks once: " + wd.text("#sheet .sh-q"))
+        shot("2b-budget")
+        wd.click('#sheet [data-act="close-sheet"]')                    # Trim: back to the grid, picks intact
+        check(wd.js("return document.querySelectorAll('.sw-t.on').length") == 4, "Trim keeps the picks")
+        wd.click('[data-act="sweep-done"]')
+        wd.wait("!document.querySelector('#sheet').hidden")
+        wd.click('#sheet [data-act="sweep-force"]')
         wd.wait("document.querySelector('.card')")
-        check("Pass 2 · 5 of 11" in wd.text(".top .t"), "pass 2 counts the Lightroom stacks as done: " + wd.text(".top .t"))
+        check("Kept 4 · rejected 4 · now choose frames in 4 bursts" in wd.text("#toast"), "pass 1 result: " + wd.text("#toast"))
+        check("Pass 2 · 4 stacks left" in wd.text(".top .t"), "pass 2 visits only the picked bursts: " + wd.text(".top .t"))
         wd.click('#toast [data-act="undo"]')
         wd.wait("document.querySelector('.sw-grid')")
-        check(wd.js("return document.querySelectorAll('.sw-t.on').length") == 2, "undo returns to the sweep with both marks")
+        check(wd.js("return document.querySelectorAll('.sw-t.on').length") == 4, "undo returns to pass 1 with the picks")
         wd.click('[data-act="sweep-done"]')
+        wd.wait("!document.querySelector('#sheet').hidden")
+        wd.click('#sheet [data-act="sweep-force"]')
         wd.wait("document.querySelector('.card')")
 
         # first card: the 4-frame burst led by its sharpest frame
@@ -216,8 +233,8 @@ def main():
         wd.wait("document.querySelector('.card')")
 
         wd.click('[data-act="keep"]')
-        wd.wait("document.querySelector('#toast').textContent.includes('Kept')")
-        check("3 rejected with a note" in wd.text("#toast"), "keep frame: " + wd.text("#toast"))
+        wd.wait("document.querySelector('#toast').textContent.includes('rejected with a note')")
+        check("Kept DSC05039 · 3 rejected with a note" in wd.text("#toast"), "keep frame: " + wd.text("#toast"))
 
         # the bracket suggests Keep all
         wd.wait("document.querySelector('.card')")

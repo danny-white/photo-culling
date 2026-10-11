@@ -344,23 +344,50 @@ function vDays() {
 
 function vLoading(msg) { return top(backBtn('days', 'Days'), 'Culling Bay') + '<div class="empty-state">' + esc(msg) + '</div>'; }
 
-const sweepLabel = () => S.sweepSel.size ? 'Reject ' + S.sweepSel.size + ', start pass 2' : 'Start pass 2';
+// Pass 1 is selection: pick the best stacks, against a soft budget of 15 an hour of shooting
+// (from the server). Stacks you already kept in Lightroom count toward it. Everything left
+// unpicked is rejected when pass 2 starts; pass 2 then visits only the bursts you picked.
+const budgetOf = () => (S.day && S.day.budget ? S.day.budget.stacks : 0);
+const lrKept = s => { const st = status(s); return st.src === 'lr' && st.v !== 'reject'; };
+const pickedCount = () => S.sweepSel.size + S.stacks.filter(lrKept).length;
+const openIdx = () => S.stacks.map((s, i) => i).filter(i => !status(S.stacks[i]).done);
+function selectCounter() {
+  const b = budgetOf(), n = pickedCount(), over = n - b;
+  return '<div class="budget' + (over > 0 ? ' over' : '') + '" id="budget"><span>' + (over > 0 ? n + ' picked · ' + over + ' over ' + b : n + ' of ' + b + ' picked') + '</span>' +
+    '<span class="budget-bar"><i style="width:' + (b ? Math.min(100, n / b * 100) : 0).toFixed(1) + '%"></i></span></div>';
+}
+function selectFoot() {
+  const keep = S.sweepSel.size, drop = openIdx().filter(i => !S.sweepSel.has(i)).length;
+  return '<button class="pb2 pri" data-act="sweep-done"' + (keep ? '' : ' disabled') + '>' +
+    (keep ? 'Keep ' + keep + ', reject ' + drop + ' · start pass 2' : 'Tap your best to start') + '</button>';
+}
 function vSweep() {
+  const b = S.day.budget || { stacks: 0, hours: 0, per_hour: 15 };
   const tile = (s, i) => {
     const f = leadOf(s), st = status(s), on = S.sweepSel.has(i), multi = s.frames.length > 1;
     const bd = st.src === 'lr' ? 'In Lightroom' : s.kind === 'bracket' ? 'Bracket' : s.kind === 'pano' ? 'Panorama' : (f.badges[0] || '');
     const what = (multi ? 'burst of ' + s.frames.length + ' led by ' : '') + stem(f.file);
-    return '<button class="sw-t' + (on ? ' on' : '') + (st.done ? ' done' : '') + '" data-act="sweep-tick" data-i="' + i + '" aria-pressed="' + on + '" aria-label="' +
-      esc(st.done ? what + ', already decided' : 'Reject ' + what) + '"' + (st.done ? ' disabled' : '') + '>' +
+    return '<button class="sw-t' + (on ? ' on' : '') + (st.done ? ' done' : '') + (lrKept(s) ? ' kept' : '') + '" data-act="sweep-tick" data-i="' + i + '" aria-pressed="' + on + '" aria-label="' +
+      esc(st.done ? what + ', already decided' : 'Keep ' + what) + '"' + (st.done ? ' disabled' : '') + '>' +
       '<img src="' + img(f.id, 'thumb') + '" alt="" draggable="false" loading="lazy">' +
       (multi ? '<span class="sw-n">' + IC.stack + s.frames.length + '</span>' : '') +
-      (bd ? '<span class="sw-bd">' + esc(bd) + '</span>' : '') + '<b>' + IC.x + '</b></button>';
+      (bd ? '<span class="sw-bd">' + esc(bd) + '</span>' : '') + '<b>' + IC.check + '</b></button>';
   };
-  return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 1 · tap the misses') +
+  return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 1 · pick your best') + selectCounter() +
     '<div class="scroll"><div class="sw-grid">' + S.stacks.map(tile).join('') + '</div>' +
-    '<p class="note">' + S.stacks.length + ' stacks in shot order, nothing pre-selected' + (lrDone() ? '; ' + lrDone() + ' already flagged or rated in Lightroom are greyed out' : '') +
-    '. A burst tile rejects the whole burst. Press and hold a tile to see it large.</p></div>' +
-    '<div class="foot"><button class="pb2 pri" data-act="sweep-done">' + sweepLabel() + '</button></div>';
+    '<p class="note">Tap your best stacks. This shoot’s budget is ' + b.stacks + ': ' + b.per_hour + ' an hour of shooting (' + b.hours + ' h, pauses over 10 minutes not counted). ' +
+    'It’s a soft limit.' + (lrDone() ? ' Stacks you already kept in Lightroom count toward it.' : '') +
+    ' Whatever you don’t pick is rejected when pass 2 starts; rescue any of it in the review. Press and hold a tile to see it large.</p></div>' +
+    '<div class="foot" id="sweep-foot">' + selectFoot() + '</div>';
+}
+function openBudgetSheet(n, b) {
+  const el = $('#sheet');
+  el.innerHTML = '<div class="sheet" role="dialog" aria-label="Over the budget"><div class="sh-grab"></div>' +
+    '<p class="sh-q">' + n + ' picked, ' + (n - b) + ' over this shoot’s ' + b + '</p>' +
+    '<p class="sh-muted">The budget is ' + (S.day.budget ? S.day.budget.per_hour : 15) + ' an hour of shooting. It’s soft: keep them all if they earn it.</p>' +
+    '<div class="sh-row"><button class="pb2" data-act="close-sheet">Trim</button><button class="pb2 pri" data-act="sweep-force">Keep all ' + n + '</button></div></div>';
+  el.hidden = false;
+  S.sheet = true;
 }
 
 function vCull() {
@@ -379,7 +406,8 @@ function vCull() {
       '<img src="' + img(x.id, 'thumb') + '" alt="" class="m-' + markOf(x) + '">').join('') +
       (s.frames.length > 6 ? '<span class="more">+' + (s.frames.length - 6) + '</span>' : '') + '<span class="strip-l">Choose</span></button>'
     : '<div class="strip empty" aria-hidden="true"></div>';
-  return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 2 · ' + doneCount() + ' of ' + n + ' stacks done',
+  const left = n - doneCount();
+  return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 2 · ' + left + (left === 1 ? ' stack' : ' stacks') + ' left to finish',
       '<div class="tools"><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' +
     '<div class="stage" id="stage"><div class="card' + (burst ? ' is-stack' : '') + '"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) + '" draggable="false"><div class="tint"></div>' +
@@ -516,10 +544,12 @@ function vSummary() {
   if (queued) lr.push(queued + ' waiting for the next Sync AI Cull Data');
   if (by('missing')) lr.push(by('missing') + ' not found in the last sync, will go again');
   if (skipped) lr.push(skipped + ' stack' + (skipped > 1 ? 's were' : ' was') + ' already flagged or rated in Lightroom and skipped');
+  const keptStacks = S.stacks.filter(s => { const st = status(s); return st.done && st.v !== 'reject'; }).length;
+  const budgetLine = budgetOf() ? '<p class="note">Kept ' + keptStacks + ' stack' + (keptStacks === 1 ? '' : 's') + ' against this shoot’s budget of ' + budgetOf() + '.</p>' : '';
   const sendLabel = unsent ? 'Send ' + unsent + ' to Lightroom' : queued ? 'Waiting for Lightroom' : landed ? 'In Lightroom' : 'Send to Lightroom';
   return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far') +
     '<div class="scroll"><div class="counts"><div><b>' + keep + '</b><span>Kept</span></div><div><b>' + hero + '</b><span>Hero</span></div>' +
-      '<div><b>' + rej + '</b><span>Rejected</span></div><div><b>' + none + '</b><span>Unflagged</span></div></div>' +
+      '<div><b>' + rej + '</b><span>Rejected</span></div><div><b>' + none + '</b><span>Unflagged</span></div></div>' + budgetLine +
       (lr.length ? '<p class="sec">Lightroom</p>' + lr.map(t => '<p class="note">' + esc(t) + '</p>').join('') : '') +
       (won.length ? '<p class="sec">Your Lightroom flag won</p>' + wonGrid +
         '<p class="note">The phone said otherwise, but you had flagged ' + (won.length > 1 ? 'these' : 'this') + ' in Lightroom yourself, so Lightroom kept your flag. Change it there if the phone was right.</p>' : '') +
@@ -703,14 +733,23 @@ async function openDay(day) {
   if (location.hash !== hash) history.replaceState(null, '', hash);
   draw();
 }
-function sweepDone() {
-  const idx = [...S.sweepSel].sort((a, b) => a - b);
-  const changes = idx.flatMap(i => S.stacks[i].frames.filter(f => !status(S.stacks[i]).done).map(f => ({ id: f.id, flag: 'reject', note: '', via: 'sweep' })));
-  if (changes.length) act('swept ' + idx.length, changes, { screen: 'sweep', sel: idx });
+function sweepDone(force) {
+  const b = budgetOf(), n = pickedCount();
+  if (!force && b && n > b) return openBudgetSheet(n, b);
+  closeSheet();
+  const open = openIdx(), keep = open.filter(i => S.sweepSel.has(i)), drop = open.filter(i => !S.sweepSel.has(i));
+  const changes = [];
+  for (const i of keep) {           // a single is kept now; a burst waits for pass 2 to choose its frames
+    const s = S.stacks[i];
+    if (s.frames.length === 1) changes.push({ id: s.frames[0].id, flag: 'pick', note: '', via: 'sweep' });
+  }
+  for (const i of drop) for (const f of S.stacks[i].frames) changes.push({ id: f.id, flag: 'reject', note: '', via: 'sweep' });
+  if (changes.length) act('pass 1: kept ' + keep.length + ', rejected ' + drop.length, changes, { screen: 'sweep', sel: [...S.sweepSel] });
+  const bursts = keep.filter(i => S.stacks[i].frames.length > 1).length;
   S.sweepSel = new Set(); S.pass = 2;
   const i = firstOpen(0);
   if (i < 0) { S.screen = 'summary'; saveProgress(true); } else { S.cursor = i; S.screen = 'cull'; saveProgress(); }
-  toast((idx.length ? 'Rejected ' + idx.length + (idx.length === 1 ? ' stack' : ' stacks') + ' · ' : '') + 'Pass 2: choose what to keep', !!changes.length);
+  toast('Kept ' + keep.length + ' · rejected ' + drop.length + (bursts ? ' · now choose frames in ' + bursts + (bursts > 1 ? ' bursts' : ' burst') : ''), !!changes.length);
   draw('next');
 }
 // Send: every queued tap must reach the server first, so the day is sent whole.
@@ -790,10 +829,12 @@ document.addEventListener('click', e => {
       const i = +b.dataset.i, on = !S.sweepSel.has(i);
       on ? S.sweepSel.add(i) : S.sweepSel.delete(i);
       b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on));
-      const d = $('[data-act="sweep-done"]', view); if (d) d.textContent = sweepLabel();
+      $('#budget', view).outerHTML = selectCounter();
+      $('#sweep-foot', view).innerHTML = selectFoot();
       return;
     }
-    case 'sweep-done': return sweepDone();
+    case 'sweep-done': return sweepDone(false);
+    case 'sweep-force': return sweepDone(true);
     case 'back-cull': { const i = firstOpen(S.cursor); if (i >= 0) S.cursor = i; S.screen = 'cull'; return draw(); }
     case 'rescue': {
       const f = frameById(+b.dataset.id);

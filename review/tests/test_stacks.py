@@ -100,6 +100,20 @@ class Badges(unittest.TestCase):
         self.assertEqual(stacks.badges_of(f, [f], False), [])
 
 
+class Budget(unittest.TestCase):
+    def test_pauses_are_capped(self):
+        rows = [row("A.ARW", 0), row("B.ARW", 1800), row("C.ARW", 3600 * 5)]   # two long pauses
+        self.assertAlmostEqual(stacks.shooting_hours(rows), 20 / 60)          # 10 + 10 minutes
+        self.assertEqual(stacks.keep_budget(rows), 5)                         # 15 x 1/3 h, floored to 5
+
+    def test_fifteen_an_hour(self):
+        rows = [row(f"{i}.ARW", i * 60) for i in range(121)]                  # a frame a minute for 2 h
+        self.assertEqual(stacks.keep_budget(rows), 30)
+
+    def test_no_times(self):
+        self.assertEqual(stacks.keep_budget([row("A.ARW", None)]), 5)
+
+
 class Panorama(unittest.TestCase):
     @staticmethod
     def sweep(step, n=5, w=256, h=170):

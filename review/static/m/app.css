@@ -118,12 +118,19 @@ button{font:inherit;color:inherit}
 .sw-n svg{width:11px;height:11px}
 .sw-bd{position:absolute;left:3px;bottom:3px;font:600 9.5px/1 var(--body);padding:3px 5px;border-radius:999px;background:rgba(0,0,0,.62);color:var(--hint)}
 .sw-t b{position:absolute;inset:0;display:none;place-items:center;color:#fff}
-.sw-t b svg{width:28px;height:28px;padding:5px;border-radius:50%;background:var(--reject)}
-.sw-t.on{outline:2px solid var(--reject);outline-offset:-2px}
-.sw-t.on img{opacity:.35}
+.sw-t b svg{width:28px;height:28px;padding:5px;border-radius:50%;background:var(--keep);color:#05140C}
+.sw-t.on{outline:3px solid var(--keep);outline-offset:-3px}
 .sw-t.on b{display:grid}
 .sw-t.done{cursor:default}
 .sw-t.done img{opacity:.3}
+.sw-t.kept b{display:grid;opacity:.6}
+.budget{display:flex;align-items:center;gap:10px;padding:0 14px 8px;font-size:13px;font-weight:600;flex:none}
+.budget-bar{flex:1;height:4px;background:var(--line);border-radius:2px;overflow:hidden}
+.budget-bar i{display:block;height:100%;background:var(--keep);transition:width .2s}
+.budget.over span{color:var(--hint)}
+.budget.over .budget-bar i{background:var(--hint)}
+.sh-q{font-weight:700;font-size:16px;margin:0}
+.sh-row{display:flex;gap:8px;margin-top:6px}
 .peek{position:absolute;inset:0;z-index:5;display:grid;align-content:center;gap:8px;background:rgba(0,0,0,.9);padding:12px;pointer-events:none}
 .peek img{width:100%;max-height:80vh;object-fit:contain;border-radius:8px;display:block}
 .peek span{text-align:center;font:500 11px/1 var(--mono);color:var(--muted)}
