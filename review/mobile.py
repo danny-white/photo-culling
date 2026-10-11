@@ -685,6 +685,53 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         resp.headers["X-Crop-Box"] = f"{left},{top_},{w},{h} of {W}x{H}"
         return resp
 
+    @bp.route("/api/gps-health")
+    def api_gps_health():
+        """For the Pi status page: does the newest Sony shoot carry GPS? The camera records
+        location only while its phone link is up, and the link drops without a word -- it was
+        off from Aug 2025 to Oct 2026 before anyone noticed. ok: half or more of the newest
+        shoot's frames have GPS; warn: some; bad: none; pending: not geotagged yet."""
+        con = db_ro()
+        try:
+            rows = con.execute(
+                "SELECT path, capture_ts, gps_lat IS NOT NULL AS has_gps, gps_checked FROM images "
+                "WHERE status='ok' AND camera LIKE 'SONY%' AND capture_ts IS NOT NULL").fetchall()
+        finally:
+            con.close()
+        days: dict[str, dict] = {}
+        last_gps = None
+        for r in rows:
+            d = day_of(r["path"])
+            if not d:
+                continue
+            x = days.setdefault(d, {"day": d, "date": day_date(d), "frames": 0, "with_gps": 0, "unchecked": 0, "last_ts": 0})
+            x["frames"] += 1
+            x["with_gps"] += r["has_gps"]
+            x["unchecked"] += r["gps_checked"] is None
+            x["last_ts"] = max(x["last_ts"], r["capture_ts"])
+            if r["has_gps"] and (last_gps is None or r["capture_ts"] > last_gps):
+                last_gps = r["capture_ts"]
+        recent = sorted(days.values(), key=lambda x: x["last_ts"], reverse=True)[:5]
+        if not recent:
+            return jsonify({"status": "pending", "recent": [], "reason": "no Sony frames yet"})
+        latest = recent[0]
+        if latest["unchecked"] == latest["frames"]:
+            status = "pending"
+        elif latest["with_gps"] * 2 >= latest["frames"]:
+            status = "ok"
+        else:
+            status = "warn" if latest["with_gps"] else "bad"
+        without_since = sum(1 for r in rows if last_gps is None or r["capture_ts"] > last_gps)
+        return jsonify({
+            "status": status,
+            "latest": latest,
+            "recent": recent,
+            "last_gps": datetime.fromtimestamp(last_gps).date().isoformat() if last_gps else None,
+            "without_since": without_since,
+            "advice": "Re-pair the camera's location link: Creators' App (or Imaging Edge Mobile) > "
+                      "Location Information Link, with the phone's Bluetooth on.",
+        })
+
     @bp.route("/api/img/<int:rowid>")
     def api_img(rowid):
         edge = IMG_EDGE.get(request.args.get("s", "view"), IMG_EDGE["view"])

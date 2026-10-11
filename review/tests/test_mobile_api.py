@@ -165,6 +165,13 @@ class MobileApi(unittest.TestCase):
         self.assertLess(second, first / 2, f"second crop should reuse the decode ({first:.2f}s, {second:.2f}s)")
         self.assertEqual(self.client.get(f"/m/api/crop/{fid}").status_code, 400)
 
+    def test_gps_health(self):
+        g = self.client.get("/m/api/gps-health").get_json()
+        self.assertIn(g["status"], ("ok", "warn", "bad", "pending"))
+        self.assertLessEqual(len(g["recent"]), 5)
+        self.assertEqual(g["recent"], sorted(g["recent"], key=lambda d: d["last_ts"], reverse=True))
+        self.assertIn("Location Information Link", g["advice"])
+
     def test_unknown_day(self):
         self.assertEqual(self.client.get("/m/api/day/2026/nope").status_code, 404)
 
