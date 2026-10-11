@@ -1,0 +1,99 @@
+"""Integration tests for the /m routes, against the real trial.db (read-only) with a throwaway
+annotations.db, cache and state dir. Skipped when trial.db is missing. Run from the repo root:
+    ./venv/bin/python -m unittest discover -s review/tests -t .
+"""
+import io
+import sqlite3
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "review"))
+sys.path.insert(0, str(ROOT))
+TRIAL_DB = ROOT / "trial_out" / "trial.db"
+DAY = "2026/2026-10-01"
+
+
+@unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
+class MobileApi(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from flask import Flask
+        import mobile
+        import photo_cull as pc
+        cls.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(cls.tmp.name)
+
+        def db_ro():
+            con = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            return con
+
+        def anno():
+            con = sqlite3.connect(tmp / "annotations.db")
+            con.row_factory = sqlite3.Row
+            return con
+
+        (tmp / "static").mkdir()
+        (tmp / "static" / "index.html").write_text("<!doctype html><title>Culling Bay</title>")
+        app = Flask(__name__)
+        app.register_blueprint(mobile.make_blueprint(
+            db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state"))
+        cls.client = app.test_client()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_app_shell(self):
+        r = self.client.get("/m/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"Culling Bay", r.data)
+        r.close()
+
+    def test_days_newest_first(self):
+        days = self.client.get("/m/api/days").get_json()["days"]
+        self.assertGreater(len(days), 300)
+        dated = [d["date"] for d in days if d["date"]]
+        self.assertEqual(dated, sorted(dated, reverse=True))
+        d = next(d for d in days if d["day"] == DAY)
+        self.assertEqual(d["frames"], 32)
+        self.assertEqual(d["decided"], 0)
+        self.assertEqual(len(d["thumbs"]), 3)
+
+    def test_day_stacks(self):
+        body = self.client.get(f"/m/api/day/{DAY}").get_json()
+        st = body["stacks"]
+        self.assertEqual(sum(len(s["frames"]) for s in st), 32)
+        by_file = {f["file"]: s for s in st for f in s["frames"]}
+        bracket = by_file["DSC05040.ARW"]
+        self.assertEqual(bracket["kind"], "bracket")
+        lead = next(f for f in bracket["frames"] if f["id"] == bracket["lead"])
+        self.assertEqual(lead["file"], "DSC05040.ARW")          # the normal exposure, not the brightest
+        burst = by_file["DSC05036.ARW"]
+        self.assertEqual(burst["kind"], "burst")
+        self.assertEqual(len(burst["frames"]), 4)
+        lead = next(f for f in burst["frames"] if f["id"] == burst["lead"])
+        self.assertEqual(lead["file"], "DSC05039.ARW")          # sharpness 445, the burst's highest
+        self.assertIsNone(body["progress"])
+        self.assertTrue(all(f["decision"] is None for s in st for f in s["frames"]))
+        self.assertNotIn("path", st[0]["frames"][0])            # library paths stay on the server
+
+    def test_unknown_day(self):
+        self.assertEqual(self.client.get("/m/api/day/2026/nope").status_code, 404)
+
+    def test_image(self):
+        from PIL import Image
+        body = self.client.get(f"/m/api/day/{DAY}").get_json()
+        rowid = body["stacks"][0]["lead"]
+        r = self.client.get(f"/m/api/img/{rowid}?s=thumb")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "image/jpeg")
+        self.assertEqual(max(Image.open(io.BytesIO(r.data)).size), 320)
+        r.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

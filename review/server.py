@@ -42,6 +42,7 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 # Reuse the culler's image loading / thresholds.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import photo_cull as pc  # noqa: E402
+import mobile  # noqa: E402  -- Culling Bay Mobile, the phone routes under /m
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -831,6 +832,9 @@ def main():
     CFG["folders"] = a.folders
     CFG["embed_base_url"] = a.embed_base_url
     anno().close()  # ensure the annotations table exists
+    app.register_blueprint(mobile.make_blueprint(
+        db_ro=db_ro, anno=anno, pc=pc, cache_dir=CACHE, static_dir=STATIC / "m",
+        state_dir=Path(CFG["db"]).parent / "mobile"))
     if a.server_pidfile:
         a.server_pidfile.write_text(str(os.getpid()))
         print(f"Review server PID {os.getpid()} -> {a.server_pidfile}")
