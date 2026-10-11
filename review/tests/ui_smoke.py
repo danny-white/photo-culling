@@ -34,7 +34,8 @@ def start_app(tmp: Path):
     (tmp / "inbox" / "applied").mkdir(parents=True, exist_ok=True)
     # what the plugin would report from a Lightroom sync: two stacks you already picked by hand
     (tmp / "inbox" / "applied" / "19990101-000000-catalog.tsv").write_text(
-        "#cull-catalog v1\n2026-10-01\tDSC05062.ARW\t1\t0\tyou\t\n2026-10-01\tDSC05066.ARW\t1\t3\tyou\tyou\n")
+        "#cull-catalog v1\n2026-10-01\tDSC05062.ARW\t1\t0\tyou\t\n2026-10-01\tDSC05066.ARW\t1\t3\tyou\tyou\n"
+        "2026-10-01\tDSC05063.ARW\t0\t4\t\tyou\n")   # ...and one you only rated
     from flask import Flask
     from werkzeug.serving import make_server
     import mobile
@@ -151,9 +152,24 @@ def main():
         wd = WD()
         app = f"http://127.0.0.1:{APP_PORT}/m/"
         wd.go(app)
-        wd.wait("document.querySelectorAll('.day').length > 300")
-        check(True, "days list: %d days" % wd.js("return document.querySelectorAll('.day').length"))
+        wd.wait("document.querySelectorAll('.year').length > 10")
+        years = wd.js("return [...document.querySelectorAll('.year b')].map(e => e.textContent)")
+        open_days = wd.js("return document.querySelectorAll('.day').length")
+        check(years[0] == "2026" and years == sorted(years, reverse=True) and 0 < open_days < 100,
+              f"days grouped by year, newest open: {years[:4]}..., {open_days} days showing")
         shot("1-days")
+        wd.click('.yearbar [data-year="2015"]')
+        wd.wait("document.querySelector('.day[data-day^=\"2015/\"]')")
+        months = wd.js("return [...document.querySelectorAll('#days-list .sec')].map(e => e.textContent)")
+        check(any(m.startswith("June") for m in months), f"jumping to 2015 opens it by month: {months[-3:]}")
+        wd.js("const i=document.querySelector('#day-search'); i.value='2026-10-01'; i.dispatchEvent(new Event('input', {bubbles:true}));")
+        found = wd.js("return [...document.querySelectorAll('.day')].map(e => e.dataset.day)")
+        check(found == [DAY], f"search finds the day: {found}")
+        wd.click('[data-act="day-view"][data-v="place"]')
+        wd.wait("document.querySelector('#days-list .note')")
+        check("without a location" in wd.text("#days-list"), "place view: " + wd.text("#days-list .note")[:70])
+        wd.click('[data-act="day-view"][data-v="date"]')
+        wd.wait("document.querySelector('.yearbar')")
 
         wd.click(f'.day[data-day="{DAY}"]')
         wd.wait("document.querySelector('.sw-grid')")
@@ -161,14 +177,14 @@ def main():
         tiles = wd.js("return document.querySelectorAll('.sw-t').length")
         check(tiles > 5, f"sweep grid: {tiles} tiles")
         greyed = wd.js("return [...document.querySelectorAll('.sw-t.done')].map(t => t.textContent)")
-        check(greyed == ["In Lightroom", "3In Lightroom"] and "2 already culled in Lightroom" in wd.text(".note"),
+        check(greyed == ["In Lightroom", "2In Lightroom", "3In Lightroom"] and "3 already flagged or rated in Lightroom" in wd.text(".note"),
               f"sweep greys out stacks culled in Lightroom: {greyed}")
         wd.click('.sw-t[data-i="1"]'); wd.click('.sw-t[data-i="7"]')
         check(wd.text('[data-act="sweep-done"]') == "Reject 2, start pass 2", "sweep footer: " + wd.text('[data-act="sweep-done"]'))
         shot("2-sweep")
         wd.click('[data-act="sweep-done"]')
         wd.wait("document.querySelector('.card')")
-        check("Pass 2 · 4 of 11" in wd.text(".top .t"), "pass 2 counts the Lightroom stacks as done: " + wd.text(".top .t"))
+        check("Pass 2 · 5 of 11" in wd.text(".top .t"), "pass 2 counts the Lightroom stacks as done: " + wd.text(".top .t"))
         wd.click('#toast [data-act="undo"]')
         wd.wait("document.querySelector('.sw-grid')")
         check(wd.js("return document.querySelectorAll('.sw-t.on').length") == 2, "undo returns to the sweep with both marks")
@@ -268,15 +284,14 @@ def main():
             "#cull-receipt v1\n2026-10-01\tDSC05049.ARW\tyour_flag_kept\tyou picked it\n")
         (tmp / "inbox" / "applied" / "20000101-000001-catalog.tsv").write_text(
             "#cull-catalog v1\n2026-10-01\tDSC05049.ARW\t1\t0\tyou\t\n")
-        wd.go(app + f"#/day/{DAY}")
         wd.go(app + "#/")
-        wd.wait("document.querySelectorAll('.day').length > 300")
+        wd.wait("document.querySelector('.day[data-day=\"%s\"]')" % DAY)
         wd.click(f'.day[data-day="{DAY}"]')
         wd.wait("document.querySelector('[data-act=\"send\"]')")
         secs = wd.js("return [...document.querySelectorAll('.sec')].map(e => e.textContent)")
         won = wd.js("return [...document.querySelectorAll('.sm-th.won')].map(e => e.textContent)")
         check("Your Lightroom flag won" in secs and won == ["Picked in LR"], f"conflict shown apart: {secs} {won}")
-        check("2 stacks were already culled in Lightroom and skipped" in wd.text(".scroll"), "summary counts the skipped stacks")
+        check("3 stacks were already flagged or rated in Lightroom and skipped" in wd.text(".scroll"), "summary counts the skipped stacks")
         shot("7-summary-lr")
 
         # everything reached the server: reload and compare

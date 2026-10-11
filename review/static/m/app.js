@@ -104,23 +104,36 @@ function shown(s) {   // the frame a card shows: the kept one, else the lead
 }
 // A flag you set in Lightroom by hand (reported back by the plugin's catalog file). Flags the
 // plugin set from the phone come back as by 'phone' and are already in S.dec.
-const lrMark = f => (f.lr && f.lr.by === 'you' && f.lr.pick ? (f.lr.pick === 1 ? 'pick' : 'reject') : null);
-const LR_WORD = { pick: 'Picked in Lightroom', reject: 'Rejected in Lightroom' };
+// A reject flag rejects; a pick flag, or a star rating without a reject, means you have already
+// been through the photo there.
+function lrMark(f) {
+  if (!f.lr) return null;
+  if (f.lr.by === 'you' && f.lr.pick === -1) return 'reject';
+  if (f.lr.by === 'you' && f.lr.pick === 1) return 'pick';
+  if (f.lr.stars_by === 'you' && f.lr.rating > 0) return 'rated';
+  return null;
+}
+const lrWord = f => ({ pick: 'Picked in Lightroom', reject: 'Rejected in Lightroom', rated: '★' + (f.lr && f.lr.rating) + ' in Lightroom' })[lrMark(f)];
+const lrShort = f => ({ pick: 'Picked in LR', reject: 'Rejected in LR', rated: '★' + (f.lr && f.lr.rating) + ' in LR' })[lrMark(f)] || 'Kept as you set it';
 function status(s) {
   const ds = s.frames.map(f => S.dec[f.id]);
   const kept = ds.find(isPick);
   if (kept) return { done: true, v: ds.some(d => isPick(d) && d.stars === 5) ? 'hero' : 'keep', src: 'phone' };
   if (ds.every(d => d && d.flag === 'reject')) return { done: true, v: 'reject', src: 'phone' };
   const lr = s.frames.map(lrMark);
-  if (lr.includes('pick')) return { done: true, v: 'keep', src: 'lr' };
+  if (lr.includes('pick') || lr.includes('rated')) return { done: true, v: 'keep', src: 'lr', frame: s.frames.find(f => lrMark(f) === 'pick') || s.frames.find(f => lrMark(f) === 'rated') };
   if (lr.every(m => m === 'reject')) return { done: true, v: 'reject', src: 'lr' };
   return { done: false };
 }
 // How many of these changes disagree with a flag you set in Lightroom (that flag will win).
-function lrClashes(changes) {
-  return changes.filter(c => { const m = lrMark(frameById(c.id)); return m && c.flag !== 'none' && m !== c.flag; }).length;
+function lrClashes(changes) {   // only flags clash: Lightroom keeps a flag you set by hand
+  return changes.filter(c => { const m = lrMark(frameById(c.id)); return (m === 'pick' || m === 'reject') && c.flag !== 'none' && m !== c.flag; }).length;
 }
-const clashNote = n => (n ? ' · Lightroom keeps your own flag on ' + (n > 1 ? n + ' of them' : 'it') : '');
+function lrRatedRejects(changes) {   // a reject lands on a rated photo; the stars stay
+  return changes.filter(c => c.flag === 'reject' && lrMark(frameById(c.id)) === 'rated').length;
+}
+const clashNote = (n, rated) => (n ? ' · Lightroom keeps your own flag on ' + (n > 1 ? n + ' of them' : 'it') : '') +
+  (rated ? ' · ' + (rated > 1 ? rated + ' had' : 'it had') + ' your stars in Lightroom' : '');
 const firstOpen = (from = 0) => {
   const n = S.stacks.length;
   for (let k = 0; k < n; k++) { const i = (from + k) % n; if (!status(S.stacks[i]).done) return i; }
@@ -165,7 +178,7 @@ function commit(label, changes) {
   act(label, changes);
   S.picker = null;
   closeSheet();
-  toast(label + clashNote(lrClashes(changes)), true);
+  toast(label + clashNote(lrClashes(changes), lrRatedRejects(changes)), true);
   advance();
 }
 function advance() {
@@ -228,7 +241,7 @@ function openSheet() {
   if (s.kind === 'pano') lines.push('The frames slide one way, like a panorama, so Keep all is suggested.');
   const html = '<div class="sheet" role="dialog" aria-label="Photo details"><div class="sh-grab"></div>' +
     '<p class="sh-id">' + esc(files) + '</p>' +
-    (f.lens ? '<p class="sh-muted">' + esc(f.lens) + '</p>' : '') +
+    (f.lens || f.place ? '<p class="sh-muted">' + esc([f.lens, f.place ? 'near ' + f.place : ''].filter(Boolean).join(' · ')) + '</p>' : '') +
     lines.map(l => '<p class="sh-why">' + esc(l) + '</p>').join('') +
     (d && d.note ? '<p class="sh-why">Lightroom note: ' + esc(d.note) + '</p>' : '') +
     (f.caption ? '<p class="sh-cap">“' + esc(f.caption) + '”</p>' : '') +
@@ -247,30 +260,86 @@ const top = (left, title, sub, right) =>
   '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>';
 const backBtn = (act, label) => '<button class="tbtn" data-act="' + act + '">' + IC.back + '<span>' + label + '</span></button>';
 
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} };
+const recall = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (_) { return d; } };
+S.dayView = recall('cbm-dayview', 'date');
+S.daySearch = '';
+S.yearsOpen = null;   // set of open years; the newest starts open
+const yearOf = d => d.day.slice(0, 4);
+const town = p => (p ? p.split(', ').slice(0, 2).join(', ') : '');
+const regionOf = p => { const parts = p.split(', '); return parts.length > 1 ? parts.slice(1).join(', ') : p; };
+const lrCulled = d => !d.decided && !d.finished && d.stacks && d.lr_done >= d.stacks;
+
+function dayRow(d) {
+  const pct = d.frames ? Math.round(d.decided / d.frames * 100) : 0;
+  const tag = d.conflicts ? '<span class="tag warn">' + d.conflicts + ' conflict' + (d.conflicts > 1 ? 's' : '') + '</span>'
+    : d.landed ? '<span class="tag quiet">Synced</span>'
+    : d.sent_at ? '<span class="tag quiet">Sent</span>'
+    : d.finished ? '<span class="tag quiet">Done</span>'
+    : lrCulled(d) ? '<span class="tag quiet">In Lightroom</span>'
+    : d.decided ? '<span class="tag">' + pct + '%</span>' : '';
+  const meta = [d.frames + ' frames', d.stacks + ' stacks'];
+  if (d.lr_done && d.lr_done < d.stacks) meta.push(d.lr_done + ' done in Lightroom');
+  if (!d.date) meta.push(d.day);
+  return '<button class="day" data-act="open-day" data-day="' + esc(d.day) + '"><span class="mos">' +
+    d.thumbs.map(id => '<img src="' + img(id, 'thumb') + '" alt="" loading="lazy">').join('') + '</span>' +
+    '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + esc(meta.join(' · ')) + '</span>' +
+    (d.place ? '<span class="place">' + esc(town(d.place)) + '</span>' : '') +
+    (d.decided ? '<span class="day-bar"><i style="width:' + pct + '%"></i></span>' : '') + '</span>' + tag + '</button>';
+}
+
+function daysByDate(list, searching) {
+  const years = [];
+  for (const d of list) { const y = yearOf(d); if (!years.includes(y)) years.push(y); }
+  if (!S.yearsOpen) S.yearsOpen = new Set(recall('cbm-years-open', years.slice(0, 1)));
+  return years.map(y => {
+    const days = list.filter(d => yearOf(d) === y), open = searching || S.yearsOpen.has(y);
+    const frames = days.reduce((n, d) => n + d.frames, 0), done = days.filter(d => d.finished || lrCulled(d)).length;
+    const head = '<button class="year" data-act="toggle-year" data-year="' + y + '" id="year-' + y + '" aria-expanded="' + open + '">' +
+      '<b>' + y + '</b><span>' + days.length + ' day' + (days.length > 1 ? 's' : '') + ' · ' + frames.toLocaleString() + ' frames' + (done ? ' · ' + done + ' done' : '') + '</span><i>' + (open ? '−' : '+') + '</i></button>';
+    if (!open) return head;
+    const months = [];
+    for (const d of days) { const m = d.date ? MONTHS[+d.date.slice(5, 7) - 1] : 'Other folders'; if (!months.includes(m)) months.push(m); }
+    return head + months.map(m => {
+      const md = days.filter(d => (d.date ? MONTHS[+d.date.slice(5, 7) - 1] : 'Other folders') === m);
+      return '<p class="sec">' + m + ' · ' + md.length + '</p>' + md.map(dayRow).join('');
+    }).join('');
+  }).join('');
+}
+
+function daysByPlace(list) {
+  const placed = list.filter(d => d.place), regions = [];
+  for (const d of placed) { const r = regionOf(d.place); if (!regions.includes(r)) regions.push(r); }
+  const unplaced = list.length - placed.length;
+  return regions.map(r => {
+    const rd = placed.filter(d => regionOf(d.place) === r);
+    return '<p class="sec">' + esc(r) + ' · ' + rd.length + '</p>' + rd.map(dayRow).join('');
+  }).join('') + '<p class="note">' + (placed.length ? '' : 'No locations yet. ') + unplaced + ' day' + (unplaced === 1 ? '' : 's') +
+    ' without a location: GPS comes only from the Sony when it is paired with your phone, and from iPhone shots.</p>';
+}
+
+function dayListHTML() {
+  const q = S.daySearch.trim().toLowerCase();
+  const list = !q ? S.days : S.days.filter(d => [dayTitle(d), d.folder, d.day, (d.places || []).join(' ')].join(' ').toLowerCase().includes(q));
+  const going = list.filter(d => d.decided && !d.finished);
+  const rest = list.filter(d => !(d.decided && !d.finished));
+  if (!list.length) return '<p class="note">No days match “' + esc(S.daySearch) + '”.</p>';
+  return (going.length ? '<p class="sec">In progress</p>' + going.map(dayRow).join('') : '') +
+    (S.dayView === 'place' ? daysByPlace(rest) : daysByDate(rest, !!q));
+}
+
 function vDays() {
   if (!S.days) return top('<span class="sp"></span>', 'Culling Bay') + '<div class="empty-state">Loading days…</div>';
-  const row = d => {
-    const pct = d.frames ? Math.round(d.decided / d.frames * 100) : 0;
-    const tag = d.conflicts ? '<span class="tag warn">' + d.conflicts + ' conflict' + (d.conflicts > 1 ? 's' : '') + '</span>'
-      : d.landed ? '<span class="tag quiet">Synced</span>'
-      : d.sent_at ? '<span class="tag quiet">Sent</span>'
-      : d.finished ? '<span class="tag quiet">Done</span>'
-      : d.decided ? '<span class="tag">' + pct + '%</span>' : '';
-    return '<button class="day" data-act="open-day" data-day="' + esc(d.day) + '"><span class="mos">' +
-      d.thumbs.map(id => '<img src="' + img(id, 'thumb') + '" alt="" loading="lazy">').join('') + '</span>' +
-      '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + d.frames + ' frames · ' + d.stacks + ' stacks' + (d.date ? '' : ' · ' + esc(d.day)) +
-      (d.lr_done && d.lr_done < d.stacks ? ' · ' + d.lr_done + ' culled in Lightroom' : '') + '</span>' +
-      (d.decided ? '<span class="day-bar"><i style="width:' + pct + '%"></i></span>' : '') + '</span>' + tag + '</button>';
-  };
-  const inLr = d => !d.decided && !d.finished && d.stacks && d.lr_done >= d.stacks;
-  const going = S.days.filter(d => d.decided && !d.finished);
-  const fresh = S.days.filter(d => !d.decided && !d.finished && !inLr(d));
-  const done = S.days.filter(d => d.finished);
-  const lrDays = S.days.filter(inLr);
-  const sec = (title, list) => list.length ? '<p class="sec">' + title + '</p>' + list.map(row).join('') : '';
+  const years = [];
+  for (const d of S.days) { const y = yearOf(d); if (!years.includes(y)) years.push(y); }
   return '<div class="head"><h1>Days</h1><span>mycloud · Pictures · ' + S.days.length + ' days</span></div>' +
     '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>' +
-    '<div class="scroll">' + sec('In progress', going) + sec('Not started', fresh) + sec('Finished', done) + sec('Culled in Lightroom', lrDays) + '</div>';
+    '<div class="dtools"><input class="search" id="day-search" type="search" placeholder="Search dates, folders, places" value="' + esc(S.daySearch) + '" autocomplete="off">' +
+    '<div class="seg" role="tablist"><button data-act="day-view" data-v="date" aria-selected="' + (S.dayView !== 'place') + '">Date</button>' +
+    '<button data-act="day-view" data-v="place" aria-selected="' + (S.dayView === 'place') + '">Place</button></div></div>' +
+    (S.dayView !== 'place' ? '<div class="yearbar">' + years.map(y => '<button data-act="jump-year" data-year="' + y + '">' + y + '</button>').join('') + '</div>' : '') +
+    '<div class="scroll" id="days-list">' + dayListHTML() + '</div>';
 }
 
 function vLoading(msg) { return top(backBtn('days', 'Days'), 'Culling Bay') + '<div class="empty-state">' + esc(msg) + '</div>'; }
@@ -289,7 +358,7 @@ function vSweep() {
   };
   return top(backBtn('days', 'Days'), dayTitle(S.day), 'Pass 1 · tap the misses') +
     '<div class="scroll"><div class="sw-grid">' + S.stacks.map(tile).join('') + '</div>' +
-    '<p class="note">' + S.stacks.length + ' stacks in shot order, nothing pre-selected' + (lrDone() ? '; ' + lrDone() + ' already culled in Lightroom are greyed out' : '') +
+    '<p class="note">' + S.stacks.length + ' stacks in shot order, nothing pre-selected' + (lrDone() ? '; ' + lrDone() + ' already flagged or rated in Lightroom are greyed out' : '') +
     '. A burst tile rejects the whole burst. Press and hold a tile to see it large.</p></div>' +
     '<div class="foot"><button class="pb2 pri" data-act="sweep-done">' + sweepLabel() + '</button></div>';
 }
@@ -297,9 +366,9 @@ function vSweep() {
 function vCull() {
   const s = S.stacks[S.cursor], f = shown(s), st = status(s), n = S.stacks.length;
   const burst = s.frames.length > 1, sugg = s.kind === 'pano' || s.kind === 'bracket';
-  const pill = !st.done ? '' : st.src === 'lr' ? '<span class="pill p-lr p-' + st.v + '">' + (st.v === 'reject' ? LR_WORD.reject : LR_WORD.pick) + '</span>'
+  const pill = !st.done ? '' : st.src === 'lr' ? '<span class="pill p-lr p-' + st.v + '">' + esc(st.v === 'reject' ? 'Rejected in Lightroom' : lrWord(st.frame)) + '</span>'
     : '<span class="pill p-' + st.v + '">' + ({ keep: 'Kept', hero: 'Hero', reject: 'Rejected' })[st.v] + '</span>';
-  const lrHere = st.src !== 'lr' && lrMark(f) ? '<span class="bd bd-lr">' + LR_WORD[lrMark(f)] + '</span>' : '';
+  const lrHere = st.src !== 'lr' && lrMark(f) ? '<span class="bd bd-lr">' + esc(lrWord(f)) + '</span>' : '';
   const chip = burst ? '<button class="chip" data-act="picker" aria-label="Open burst of ' + s.frames.length + '">' + IC.stack + '<span>' + s.frames.length + '</span></button>'
     : f.partners.length ? '<span class="chip static">RAW + ' + esc(f.partners.map(p => p.split('.').pop().toUpperCase()).join(' + ')) + '</span>' : '';
   const badges = (s.kind === 'pano' ? '<span class="bd bd-dot">Looks like a panorama</span>'
@@ -331,7 +400,7 @@ function vStrip() {
   return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, 'Tick the keepers') +
     '<div class="pk-main" id="pk-main"><div class="pk-frame"><img src="' + img(f.id, 'view') + '" alt="' + esc(f.file) + '" draggable="false">' +
       '<div class="pk-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') +
-        (lrMark(f) ? '<span class="bd bd-lr">' + LR_WORD[lrMark(f)] + '</span>' : '') + '</div>' +
+        (lrMark(f) ? '<span class="bd bd-lr">' + esc(lrWord(f)) + '</span>' : '') + '</div>' +
       '<button class="pk-tick' + (on ? ' on' : '') + '" data-act="tick" aria-pressed="' + on + '" aria-label="Keep ' + esc(f.file) + '">' + IC.check + '</button>' +
       '<span class="pk-id">' + esc(stem(f.file)) + ' · ' + (pk.view + 1) + '/' + fr.length + '</span></div></div>' +
     '<div class="pk-strip">' + fr.map((x, i) => '<button class="pk-th' + (i === pk.view ? ' cur' : '') + '" data-act="view" data-i="' + i + '" aria-label="Show ' + esc(x.file) + '">' +
@@ -433,7 +502,7 @@ function vSummary() {
   const rejects = all.filter(f => S.dec[f.id] && S.dec[f.id].flag === 'reject' && S.dec[f.id].state !== 'conflict');
   const won = all.filter(f => S.dec[f.id] && S.dec[f.id].state === 'conflict');
   const wonGrid = '<div class="sm-grid">' + won.map(f => '<div class="sm-th won" title="' + esc(f.file) + '"><img src="' + img(f.id, 'thumb') + '" alt="" loading="lazy">' +
-    '<span class="sm-lab">' + esc(lrMark(f) ? (lrMark(f) === 'pick' ? 'Picked in LR' : 'Rejected in LR') : 'Kept as you set it') + '</span></div>').join('') + '</div>';
+    '<span class="sm-lab">' + esc(lrShort(f)) + '</span></div>').join('') + '</div>';
   const skipped = lrDone();
   const fromBurst = rejects.filter(f => S.dec[f.id].note), outright = rejects.filter(f => !S.dec[f.id].note);
   const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="rescue" data-id="' + f.id + '" aria-label="Rescue ' + esc(f.file) + '">' +
@@ -446,7 +515,7 @@ function vSummary() {
   if (landed) lr.push(landed + ' in Lightroom');
   if (queued) lr.push(queued + ' waiting for the next Sync AI Cull Data');
   if (by('missing')) lr.push(by('missing') + ' not found in the last sync, will go again');
-  if (skipped) lr.push(skipped + ' stack' + (skipped > 1 ? 's were' : ' was') + ' already culled in Lightroom and skipped');
+  if (skipped) lr.push(skipped + ' stack' + (skipped > 1 ? 's were' : ' was') + ' already flagged or rated in Lightroom and skipped');
   const sendLabel = unsent ? 'Send ' + unsent + ' to Lightroom' : queued ? 'Waiting for Lightroom' : landed ? 'In Lightroom' : 'Send to Lightroom';
   return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far') +
     '<div class="scroll"><div class="counts"><div><b>' + keep + '</b><span>Kept</span></div><div><b>' + hero + '</b><span>Hero</span></div>' +
@@ -684,6 +753,21 @@ document.addEventListener('click', e => {
   const a = b.dataset.act, s = S.stacks[S.cursor];
   switch (a) {
     case 'open-day': return openDay(b.dataset.day);
+    case 'toggle-year': {
+      const y = b.dataset.year;
+      S.yearsOpen.has(y) ? S.yearsOpen.delete(y) : S.yearsOpen.add(y);
+      store('cbm-years-open', [...S.yearsOpen]);
+      $('#days-list').innerHTML = dayListHTML();
+      return;
+    }
+    case 'jump-year': {
+      const y = b.dataset.year;
+      S.yearsOpen.add(y); store('cbm-years-open', [...S.yearsOpen]);
+      $('#days-list').innerHTML = dayListHTML();
+      const h = $('#year-' + y); if (h) h.scrollIntoView({ block: 'start' });
+      return;
+    }
+    case 'day-view': S.dayView = b.dataset.v; store('cbm-dayview', S.dayView); return draw();
     case 'days': return showDays();
     case 'keep': case 'reject': case 'hero':
       if (S.screen === 'focus') { S.focus = null; S.screen = 'cull'; return decide(a); }
@@ -715,11 +799,16 @@ document.addEventListener('click', e => {
       const f = frameById(+b.dataset.id);
       const change = [{ id: f.id, flag: 'pick', note: '', via: 'rescue' }];
       act('Rescued ' + stem(f.file), change, { screen: 'summary' });
-      toast('Rescued ' + stem(f.file) + clashNote(lrClashes(change)), true);
+      toast('Rescued ' + stem(f.file) + clashNote(lrClashes(change), 0), true);
       return draw();
     }
     case 'send': return sendDay(b);
   }
+});
+document.addEventListener('input', e => {
+  if (e.target.id !== 'day-search') return;
+  S.daySearch = e.target.value;
+  $('#days-list').innerHTML = dayListHTML();
 });
 document.addEventListener('keydown', e => {
   if (e.target.matches('input, textarea')) return;

@@ -43,6 +43,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -223,7 +224,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
                       ("keep_hint", "INTEGER"), ("user_rating", "INTEGER"), ("user_label", "TEXT"),
                       ("activity", "TEXT"), ("indoor_outdoor", "TEXT"), ("time_of_day", "TEXT"),
                       ("animals", "TEXT"), ("content_type", "TEXT"), ("visible_text", "TEXT"),
-                      ("monochrome", "INTEGER")):
+                      ("monochrome", "INTEGER"),
+                      ("gps_lat", "REAL"), ("gps_lon", "REAL"), ("gps_checked", "INTEGER"),
+                      ("place", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
@@ -1690,6 +1693,117 @@ def cmd_embed(args):
     print(f"\nDone: {done} ok / {skipped} skipped (no text) / {errs} error in {_fmt_eta(time.time() - t0)}.")
 
 
+# ----------------------------------------------------------------------------
+# Geotags: GPS from EXIF, and an offline place name from GeoNames
+# ----------------------------------------------------------------------------
+GEO_DIR_DEFAULT = "trial_out/geo"   # cities1000.txt, admin1CodesASCII.txt, countryInfo.txt
+GEO_URL = "https://download.geonames.org/export/dump/"   # free, CC BY 4.0
+
+
+def read_gps(paths: "list[str]") -> "dict[str, tuple | None]":
+    """{path: (lat, lon), or None when the file has no GPS}. exiftool reads every format in the
+    library (CR3 and HEIC included) and signs the coordinates. Four exiftool processes run at once
+    on 500 files each: over the NAS each file costs about 0.1 s of waiting, not CPU."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run(batch):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("\n".join(batch) + "\n")
+            argfile = fh.name
+        try:
+            return subprocess.run(["exiftool", "-n", "-T", "-fast2", "-FilePath", "-Composite:GPSLatitude",
+                                   "-Composite:GPSLongitude", "-@", argfile],
+                                  capture_output=True, text=True, timeout=900).stdout
+        finally:
+            os.unlink(argfile)
+
+    out = {}
+    with ThreadPoolExecutor(4) as pool:
+        outputs = list(pool.map(run, [paths[i:i + 500] for i in range(0, len(paths), 500)]))
+    for stdout in outputs:
+        for line in stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            try:
+                lat, lon = float(parts[1]), float(parts[2])
+            except ValueError:
+                out[parts[0]] = None
+                continue
+            out[parts[0]] = None if (lat == 0 and lon == 0) else (lat, lon)
+    return out
+
+
+class Places:
+    """Nearest GeoNames town (population 1000+) to a point, offline: 'Lanai City, Hawaii, United
+    States'. A town, not an address -- out in the wilds it names the nearest one."""
+
+    def __init__(self, geo_dir: Path):
+        from scipy.spatial import cKDTree
+        geo_dir = Path(geo_dir)
+        if not (geo_dir / "cities1000.txt").exists():
+            sys.exit(f"No GeoNames data in {geo_dir}. Download cities1000.zip (unzip it), "
+                     f"admin1CodesASCII.txt and countryInfo.txt from {GEO_URL}")
+        regions = {}
+        for line in (geo_dir / "admin1CodesASCII.txt").read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                regions[parts[0]] = parts[1]
+        countries = {}
+        for line in (geo_dir / "countryInfo.txt").read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if line and not line.startswith("#") and len(parts) > 4:
+                countries[parts[0]] = parts[4]
+        self.labels, pts = [], []
+        for line in (geo_dir / "cities1000.txt").read_text(encoding="utf-8").splitlines():
+            f = line.split("\t")
+            lat, lon = float(f[4]), float(f[5])
+            cc = f[8]
+            region = regions.get(f"{cc}.{f[10]}", "")
+            self.labels.append(", ".join(x for x in (f[1], region, countries.get(cc, cc)) if x))
+            pts.append(self._xyz(lat, lon))
+        self.tree = cKDTree(np.array(pts))
+
+    @staticmethod
+    def _xyz(lat, lon):
+        la, lo = np.radians(lat), np.radians(lon)
+        return (np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la))
+
+    def name(self, lat: float, lon: float) -> str:
+        return self.labels[int(self.tree.query(self._xyz(lat, lon))[1])]
+
+
+def cmd_geotag(args):
+    """Read GPS from each ok image not yet checked (or all with --force) into gps_lat/gps_lon, and
+    name the nearest town in `place`. Resumable; the ingest watcher runs it for each new shoot."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    conn = connect(args.db)
+    places = Places(args.geo_dir)
+    q = "SELECT path FROM images WHERE status='ok'" + ("" if args.force else " AND gps_checked IS NULL")
+    paths = [r["path"] for r in conn.execute(q)]
+    if args.folder:
+        folders = [Path(f).resolve() for f in args.folder]
+        paths = [p for p in paths if any(_is_under(Path(p), f) for f in folders)]
+    if not paths:
+        print("Nothing to geotag.")
+        return
+    t0, found = time.time(), 0
+    for i in range(0, len(paths), 2000):
+        chunk = paths[i:i + 2000]
+        gps = read_gps(chunk)
+        rows = []
+        for p in chunk:
+            g = gps.get(p)
+            rows.append((g[0] if g else None, g[1] if g else None, places.name(*g) if g else None, p))
+            found += bool(g)
+        conn.executemany("UPDATE images SET gps_lat=?, gps_lon=?, place=?, gps_checked=1 WHERE path=?", rows)
+        conn.commit()
+        print(f"[{min(i + 2000, len(paths))}/{len(paths)}] {found} with GPS so far "
+              f"({_fmt_eta(time.time() - t0)})", flush=True)
+    print(f"Done: {found} of {len(paths)} image(s) have GPS.")
+
+
 def cmd_compare(args):
     """Compare a model in `analyses` against the images baseline — and, if you've culled in LR,
     against your own ratings (the objective 'which model matches my taste' read)."""
@@ -1839,6 +1953,15 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("--force", action="store_true",
                     help="Re-embed paths already at the current EMBED_VERSION too (default: skip them).")
     em.set_defaults(func=cmd_embed)
+
+    gt = sub.add_parser("geotag", help="Read GPS from EXIF and name the nearest town (offline, "
+                        "GeoNames) into gps_lat/gps_lon/place, for Culling Bay's places.")
+    gt.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    gt.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    gt.add_argument("--geo-dir", type=Path, default=Path(GEO_DIR_DEFAULT),
+                    help=f"GeoNames files (default: {GEO_DIR_DEFAULT}; from {GEO_URL}).")
+    gt.add_argument("--force", action="store_true", help="Re-read images already checked.")
+    gt.set_defaults(func=cmd_geotag)
 
     cp = sub.add_parser("compare", help="Compare a model in `analyses` vs the images baseline (and "
                         "vs your LR ratings).")

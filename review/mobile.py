@@ -84,8 +84,8 @@ CREATE INDEX IF NOT EXISTS lr_state_day ON lr_state(day);
 """
 
 ROW_COLS = ("rowid, path, filename, capture_ts, camera, sharpness, exposure_flag, mean_lum, "
-            "blown_pct, phash")
-DETAIL_COLS = "rowid, lens, caption, blown_pct, mean_lum"
+            "blown_pct, phash, place")
+DETAIL_COLS = "rowid, lens, caption, blown_pct, mean_lum, place"
 FLAGS = ("pick", "reject", "none")
 VIAS = ("sweep", "card", "burst", "rescue")
 
@@ -387,6 +387,11 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             for d, rows in by_day.items():
                 st = stacks.build_stacks(rows)
                 stack_paths[d] = [[f["path"] for f in s["frames"]] for s in st]
+                towns = {}
+                for r in rows:
+                    if r.get("place"):
+                        towns[r["place"]] = towns.get(r["place"], 0) + 1
+                ranked = sorted(towns, key=towns.get, reverse=True)
                 lead_ids = [s["lead"] for s in st]
                 summary.append({
                     "day": d, "folder": d.rsplit("/", 1)[-1], "date": day_date(d),
@@ -394,6 +399,9 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                     "stacks": len(st),
                     "thumbs": [lead_ids[i * len(lead_ids) // 3] for i in range(min(3, len(lead_ids)))],
                     "last_ts": max((r["capture_ts"] or 0) for r in rows),
+                    "place": ranked[0] if ranked else None,         # the town most frames were near
+                    "places": ranked[:4],
+                    "gps_frames": sum(towns.values()),
                 })
             summary.sort(key=lambda x: (x["date"] or "", x["last_ts"]), reverse=True)
             cache.update(days=summary, days_at=now, stack_paths=stack_paths)
@@ -403,8 +411,13 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 "SELECT day, COUNT(*) n, SUM(state!='draft') sent, SUM(state='landed') landed, "
                 "SUM(state='conflict') conflicts FROM cull_decisions GROUP BY day")}
             days_state = {r["day"]: dict(r) for r in con.execute("SELECT * FROM cull_days")}
-            lr = {r["path"]: r["pick"] for r in con.execute(
-                "SELECT path, pick FROM lr_state WHERE flag_by='you' AND pick != 0")}
+            # what you did in Lightroom: a reject flag rejects; a pick flag or any star rating
+            # (without a reject) means you have already been through the photo
+            lr = {}
+            for r in con.execute("SELECT path, pick, rating, flag_by, stars_by FROM lr_state "
+                                 "WHERE (flag_by='you' AND pick != 0) OR (stars_by='you' AND rating > 0)"):
+                rejected = r["flag_by"] == "you" and r["pick"] == -1
+                lr[r["path"]] = -1 if rejected else 1
         finally:
             con.close()
         out = []
@@ -461,6 +474,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 f["caption"] = det.get("caption")
                 f["blown_pct"] = det.get("blown_pct")
                 f["mean_lum"] = det.get("mean_lum")
+                f["place"] = det.get("place")
         return jsonify({
             "day": day, "folder": day.rsplit("/", 1)[-1], "date": day_date(day),
             "stacks": day_stacks,

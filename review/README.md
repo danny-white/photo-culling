@@ -67,6 +67,17 @@ Tests (from the repo root):
 
 Both use the real `trial.db` read-only and a throwaway `annotations.db` and inbox.
 
+**Days** are grouped by year and month, with a search box (dates, folders, places) and a
+**Place** view that groups days by region. Places come from `photo_cull.py geotag`: GPS read
+from EXIF with exiftool, then the nearest town with 1,000+ people from GeoNames, offline. The
+data lives in `trial_out/geo` (download it as `geotag --help` says; GeoNames is CC BY 4.0). Only
+some frames have GPS: the Sony when it is paired with a phone, and iPhone shots. The ingest
+watcher geotags each new shoot.
+
+**Lightroom read-back:** each sync, the plugin reports every selected photo's flag and rating.
+A stack you picked, or rated, in Lightroom counts as done on the phone (a reject flag still
+rejects), and a phone decision that loses to your own flag shows under "Your Lightroom flag won".
+
 ## Notes
 
 - Single-theme dark by design (a darkroom tool).

@@ -63,6 +63,8 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(d["frames"], 32)
         self.assertEqual(d["decided"], 0)
         self.assertEqual(len(d["thumbs"]), 3)
+        self.assertIn("place", d)          # filled once photo_cull.py geotag has run
+        self.assertIn("lr_done", d)
 
     def test_day_stacks(self):
         body = self.client.get(f"/m/api/day/{DAY}").get_json()
