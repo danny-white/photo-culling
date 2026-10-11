@@ -43,24 +43,36 @@ Cull a day from the NAS on your phone, then send the flags to Lightroom. Open
 `http://100.82.57.4:8000/m/` over Tailscale (or the `tailscale serve` HTTPS address, which
 also lets it install to the Home Screen with an offline app shell).
 
-- **One pass of cards:** one stack per card, with the details sheet, a 1:1 focus check and the
-  burst picker to compare frames. Swipe up to keep the frame, down to reject the stack, sideways
-  to browse. Bursts open as a filmstrip (up to 6 frames) or a winner-stays duel. Keeping one frame
-  rejects the rest with the note `Burst reject · kept DSC05039`.
-- **Budget:** 15 kept stacks per hour of shooting (pauses over 10 minutes don't count; at least
-  5), counted per stack, so a whole panorama or bracket is one. A "Kept 7 of 15" bar turns amber
+- **One pass of cards:** one stack per card. Swipe up to keep, down to reject the stack,
+  sideways to browse; tap to give the photo the whole screen, double-tap for the 1:1 focus check.
+  Vertical photos use the full height. Under a landscape photo, an upright phone shows the RAW at
+  1:1 where the camera focused (Sony, Canon and Nikon AF points), with a box on the photo marking
+  the spot. Turned sideways, the photo fills the height with the buttons down the right edge.
+- **Stars:** a row of five under a single photo keeps it with that rating in one tap (5 is Hero).
+- **Stacks** follow the camera where it says: on the Sony, one shutter press is one stack, and
+  brackets are exact (`photo_cull.py shotinfo` reads the tags). Other cameras use a 2-second gap.
+- **Bursts:** a swipe up or Choose opens the burst on its first frame. The filmstrip (up to 6
+  frames) has a 1:1 toggle that shows every frame at the same spot, and a star row that rates the
+  frame you're on; bigger bursts open as a knock-out grid (tap the weak ones out, keep the rest).
+  Keeping some frames rejects the others with the note `Burst reject · kept DSC05039`.
+- **Going back** through a day, each decided stack shows it on the photo: a green, gold or red
+  outline, rejects greyed, a line such as "Kept DSC04776 · 1 other rejected ★★★", and the button
+  that made the decision pressed.
+- **Budget:** 10 kept stacks per hour of shooting (pauses over 10 minutes don't count; at least
+  5), counted per stack, so a whole panorama or bracket is one. A "Kept 7 of 10" bar turns amber
   over budget, and if you finish over, the review lists your kept stacks to trim. Stacks you kept
   in Lightroom count toward it and are skipped.
+- **Review:** tap a reject to see it large, swipe through the day's rejects, and Rescue any.
 - **Day grid:** the grid button on the cards or the review toggles to every photo of the day:
   picks outlined (Hero in gold), rejects greyed, your Lightroom stars shown, filters for All /
   Picks / Rejects / Unflagged. Each photo shows the phone's decision, or your Lightroom flag where
   the phone has none (or yours won). Tap a photo to open its card.
-- **Start over:** the restart button on the cards, or "Start this day over" in the review, clears
-  the day's phone decisions and starts it again from the first stack. It works until anything from the day has
-  reached Lightroom; rows already queued in the inbox are taken back out.
-- **Send:** queues the day into `AICullInbox/cull-decisions.tsv`. The AI Cull plugin (v2)
-  applies it on the next **Sync AI Cull Data** and leaves a receipt, which the app reads back:
-  landed, your own flag kept, or not found.
+- **Start over:** "Start this day over", at the foot of the day grid and the review, clears the
+  day's phone decisions and starts it again from the first stack. It works until anything from
+  the day has reached Lightroom; rows already queued in the inbox are taken back out.
+- **Send:** queues the day into `AICullInbox/cull-decisions.tsv`. The AI Cull plugin applies it
+  on the next **Sync AI Cull Data**, or (v2.1) offers it when Lightroom starts, and leaves a
+  receipt, which the app reads back: landed, your own flag kept, or not found.
 
 The AI's keep/review/reject verdicts never reach the phone. What it shows is measured: each
 burst leads with its sharpest frame, exposure brackets and likely panoramas suggest Keep all,
@@ -77,8 +89,14 @@ Tests (from the repo root):
 
 Both use the real `trial.db` read-only and a throwaway `annotations.db` and inbox.
 
-**Days** are grouped by year and month, with a search box (dates, folders, places) and a
-**Place** view that groups days by region. Places come from `photo_cull.py geotag`: GPS read
+**Days** are grouped by year and month, under an **On this day** lane (unculled days from this
+week in earlier years); a shoot under 48 hours old is marked Resting. **Search** finds days by
+words, places, dates ("snow 2019") or meaning, ranking three signals together
+([`search.py`](search.py)): words in captions, tags and towns; caption meaning
+(`nomic-embed-text`, `photo_cull.py embed`); and picture meaning from CLIP embeddings of the
+photos themselves (`photo_cull.py embed-images`, ViT-B/32 on the CPU, model in `models/`). A
+result opens its day with the matching stacks first, and **More like this** in a photo's
+details lists other days with similar pictures. A **Place** view groups days by region. Places come from `photo_cull.py geotag`: GPS read
 from EXIF with exiftool, then the nearest town with 1,000+ people from GeoNames, offline. The
 data lives in `trial_out/geo` (download it as `geotag --help` says; GeoNames is CC BY 4.0). Only
 some frames have GPS: the Sony when it is paired with a phone, and iPhone shots. The ingest

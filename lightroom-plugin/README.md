@@ -1,7 +1,8 @@
 # AI Cull Sync — Lightroom Classic plugin
 
 Merges `photo_cull`'s AI **keywords + color label + caption** into your LrC catalog, and (v2)
-your **phone culls** from Culling Bay Mobile: pick/reject flags, Hero stars and burst notes. It
+your **phone culls** from Culling Bay Mobile: pick/reject flags, stars and burst notes, and (v2.1)
+offers waiting phone culls when Lightroom starts. It
 uses the Lightroom SDK, so — unlike "Read Metadata from File" — it never overwrites anything you
 set by hand. Hidden plugin fields ([`AICullMetadata.lua`](AICull.lrplugin/AICullMetadata.lua))
 record exactly what the plugin itself wrote, and only that is ever replaced. Re-run it as often as
@@ -17,7 +18,7 @@ Who owns what:
 | Caption: a first line `Burst reject · kept DSC05015` | **phone** — added and removed by the plugin |
 | Caption: anything else | **you** — never touched |
 | pick / reject flag | **you**, then the phone — set only on unflagged photos, or ones the plugin flagged itself |
-| star rating | **you**, then the phone — Hero's 5 stars land only on unrated photos |
+| star rating | **you**, then the phone — the phone's stars land only on unrated photos |
 
 Matching is by **(shoot folder name, file name)**, not file name alone — Sony resets its file
 counter across shoots, so `DSC03960.ARW` can exist in more than one folder. This means the TSV
@@ -56,6 +57,17 @@ can safely cover the **whole library at once**; you don't have to select one sho
 
 A flag or rating you set by hand always wins, so cull however you like, before or after syncing.
 
+### At launch (v2.1)
+
+When Lightroom starts, the plugin looks in the inbox. If `cull-decisions.tsv` holds phone culls,
+it finds the shoot folders they name in the catalog and asks: *"88 phone culls are waiting from
+Culling Bay — From 2026-08-09 (… photos in this catalog). Apply them now?"* **Apply** runs the
+sync above on those folders' photos, with no selecting; **Not now** leaves the file for next
+time. It applies only the phone's file: the AI's `pending.tsv` can name shoots you haven't
+imported yet, and a sync files its input under `applied/` whether or not every row found a
+photo, so the AI data waits for **Sync AI Cull Data** as before. Nothing is asked when the inbox
+isn't mounted, nothing is waiting, or none of the shoots are in the open catalog.
+
 ### Caption rules
 
 | Caption now | What the plugin does |
@@ -72,12 +84,15 @@ smart collection, **Burst rejects, similar kept**, gathers rejects that carry th
 
 ### Testing
 
-The rules live in [`CullCore.lua`](AICull.lrplugin/CullCore.lua), which has no Lightroom imports.
+The rules live in [`CullCore.lua`](AICull.lrplugin/CullCore.lua), which has no Lightroom imports;
+the sync is [`Sync.lua`](AICull.lrplugin/Sync.lua), run by the menu item
+([`SyncAICull.lua`](AICull.lrplugin/SyncAICull.lua)) and the launch offer
+([`Startup.lua`](AICull.lrplugin/Startup.lua)).
 Lightroom runs Lua 5.1, and so do the tests:
 
 ```bash
 lua5.1 lightroom-plugin/tests/test_cullcore.lua   # the rules
-lua5.1 lightroom-plugin/tests/test_sync.lua       # SyncAICull.lua end to end, on a fake SDK
+lua5.1 lightroom-plugin/tests/test_sync.lua       # the menu sync and the launch offer, on a fake SDK
 ```
 
 The fake SDK can't prove what Lightroom does. [`TESTING.md`](TESTING.md) is the 15-minute

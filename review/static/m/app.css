@@ -242,6 +242,11 @@ button{font:inherit;color:inherit}
 .ko-t.out b{display:grid}
 .ko-t .dot{position:absolute;left:5px;bottom:5px;width:7px;height:7px;border-radius:50%;background:var(--hint)}
 
+/* a reject, large, from the review */
+.lg{flex:1;min-height:0;position:relative;background:#000;touch-action:pan-y}
+.lg .pk-box{position:absolute;inset:0}
+.lg-note{position:absolute;left:10px;bottom:12px;font:600 12px/1.2 var(--body);padding:5px 9px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff}
+
 /* focus */
 .fz{flex:1;min-height:0;position:relative;overflow:hidden;background:#000;touch-action:none}
 .fz img{position:absolute;left:0;top:0;transform-origin:0 0;max-width:none;-webkit-user-drag:none;pointer-events:none}

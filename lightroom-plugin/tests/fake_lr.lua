@@ -63,9 +63,20 @@ function Photo:removeKeyword(kw)
     self.keywords[kw.name] = nil
 end
 
+-- folders ----------------------------------------------------------------------------------
+local Folder = {}
+Folder.__index = Folder
+function F.folder(name, children, photos)
+    return setmetatable({ name = name, children = children or {}, photos = photos or {} }, Folder)
+end
+function Folder:getName() return self.name end
+function Folder:getChildren() return self.children end
+function Folder:getPhotos(includeChildren) assert(includeChildren == false, 'fake: only direct photos'); return self.photos end
+
 -- catalog ----------------------------------------------------------------------------------
-local catalog = { photos = {}, keywords = {}, collections = {} }
+local catalog = { photos = {}, keywords = {}, collections = {}, folders = {} }
 function catalog:getTargetPhotos() return self.photos end
+function catalog:getFolders() return self.folders end
 function catalog:batchGetRawMetadata(photos, keys)
     local out = {}
     for _, p in ipairs(photos) do
@@ -132,6 +143,7 @@ local modules = {
     LrTasks = {
         pcall = pcall,
         yield = function() if inWrite then error('yield inside write access') end end,
+        sleep = function() if inWrite then error('sleep inside write access') end end,
     },
     LrFunctionContext = { postAsyncTaskWithContext = function(_, fn) fn({}) end },
     LrProgressScope = setmetatable({}, { __call = function()

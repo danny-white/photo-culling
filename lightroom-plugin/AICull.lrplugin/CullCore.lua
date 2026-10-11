@@ -167,4 +167,29 @@ function M.catalogLine(folder, fname, pick, rating, mineFlag, mineStars)
     return table.concat({ folder, fname, tostring(pick), tostring(rating), flagBy, starsBy }, '\t')
 end
 
+-- The launch offer (Startup.lua): which shoot folders the waiting rows name, and what to ask.
+function M.foldersOf(byKey)
+    local seen, list = {}, {}
+    for key in pairs(byKey) do
+        local folder = key:match('^([^/]*)/')
+        if folder and folder ~= '' and not seen[folder] then
+            seen[folder] = true
+            list[#list + 1] = folder
+        end
+    end
+    table.sort(list)
+    return list, seen
+end
+
+function M.offerText(decRows, folders, nPhotos)
+    local shoots = #folders == 1 and folders[1]
+        or (#folders <= 3 and table.concat(folders, ', ') or (folders[1] .. ' to ' .. folders[#folders]))
+    local title = string.format('%d phone cull%s waiting from Culling Bay', decRows, decRows == 1 and ' is' or 's are')
+    local info = string.format('From %s (%d photo%s in this catalog).', shoots, nPhotos, nPhotos == 1 and '' or 's')
+        .. '\n\nApply them now? Nothing changes unless you say so; your own flags and stars are kept, '
+        .. 'as in Sync AI Cull Data. Not now leaves them waiting for next time. The AI\'s labels and '
+        .. 'captions wait for Sync AI Cull Data.'
+    return title, info
+end
+
 return M

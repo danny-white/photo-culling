@@ -2,7 +2,7 @@
    Plain JavaScript, no build step. Talks to /m/api (review/mobile.py); every tap is saved on the
    PC at once, through a retry queue that survives a dropped connection or a reload.
    One pass per day: days -> cards (details, burst picker, focus check) -> rejects review, with
-   a soft budget of 15 kept stacks an hour of shooting. */
+   a soft budget of 10 kept stacks an hour of shooting. */
 (() => {
 'use strict';
 
@@ -530,7 +530,7 @@ function vDays() {
 
 function vLoading(msg) { return top(backBtn('days', 'Days'), 'Culling Bay') + '<div class="empty-state">' + esc(msg) + '</div>'; }
 
-// The budget: 15 stacks an hour of shooting (from the server), counted per stack, so a whole
+// The budget: 10 stacks an hour of shooting (from the server), counted per stack, so a whole
 // panorama or bracket is one. Stacks you kept in Lightroom count too. It is soft: going over
 // shows in amber, and the review lists your kept stacks to trim.
 const budgetOf = () => (S.day && S.day.budget ? S.day.budget.stacks : 0);
@@ -747,7 +747,8 @@ function vSummary() {
     '<span class="sm-lab">' + esc(lrShort(f)) + '</span></div>').join('') + '</div>';
   const skipped = lrDone();
   const fromBurst = rejects.filter(f => S.dec[f.id].note), outright = rejects.filter(f => !S.dec[f.id].note);
-  const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="rescue" data-id="' + f.id + '" aria-label="Rescue ' + esc(f.file) + '">' +
+  const order = fromBurst.concat(outright).map(f => f.id);   // the large view steps through them in this order
+  const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="look" data-id="' + f.id + '" data-order="' + order.join(',') + '" aria-label="Look at ' + esc(f.file) + '">' +
     thumb(f) + '<b>' + IC.x + '</b></button>').join('') + '</div>';
   const open = firstOpen(0);
   const decided = all.map(f => S.dec[f.id]).filter(Boolean);
@@ -775,10 +776,41 @@ function vSummary() {
       (won.length ? '<p class="sec">Your Lightroom flag won</p>' + wonGrid +
         '<p class="note">The phone said otherwise, but you had flagged ' + (won.length > 1 ? 'these' : 'this') + ' in Lightroom yourself, so Lightroom kept your flag. Change it there if the phone was right.</p>' : '') +
       (rejects.length ? (fromBurst.length ? '<p class="sec">From bursts · similar frame kept</p>' + grid(fromBurst) : '') +
-        (outright.length ? '<p class="sec">Rejected outright</p>' + grid(outright) : '') + '<p class="note">Tap a frame to rescue it.</p>'
+        (outright.length ? '<p class="sec">Rejected outright</p>' + grid(outright) : '') + '<p class="note">Tap a frame to look at it large and rescue it.</p>'
         : '<p class="note">No rejects today.</p>') +
       '<p class="note"><button class="link" data-act="reset-ask">Start this day over</button></p></div>' +
     '<div class="foot"><button class="pb2" data-act="days">Back to days</button><button class="pb2 pri" data-act="send"' + (unsent ? '' : ' disabled') + '>' + sendLabel + '</button></div>';
+}
+
+// A reject, large, from the review: swipe through the day's rejects, rescue the ones that deserve
+// it, double-tap to check focus. Rescued frames stay in the run with a ✓ until you go back.
+function vLarge() {
+  const L = S.large, f = frameById(L.ids[L.i]), d = S.dec[f.id], rejected = !!d && d.flag === 'reject';
+  return top(backBtn('close-large', 'Review'), stem(f.file), (L.i + 1) + ' of ' + L.ids.length + ' · swipe for the next') +
+    '<div class="lg" id="lg"><div class="pk-box">' + photo(f, afBox(f)) + '</div>' +
+      '<span class="pk-flag ' + (rejected ? 'reject">Rejected' : 'keep">Rescued ✓') + '</span>' +
+      (rejected && d.note ? '<span class="lg-note">' + esc(d.note.replace(NOTE_PREFIX, 'Similar frame kept: ')) + '</span>' : '') + '</div>' +
+    '<div class="foot"><button class="pb2" data-act="close-large">Back</button>' +
+      '<button class="pb2 pri" data-act="rescue" data-id="' + f.id + '"' + (rejected ? '' : ' disabled') + '>' + (rejected ? 'Rescue' : 'Rescued ✓') + '</button></div>';
+}
+function largeStep(d) {
+  const L = S.large;
+  L.i = Math.max(0, Math.min(L.ids.length - 1, L.i + d));
+  draw();
+}
+function bindLarge() {
+  const m = $('#lg', view);
+  if (!m) return;
+  let sx = null, lastAt = 0;
+  m.addEventListener('pointerdown', e => { sx = e.clientX; });
+  m.addEventListener('pointerup', e => {
+    if (sx === null) return;
+    const d = e.clientX - sx; sx = null;
+    if (Math.abs(d) > 50) return largeStep(d < 0 ? 1 : -1);
+    const now = performance.now();
+    if (now - lastAt < 300) { lastAt = 0; const f = frameById(S.large.ids[S.large.i]), sp = spotOf(f); return openFocus(f.id, sp[0], sp[1]); }
+    lastAt = now;
+  });
 }
 
 function draw(anim) {
@@ -788,7 +820,7 @@ function draw(anim) {
   view.innerHTML = scr === 'days' ? vDays() : scr === 'loading' ? vLoading('Loading the day…')
     : scr === 'error' ? vLoading(S.error || 'Something went wrong')
     : scr === 'picker' ? (S.picker.m === 'strip' ? vStrip() : vKnock())
-    : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : vCull();
+    : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : scr === 'large' ? vLarge() : vCull();
   view.classList.toggle('no-chrome', !S.chrome);
   view.dataset.screen = scr;
   bindPhotos(view);
@@ -802,6 +834,7 @@ function draw(anim) {
   if (scr === 'picker' && S.picker.m === 'strip') { bindPickerSwipe(); loadLinked(); }
   else if (scr !== 'cull') keepCrops([]);
   if (scr === 'focus') requestAnimationFrame(loadFocus);
+  if (scr === 'large') bindLarge();
 }
 function prefetch() {
   for (let k = 1; k <= 10; k++) {
@@ -1201,6 +1234,8 @@ document.addEventListener('click', e => {
       return draw();
     }
     case 'back-cull': { const i = firstOpen(S.cursor); if (i >= 0) S.cursor = i; S.screen = 'cull'; return draw(); }
+    case 'look': S.large = { ids: b.dataset.order.split(',').map(Number), i: 0 }; S.large.i = S.large.ids.indexOf(+b.dataset.id); S.screen = 'large'; return draw();
+    case 'close-large': S.large = null; S.screen = 'summary'; return draw();
     case 'rescue': {
       const f = frameById(+b.dataset.id);
       const change = [{ id: f.id, flag: 'pick', note: '', via: 'rescue' }];
@@ -1220,7 +1255,9 @@ document.addEventListener('input', e => {
 document.addEventListener('keydown', e => {
   if (e.target.matches('input, textarea')) return;
   const k = e.key;
-  if (k === 'Escape') { if (S.sheet) closeSheet(); else if (S.screen === 'focus') closeFocus(); else if (S.screen === 'picker') { S.picker = null; S.screen = 'cull'; draw(); } return; }
+  if (k === 'Escape') { if (S.sheet) closeSheet(); else if (S.screen === 'focus') closeFocus(); else if (S.screen === 'picker') { S.picker = null; S.screen = 'cull'; draw(); }
+    else if (S.screen === 'large') { S.large = null; S.screen = 'summary'; draw(); } return; }
+  if (S.screen === 'large' && (k === 'ArrowLeft' || k === 'ArrowRight')) { e.preventDefault(); return largeStep(k === 'ArrowRight' ? 1 : -1); }
   if (S.sheet) return;
   if (k === 'z' || k === 'Z' || k === 'Backspace') { e.preventDefault(); return undo(); }
   if (S.screen === 'picker' && S.picker.m === 'strip') { if (k === 'ArrowLeft' || k === 'ArrowRight') { e.preventDefault(); stripView(S.picker.view + (k === 'ArrowRight' ? 1 : -1)); } return; }

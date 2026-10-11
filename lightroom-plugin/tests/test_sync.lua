@@ -122,6 +122,42 @@ eq('decisions-only run applied', Fp.pickStatus, -1)
 eq('decisions-only run moved its input', exists(inbox .. '/cull-decisions.tsv'), false)
 eq('decisions-only input kept in applied/', exists(inbox .. '/applied/20261010-120003-cull-decisions.tsv'), true)
 
+-- run 4: the launch offer (Startup.lua). Two shoots' rows wait; the catalog finds them by folder,
+-- without a selection. "Not now" leaves everything waiting; "Apply" runs the sync on them.
+local Sync = require 'Sync'
+Sync.INBOX = inbox
+local O1 = F.photo('/Volumes/Passport/Pictures/2026/2026-10-02/DSC06001.ARW')
+local O2 = F.photo('/Volumes/Passport/Pictures/2026/2026-10-03/DSC06101.ARW')
+local Other = F.photo('/Volumes/Passport/Pictures/2025/2025-10-02/DSC06001.ARW')   -- same file name, another shoot
+F.catalog.folders = { F.folder('Pictures', {
+    F.folder('2025', { F.folder('2025-10-02', {}, { Other }) }),
+    F.folder('2026', { F.folder('2026-10-01', {}, { A, B }), F.folder('2026-10-02', {}, { O1 }), F.folder('2026-10-03', {}, { O2 }) }) }) }
+F.catalog.photos = { A }                     -- the selection plays no part
+local waiting = io.open(inbox .. '/cull-decisions.tsv', 'wb')
+waiting:write('#cull-decisions v1\n2026-10-02\tDSC06001.ARW\treject\t\t\n2026-10-03\tDSC06101.ARW\tpick\t3\t\n'); waiting:close()
+local ai = io.open(inbox .. '/pending.tsv', 'wb')       -- the AI's file waits for the menu sync
+ai:write('2026-10-02\tDSC06001.ARW\tRed\tTEST-AI\tTEST AI: launch.\n'); ai:close()
+local nConfirms = #F.dialog.confirms
+F.dialog.answers = { 'cancel' }
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+eq('launch: asked once', #F.dialog.confirms, nConfirms + 1)
+eq('launch: names the culls', F.dialog.confirms[#F.dialog.confirms], '2 phone culls are waiting from Culling Bay')
+eq('launch: Not now applies nothing', O1.pickStatus .. ' ' .. O2.pickStatus, '0 0')
+eq('launch: Not now leaves the file waiting', exists(inbox .. '/cull-decisions.tsv'), true)
+F.dialog.answers = { 'ok' }
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+eq('launch: Apply rejects O1', O1.pickStatus, -1)
+eq('launch: Apply picks O2 with stars', O2.pickStatus .. ' ' .. tostring(O2.rating), '1 3')
+eq('launch: same file name in another shoot untouched', Other.pickStatus, 0)
+eq('launch: the selection untouched', A.pickStatus, 1)
+eq('launch: input moved to applied/', exists(inbox .. '/cull-decisions.tsv'), false)
+eq('launch: the AI file left waiting', exists(inbox .. '/pending.tsv'), true)
+eq('launch: no AI caption applied', O1.caption, '')
+local nMsgs = #F.dialog.messages
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+eq('launch: nothing waiting, nothing asked', #F.dialog.confirms, nConfirms + 2)
+eq('launch: and nothing said', #F.dialog.messages, nMsgs)
+
 os.execute('rm -rf "' .. inbox .. '"')
 print(string.format('%d passed, %d failed', passed, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -146,5 +146,19 @@ eq('catalog: you changed a phone flag', C.catalogLine('f', 'x.ARW', 1, 0, -1, ni
 eq('catalog: phone hero', C.catalogLine('f', 'x.ARW', 1, 5, 1, 5), 'f\tx.ARW\t1\t5\tphone\tphone')
 eq('catalog: unflagged, your stars', C.catalogLine('f', 'x.ARW', 0, 3, nil, nil), 'f\tx.ARW\t0\t3\t\tyou')
 
+-- the launch offer
+do
+    local byKey = { ['2026-10-01/A.ARW'] = {}, ['2026-09-29/B.ARW'] = {}, ['2026-10-01/C.ARW'] = {}, ['/x'] = {} }
+    local folders, set = C.foldersOf(byKey)
+    eq('folders: distinct, sorted', table.concat(folders, ','), '2026-09-29,2026-10-01')
+    eq('folders: as a set', set['2026-10-01'], true)
+    local title, info = C.offerText(26, folders, 32)
+    eq('offer title', title, '26 phone culls are waiting from Culling Bay')
+    eq('offer names the shoots', info:sub(1, 49), 'From 2026-09-29, 2026-10-01 (32 photos in this ca')
+    title, info = C.offerText(1, { 'a', 'b', 'c', 'd' }, 1)
+    eq('offer title, one', title, '1 phone cull is waiting from Culling Bay')
+    eq('offer, many shoots', info:sub(1, 30), 'From a to d (1 photo in this c')
+end
+
 print(string.format('%d passed, %d failed', passed, failed))
 os.exit(failed == 0 and 0 or 1)

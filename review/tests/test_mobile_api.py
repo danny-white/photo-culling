@@ -91,7 +91,7 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(len(st), 16)
         self.assertTrue(all(f["af"] and 0 <= f["af"][0] <= 1 for s in st for f in s["frames"]))
         self.assertIsNone(body["progress"])
-        self.assertEqual(body["budget"], {"stacks": 5, "per_hour": 15, "hours": 0.19})   # an 11-minute shoot
+        self.assertEqual(body["budget"], {"stacks": 5, "per_hour": 10, "hours": 0.19})   # an 11-minute shoot
         self.assertTrue(all(f["decision"] is None for s in st for f in s["frames"]))
         self.assertNotIn("path", st[0]["frames"][0])            # library paths stay on the server
 

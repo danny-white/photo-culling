@@ -1,3 +1,34 @@
+# AI Cull Sync v2.1 — the launch offer
+
+About 5 minutes, on your **real** catalog. v2.1 adds one thing: when Lightroom starts, it offers
+the phone culls waiting in the inbox. The sync it runs is v2's, unchanged (checked below in the
+scratch catalog, and since used for real). What's new is finding the shoots' photos without a
+selection, and asking first.
+
+Use the real catalog, not a scratch one: Apply files the inbox's `cull-decisions.tsv` under
+`applied/`, and Culling Bay then counts those culls as in Lightroom. In a scratch catalog they
+would land there instead of in yours. On 11 Oct the inbox held **88 phone culls from 2026-08-09**
+(your phone cull of that day), which make the test.
+
+1. Quit Lightroom. Replace the contents of the AI Cull Sync plugin folder (Plug-in Manager shows
+   where it loads from) with `/Volumes/Passport/AICullInbox/plugin-v2.1/AICull.lrplugin`.
+   `plugin-v2.1/AICull-v2.lrplugin` beside it is v2, to roll back to.
+2. Open Lightroom on your real catalog. About 5 seconds after it opens:
+   **"88 phone culls are waiting from Culling Bay"**, *From 2026-08-09 (… photos in this
+   catalog)*. Click **Not now**. Nothing changes; the file stays in the inbox.
+3. Quit and reopen. The same question: click **Apply**. The usual sync summary follows (88 phone
+   rows; any of your own flags kept are counted). Spot-check a few 9 Aug photos: flags and
+   stars from the phone, burst notes on burst rejects.
+4. Quit and reopen once more: no question, since nothing is waiting.
+5. On the phone, 9 Aug should show **Synced** in the day list once the receipt is read (open the
+   day list, or wait for the next refresh).
+
+If the question never comes, check the inbox is mounted on the Mac
+(`/Volumes/Passport/AICullInbox`) and the file is still there; **Sync AI Cull Data** from the
+menu still works as before.
+
+---
+
 # AI Cull Sync v2 — scratch-catalog checklist
 
 About 15 minutes at the Mac. It runs the same two-run kit as `tests/test_sync.lua`, but in real

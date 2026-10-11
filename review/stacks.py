@@ -32,7 +32,8 @@ BRACKET_LUM_SPREAD = 60.0    # mean luminance (0-255) between darkest and bright
 SOFT_RELATIVE = 0.35         # soft = under 35% of the sharpest normally exposed frame in its burst
 BLOWN_PCT = 15.0             # photo_cull.BLOWN_PCT_SEVERE: share of pure-white pixels
 DARK_LUM = 35.0              # photo_cull.MEAN_LUM_LOW: overall very dark
-KEEP_PER_HOUR = 15          # pass 1's soft budget: stacks to keep per hour of shooting
+KEEP_PER_HOUR = 10          # the soft budget: stacks to keep per hour of shooting. Your median was
+                             # 12.6, so 10 pushes on about half your days (15 rarely did; round two D15)
 SHOOTING_GAP_CAP_S = 600     # a pause longer than 10 minutes counts as 10: lunch is not shooting
 KEEP_FLOOR = 5               # even a five-minute shoot may keep five
 PANO_MIN_FRAMES = 3
@@ -219,7 +220,7 @@ def shooting_hours(rows: list[dict]) -> float:
 
 
 def keep_budget(rows: list[dict]) -> int:
-    """Pass 1's soft limit: KEEP_PER_HOUR stacks per hour of shooting, at least KEEP_FLOOR."""
+    """The soft limit: KEEP_PER_HOUR stacks per hour of shooting, at least KEEP_FLOOR."""
     return max(KEEP_FLOOR, math.ceil(KEEP_PER_HOUR * shooting_hours(rows)))
 
 
