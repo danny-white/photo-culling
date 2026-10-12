@@ -10,7 +10,8 @@ Use the real catalog, not a scratch one: Apply files the inbox's `cull-decisions
 would land there instead of in yours. On 11 Oct the inbox held **88 phone culls from 2026-08-09**
 (your phone cull of that day), which make the test.
 
-1. Quit Lightroom. Replace the contents of the AI Cull Sync plugin folder (Plug-in Manager shows
+1. Quit Lightroom (⌘Q) before touching the folder: replaced while it runs, Lightroom reports
+   "No script by the name Startup.lua" until the next restart. Replace the contents of the AI Cull Sync plugin folder (Plug-in Manager shows
    where it loads from) with `/Volumes/Passport/AICullInbox/plugin-v2.1/AICull.lrplugin`.
    `plugin-v2.1/AICull-v2.lrplugin` beside it is v2, to roll back to.
 2. Open Lightroom on your real catalog. About 5 seconds after it opens:
