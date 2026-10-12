@@ -1,6 +1,7 @@
 # AI Cull Sync — Lightroom Classic plugin
 
-Merges `photo_cull`'s AI **keywords + color label + caption** into your LrC catalog, and (v2)
+Merges `photo_cull`'s AI **keywords + caption** into your LrC catalog (never a colour label:
+v2.2), and (v2)
 your **phone culls** from Culling Bay Mobile: pick/reject flags, stars and burst notes, and (v2.1)
 offers waiting phone culls when Lightroom starts. It
 uses the Lightroom SDK, so — unlike "Read Metadata from File" — it never overwrites anything you
@@ -12,7 +13,7 @@ Who owns what:
 
 | Field | Owner |
 |---|---|
-| color label (green/yellow/red = keep/review/reject) | **AI** — set by this plugin |
+| color label | **you** — the plugin never sets one (v2.2: you stripped them all on 2026-10-11); `photo_cull` exports none |
 | `Stars-N`, `Cull-*`, `Scene-*`, tag keywords | **AI** — set by this plugin |
 | Caption: the AI sentence | **AI** — replaced only while it is exactly what the plugin wrote |
 | Caption: a first line `Burst reject · kept DSC05015` | **phone** — added and removed by the plugin |

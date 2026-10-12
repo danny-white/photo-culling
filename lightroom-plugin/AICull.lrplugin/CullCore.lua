@@ -26,6 +26,7 @@ end
 
 -- AI rows (photo_cull.py export --plugin-data):
 --   shootFolder \t filename \t colorLabel \t kw1|kw2|... \t caption
+-- colorLabel is parsed but never applied (v2.2: no colour labels in Lightroom).
 function M.parseAILine(line)
     line = chomp(line)
     if line == '' or line:sub(1, 1) == '#' then return nil end

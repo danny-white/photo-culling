@@ -98,6 +98,10 @@ IMG_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".tif", ".
 ALL_EXTENSIONS = RAW_EXTENSIONS | IMG_EXTENSIONS
 
 LABEL_FOR_VERDICT = {"keep": "Green", "review": "Yellow", "reject": "Red"}
+# The verdict's colour label stays in trial.db (the review app shows it) but never leaves for
+# Lightroom: Danny stripped every colour label there on 2026-10-11 and wants none back. The plugin
+# TSV carries an empty label column, and sidecars no label.
+EXPORT_COLOR_LABELS = False
 
 # ----------------------------------------------------------------------------
 # SQLite state store (the source of truth)
@@ -1088,8 +1092,7 @@ XMP_TEMPLATE = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
     xmlns:dc="http://purl.org/dc/elements/1.1/"
     xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
     xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
-{rating_attr}    xmp:Label="{label}"
-    photoshop:Instructions="{instructions}">
+{rating_attr}{label_attr}    photoshop:Instructions="{instructions}">
    <dc:description><rdf:Alt><rdf:li xml:lang="x-default">{caption}</rdf:li></rdf:Alt></dc:description>
    <dc:subject><rdf:Bag>
 {subjects}   </rdf:Bag></dc:subject>
@@ -1209,7 +1212,7 @@ def _merge_ai_into_sidecar(target: Path, row: dict, ai_rating: bool = False) -> 
         args.append(f"-XMP-dc:Description={row['caption']}")
     if ai_rating and have.get("Rating") in (None, ""):
         args.append(f"-XMP-xmp:Rating={row['quality_stars'] or 0}")
-    if have.get("Label") in (None, "") and row.get("color_label"):
+    if EXPORT_COLOR_LABELS and have.get("Label") in (None, "") and row.get("color_label"):
         args.append(f"-XMP-xmp:Label={row['color_label']}")
     note, cur = _ai_note(row), (have.get("Instructions") or "")
     if note != cur and (cur == "" or cur.startswith("AI ")):    # AI-owned note; never clobber yours
@@ -1285,7 +1288,7 @@ def write_xmp_sidecars(conn: sqlite3.Connection, force: bool, xmp_dir: "Path | N
         rating_attr = f'    xmp:Rating="{row["quality_stars"] or 0}"\n' if ai_rating else ""
         xml = XMP_TEMPLATE.format(
             rating_attr=rating_attr,
-            label=xml_escape(row["color_label"] or ""),
+            label_attr=f'    xmp:Label="{xml_escape(row["color_label"])}"\n' if EXPORT_COLOR_LABELS and row["color_label"] else "",
             instructions=xml_escape(_ai_note(row)),
             caption=xml_escape(row["caption"] or ""),
             subjects=subjects,
@@ -1441,8 +1444,9 @@ def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
                       folders: "list[Path] | None" = None, append: bool = False) -> int:
     """Write a TSV for the Lightroom 'AI Cull Sync' plugin — one ok photo per line:
         <shootFolder>\\t<filename>\\t<colorLabel>\\t<kw1|kw2|...>\\t<caption>
-    The plugin applies ONLY these (color label + keywords + caption) to the catalog, never
-    rating/flags, so nothing you set is overwritten. Uses the flat keywords from build_keywords
+    colorLabel stays empty unless EXPORT_COLOR_LABELS (off: you want no colour labels in
+    Lightroom), also on rows carried over by append. The plugin applies ONLY keywords + caption
+    from this file to the catalog, never rating/flags, so nothing you set is overwritten. Uses the flat keywords from build_keywords
     (Stars-N, Cull-*, …). Caption goes into LrC's Caption field, IPTC-safe and independent of
     your ratings/flags. Matched by (shootFolder, filename) -- not filename alone -- since Sony
     resets its file counter across shoots, so this TSV can safely cover the WHOLE library in one
@@ -1464,7 +1468,9 @@ def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
             if len(parts) < 2:
                 continue
             key = (parts[0], parts[1])
-            rows[key] = line
+            if not EXPORT_COLOR_LABELS and len(parts) > 2:
+                parts[2] = ""          # an older row's label never reaches Lightroom either
+            rows[key] = "\t".join(parts)
             order.append(key)
 
     for row in (dict(r) for r in conn.execute("SELECT * FROM images WHERE status='ok'")):
@@ -1473,7 +1479,7 @@ def write_plugin_data(conn: sqlite3.Connection, out_path: Path,
             continue
         flat, _ = build_keywords(row)
         kws = "|".join(k.replace("|", "/").replace("\t", " ") for k in flat)
-        label = (row["color_label"] or "").replace("\t", " ")
+        label = (row["color_label"] or "").replace("\t", " ") if EXPORT_COLOR_LABELS else ""
         caption = (row["caption"] or "").replace("\t", " ").replace("\n", " ")
         shoot_folder = path.parent.name.replace("\t", " ")
         key = (shoot_folder, row["filename"])

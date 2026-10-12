@@ -6,7 +6,7 @@
   Applies up to two files from the AICullInbox to a set of photos (from the menu, the SELECTED
   photos: "All Photographs" for a full sync):
 
-      pending.tsv         the AI's color label, keywords and caption
+      pending.tsv         the AI's keywords and caption (never a colour label: v2.2)
                           (photo_cull.py export --plugin-data)
       cull-decisions.tsv  your phone culls: pick/reject flags, stars, burst notes
                           (Culling Bay Mobile's Send)
@@ -22,7 +22,9 @@
     * Caption: the plugin owns two parts -- a first line starting "Burst reject · kept ", and the
       AI sentence it last wrote, remembered exactly. It replaces only those, so anything you typed
       stays. If you edit the AI's sentence, the caption becomes yours and the AI stops writing it.
-    * Color label and keywords: the AI's, applied as before.
+    * Keywords: the AI's, applied as before.
+    * Colour label: never set (v2.2). You stripped them all on 2026-10-11 and want none; the
+      label column of pending.tsv, empty since then, is ignored even when an old file has one.
 
   After a complete (uncanceled) run it writes applied/<time>-receipt.tsv, one outcome per row,
   and applied/<time>-catalog.tsv, the flag and rating of every selected photo (so the phone can
@@ -277,9 +279,6 @@ function M.run(context, opts)
         local folder, fname = s.key:match('^([^/]*)/(.*)$')
         if ai then
             counts.ai = counts.ai + 1
-            if ai.label ~= '' then
-                try('setRawMetadata(label)', s.key, function() photo:setRawMetadata('label', ai.label) end)
-            end
             for _, kw in ipairs(ai.keywords) do
                 if kw ~= '' then
                     try(string.format('addKeyword(%q)', kw), s.key, function() photo:addKeyword(keywordFor(kw)) end)

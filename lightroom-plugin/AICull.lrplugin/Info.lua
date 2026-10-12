@@ -1,7 +1,7 @@
 --[[
   AI Cull Sync -- Lightroom Classic plugin.
 
-  Applies photo_cull's AI color label, keywords and caption, plus your phone culls from
+  Applies photo_cull's AI keywords and caption (never a colour label), plus your phone culls from
   Culling Bay Mobile (pick/reject flags, stars, burst notes), and offers waiting phone culls when
   Lightroom starts. It never overwrites a flag,
   rating or caption text you set by hand: hidden plugin fields (AICullMetadata.lua) record what
@@ -25,5 +25,5 @@ return {
             file  = 'SemanticSearch.lua',
         },
     },
-    VERSION = { major = 2, minor = 1, revision = 0 },
+    VERSION = { major = 2, minor = 2, revision = 0 },
 }

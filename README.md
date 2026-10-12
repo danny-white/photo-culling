@@ -7,7 +7,8 @@ runs entirely on your own machine (no cloud) using the **Qwen3.5** vision models
 For every photo it produces:
 
 - a **quality rating** (1–5 stars),
-- a **keep / review / reject** verdict as a Lightroom **color label** (Green / Yellow / Red),
+- a **keep / review / reject** verdict (in the database and the review app; it used to go to
+  Lightroom as a Green / Yellow / Red colour label, which is off: `EXPORT_COLOR_LABELS`),
 - **keywords**, a caption, subject and scene, and
 - **best-of-burst** picks (so a 10-frame burst doesn't become 10 keepers).
 
@@ -95,14 +96,14 @@ burst grouping, so formats without readable EXIF are left ungrouped rather than 
 ### Getting the results into Lightroom Classic
 
 `export --xmp` writes an `.xmp` sidecar next to each photo (`DSC01234.xmp`) containing the
-rating, color label, caption and keywords. In Lightroom Classic:
+rating, caption and keywords (no colour label since 2026-10-11: `EXPORT_COLOR_LABELS` in
+`photo_cull.py`). In Lightroom Classic:
 
 1. Select the photos (or the folder).
 2. **Metadata ▸ Read Metadata from File**.
 
-Ratings, Green/Yellow/Red labels and keywords appear on your photos. You can then filter
-by label/stars and cull fast. The **Green / Yellow / Red** label names match Adobe's
-default label set, so the colors show up without extra configuration.
+Ratings and keywords appear on your photos (`Cull-keep` / `Cull-review` / `Cull-reject` and
+`Stars-N` among them), so you can filter by them and cull fast.
 
 **Safety:** sidecars are only written where none exists, so an existing Lightroom sidecar
 (with your develop settings) is never clobbered. Use `--force-xmp` to overwrite. Nothing is
