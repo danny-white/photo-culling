@@ -26,6 +26,7 @@ from flask import Blueprint, Response, abort, jsonify, request, send_file, send_
 from PIL import Image, ImageOps
 
 import perf
+import previews
 import search
 import stacks
 
@@ -1114,8 +1115,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             con.close()
         if not r:
             return jsonify({"error": "not found"}), 404
-        key = hashlib.md5(f"m:{r['path']}:{edge}".encode()).hexdigest()
-        cached = cache_dir / f"m-{key}.jpg"
+        cached = previews.preview_path(cache_dir, r["path"], edge)
         perf.note(cache="hit" if cached.exists() else "miss", size=request.args.get("s", "view"),
                   ext=Path(r["path"]).suffix.lower())
         if not cached.exists():
@@ -1125,9 +1125,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 with perf.stage("resize"):
                     im = pc.to_working(src, edge)
                 with perf.stage("encode"):
-                    tmp = cached.with_suffix(".tmp")
-                    im.save(tmp, "JPEG", quality=85)
-                    tmp.replace(cached)
+                    previews.write_atomic(im, cached)
             except Exception as e:
                 return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
         return send_file(cached, mimetype="image/jpeg", max_age=86400)

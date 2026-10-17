@@ -106,6 +106,12 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
         log "daysum FAILED for $folder (non-fatal, continuing)"
     fi
 
+    # Best-effort phone previews (320 px thumbnail, 1616 px view) into review/cache on this PC, so
+    # the phone's grids never wait on the NAS. Not fatal; review/previews.py with no --folder backfills.
+    if ! ./venv/bin/python review/previews.py --db "$DB" --folder "$folder" --workers 4 >> "$LOG" 2>&1; then
+        log "previews FAILED for $folder (non-fatal, continuing)"
+    fi
+
     tsv="$INBOX/pending.tsv"
     if ! ./venv/bin/python photo_cull.py export --plugin-data "$tsv" --plugin-data-append --folder "$folder" \
             --db "$DB" --csv "$PROJ/trial_out/report.csv" >> "$LOG" 2>&1; then
