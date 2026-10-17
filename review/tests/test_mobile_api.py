@@ -260,6 +260,12 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(len(r.data), lead["bytes"])
         r.close()
 
+    def test_phone_timing_reports(self):
+        r = self.client.post("/m/api/perf", json={"items": [{"type": "viewer_photo", "ms": 300}]}, headers=self.H)
+        self.assertEqual(r.get_json(), {"logged": 1})
+        self.assertEqual(self.client.post("/m/api/perf", json={"items": "x"}, headers=self.H).status_code, 400)
+        self.assertEqual(self.client.post("/m/api/perf", json={"items": []}).status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

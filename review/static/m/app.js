@@ -311,11 +311,23 @@ function shapeCard(card, id) {
   card.style.aspectRatio = ar < 1 ? '' : ar.toFixed(4);
   if (ar < 1) dropBand();   // a vertical photo uses the height itself
 }
-function bindPhotos(root) {
+// timing (perf-client.js): on the cull card, how long from drawing it to its photo being ready,
+// so a decision followed by a wait for the next photo shows up; and a day's first photo.
+function bindPhotos(root, perfT) {
+  let first = root.dataset.screen === 'cull' && perfT !== undefined;
   for (const p of root.querySelectorAll('.photo')) {
-    const im = p.querySelector('img'), id = p.dataset.fid;
-    const ready = () => { noteAR(id, im); shapeCard(p.closest('.card'), id); fitPhoto(p); };
-    if (im.complete && im.naturalWidth) ready(); else { im.addEventListener('load', ready, { once: true }); fitPhoto(p); }
+    const im = p.querySelector('img'), id = p.dataset.fid, timed = first;
+    first = false;
+    const ready = () => {
+      noteAR(id, im); shapeCard(p.closest('.card'), id); fitPhoto(p);
+      if (timed && window.cbPerf) {
+        const ms = performance.now() - perfT, waited = !preloaded;
+        cbPerf.mark('card_photo', ms, { name: img(id, 'view'), detail: waited ? 'waited' : 'prefetched' });
+        if (S.perfDay !== undefined) { cbPerf.mark('day_open', performance.now() - S.perfDay, { detail: S.day && S.day.day }); S.perfDay = undefined; }
+      }
+    };
+    const preloaded = im.complete && im.naturalWidth;
+    if (preloaded) ready(); else { im.addEventListener('load', ready, { once: true }); fitPhoto(p); }
   }
 }
 window.addEventListener('resize', () => { for (const p of view.querySelectorAll('.photo')) fitPhoto(p); });
@@ -815,6 +827,7 @@ function bindLarge() {
 }
 
 function draw(anim) {
+  const perfT = performance.now();
   if (S.screen === 'picker' && !S.picker) S.screen = 'cull';
   if ((S.screen === 'cull' || S.screen === 'picker') && !S.stacks[S.cursor]) S.screen = 'summary';
   const scr = S.screen;
@@ -824,7 +837,7 @@ function draw(anim) {
     : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : scr === 'large' ? vLarge() : vCull();
   view.classList.toggle('no-chrome', !S.chrome);
   view.dataset.screen = scr;
-  bindPhotos(view);
+  bindPhotos(view, perfT);
   if (scr === 'cull') {
     bindStage();
     const c = $('.card', view);
@@ -1065,6 +1078,7 @@ async function showDays() {
   if (S.screen === 'days' || S.screen === 'error') draw();
 }
 async function openDay(day, match) {   // match: {ids, label} from a search, whose stacks go first
+  S.perfDay = performance.now();
   S.screen = 'loading'; draw();
   let body;
   try { body = await getJSON('/m/api/day/' + dayPath(day)); }

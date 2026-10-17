@@ -88,6 +88,7 @@ async function route() {
   setTitle(r.kind === 'q' ? '“' + r.arg + '”' : r.kind === 'like' ? 'Similar photos' : longDate(r.arg.split('/').pop()), 'Loading…');
   $('#main').innerHTML = '<div class="empty">Loading…</div>';
   const flags = 'best=' + (S.best ? 1 : 0) + '&bursts=' + (S.bursts ? 1 : 0);
+  const perfT = performance.now();
   let body;
   try {
     if (r.kind === 'q') body = await getJSON('/m/api/gallery/search?q=' + encodeURIComponent(r.arg) + '&' + flags);
@@ -113,6 +114,11 @@ async function route() {
   }
   S.note = (body.notes || []).join(' ');
   renderGrid();
+  const firstImg = document.querySelector('#grid .tile img');
+  if (firstImg && window.cbPerf) {
+    const done = () => cbPerf.mark('results_ready', performance.now() - perfT, { screen: r.kind, n: S.photos.length });
+    if (firstImg.complete && firstImg.naturalWidth) done(); else firstImg.addEventListener('load', done, { once: true });
+  }
 }
 
 function setTitle(t, sub) { $('#title').innerHTML = esc(t) + (sub ? '<small>' + esc(sub) + '</small>' : ''); }
@@ -231,6 +237,9 @@ function openSheet(photos) {
     '</span></figcaption></figure>').join('');
   $('#sheet-raw').hidden = !photos.some(p => p.raw);
   $('#sheet').hidden = false;
+  const first = $('#sheet-list img'), perfT = performance.now();
+  if (first && window.cbPerf) first.addEventListener('load', () =>
+    cbPerf.mark('save_ready', performance.now() - perfT, { name: first.getAttribute('src'), n: photos.length }), { once: true });
 }
 function closeSheet() { $('#sheet').hidden = true; $('#sheet-list').innerHTML = ''; }
 
@@ -263,7 +272,12 @@ function show(i) {
   vimg.style.transition = 'none';
   vimg.style.opacity = '1';
   applyTransform();
-  vimg.onload = () => { if (S.v && S.v.i === i) fit(); };
+  const perfT = performance.now();
+  vimg.onload = () => {
+    if (!S.v || S.v.i !== i) return;
+    fit();
+    if (window.cbPerf) cbPerf.mark('viewer_photo', performance.now() - perfT, { name: img(p.id, 'view') });
+  };
   vimg.src = img(p.id, 'view');
   $('#v-count').textContent = (i + 1) + ' / ' + S.photos.length;
   $('#v-when').textContent = [longDate(p.date), timeOf(p.ts)].filter(Boolean).join(' · ');
@@ -316,8 +330,9 @@ function loadHD() {   // the 3000-px picture, decoded from the original, when yo
   const v = S.v, p = S.photos[v.i];
   v.hd = true;
   $('#v-hd').hidden = false;
-  const hi = new Image();
+  const hi = new Image(), perfT = performance.now();
   hi.onload = () => {
+    if (window.cbPerf) cbPerf.mark('viewer_hd', performance.now() - perfT, { name: exportUrl(p.id, 's=large') });
     if (!S.v || S.photos[S.v.i] !== p) return;
     vimg.onload = null;
     vimg.src = hi.src;

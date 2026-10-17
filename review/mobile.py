@@ -25,6 +25,7 @@ import numpy as np
 from flask import Blueprint, Response, abort, jsonify, request, send_file, send_from_directory
 from PIL import Image, ImageOps
 
+import perf
 import search
 import stacks
 
@@ -168,15 +169,22 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             im = full_cache.pop(path, None)
             if im is not None:
                 full_cache[path] = im                 # most recently used goes last
+                perf.note(decode_cache="hit")
                 return im
-        with decode_slots:
+        perf.note(decode_cache="miss", ext=Path(path).suffix.lower())
+        with perf.stage("decode_wait"):          # queued behind other full decodes
+            decode_slots.acquire()
+        try:
             src = Path(path)
-            if src.suffix.lower() in stacks.RAW_EXTENSIONS:
-                import rawpy
-                with rawpy.imread(str(src)) as raw:
-                    im = Image.fromarray(raw.postprocess(use_camera_wb=True))
-            else:
-                im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
+            with perf.stage("full_decode"):
+                if src.suffix.lower() in stacks.RAW_EXTENSIONS:
+                    import rawpy
+                    with rawpy.imread(str(src)) as raw:
+                        im = Image.fromarray(raw.postprocess(use_camera_wb=True))
+                else:
+                    im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
+        finally:
+            decode_slots.release()
         with full_lock:
             full_cache[path] = im
             while len(full_cache) > FULL_CACHE_FRAMES:
@@ -422,7 +430,11 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     def refresh_days():
         """Rebuild the day list and each day's stacks when the cache is older than DAYS_TTL_S."""
         now = time.time()
-        if cache["days"] is None or now - cache["days_at"] > DAYS_TTL_S:
+        if cache["days"] is not None and now - cache["days_at"] <= DAYS_TTL_S:
+            perf.note(days_cache="hit")
+            return
+        perf.note(days_cache="miss")
+        with perf.stage("days_rebuild"):
             by_day = library_rows()
             sums = day_summaries()
             summary = []
@@ -453,7 +465,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
 
     @bp.route("/api/days")
     def api_days():
-        ingest_receipts()
+        with perf.stage("receipts"):
+            ingest_receipts()
         refresh_days()
         con = anno_db()
         try:
@@ -500,12 +513,15 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
 
     @bp.route("/api/day/<path:day>")
     def api_day(day):
-        ingest_receipts()
-        rows = day_rows(day)
+        with perf.stage("receipts"):
+            ingest_receipts()
+        with perf.stage("rows"):
+            rows = day_rows(day)
         if not rows:
             return jsonify({"error": "no such day"}), 404
-        day_stacks = stacks.build_stacks(rows)
-        confirm_panos(day_stacks)
+        with perf.stage("stacks"):
+            day_stacks = stacks.build_stacks(rows)
+            confirm_panos(day_stacks)
         paths = [p for s in day_stacks for f in s["frames"] for p in [f["path"]]]
         con = anno_db()
         try:
@@ -729,7 +745,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         left = int(min(max(cx - w / 2, 0), W - w))
         top_ = int(min(max(cy - h / 2, 0), H - h))
         buf = io.BytesIO()
-        im.crop((left, top_, left + w, top_ + h)).save(buf, "JPEG", quality=88)
+        with perf.stage("encode"):
+            im.crop((left, top_, left + w, top_ + h)).save(buf, "JPEG", quality=88)
         resp = Response(buf.getvalue(), mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "max-age=3600"
         resp.headers["X-Crop-Box"] = f"{left},{top_},{w},{h} of {W}x{H}"
@@ -906,6 +923,17 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             "model": model, "last_ingest": last, "recent": recent[-8:],
         })
 
+    # ---------------------------------------------------------------- routes: timing
+    @bp.route("/api/perf", methods=["POST"])
+    @guarded
+    def api_perf():
+        """Measurements from the phone pages (image load times, swipe-to-photo, ...), written
+        to the timing log as kind "client". See review/perf.py."""
+        items = (request.get_json(silent=True) or {}).get("items")
+        if not isinstance(items, list):
+            return jsonify({"error": "items must be a list"}), 400
+        return jsonify({"logged": perf.client_lines(items, request.remote_addr, request.headers.get("User-Agent", ""))})
+
     # ---------------------------------------------------------------- routes: gallery
     # A read-only view for finding and showing photos (static/m/gallery.html). Nothing here
     # writes decisions; Save makes a JPEG for the phone's camera roll.
@@ -915,6 +943,10 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         if not ids:
             return []
         refresh_days()
+        with perf.stage("details"):
+            return _gallery_items(ids, best=best, bursts=bursts)
+
+    def _gallery_items(ids: list[int], *, best: bool, bursts: bool) -> list[dict]:
         con = db_ro()
         try:
             q = ",".join("?" * len(ids))
@@ -1004,8 +1036,9 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             return None
         im = full_decode(r["path"])
         if edge and max(im.size) > edge:
-            im = im.copy()
-            im.thumbnail((edge, edge), Image.LANCZOS)
+            with perf.stage("resize"):
+                im = im.copy()
+                im.thumbnail((edge, edge), Image.LANCZOS)
         exif = Image.Exif()
         if r["capture_ts"]:
             stamp = datetime.fromtimestamp(r["capture_ts"]).strftime("%Y:%m:%d %H:%M:%S")
@@ -1022,7 +1055,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             gps[1], gps[2] = ("N" if r["gps_lat"] >= 0 else "S"), dms(r["gps_lat"])
             gps[3], gps[4] = ("E" if r["gps_lon"] >= 0 else "W"), dms(r["gps_lon"])
         buf = io.BytesIO()
-        im.save(buf, "JPEG", quality=92, exif=exif)
+        with perf.stage("encode"):
+            im.save(buf, "JPEG", quality=92, exif=exif)
         return buf.getvalue(), Path(r["filename"]).stem + ".jpg"
 
     @bp.route("/api/export/<int:rowid>")
@@ -1039,11 +1073,13 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             finally:
                 con.close()
             if r and size == "original":   # e.g. a RAW to edit in Lightroom or Darkroom on the phone
+                perf.note(served="original")
                 kind = AS_IS.get(Path(r["path"]).suffix.lower(), "application/octet-stream")
                 return send_file(r["path"], mimetype=kind, as_attachment=True, download_name=r["filename"],
                                  max_age=3600)
             # a phone or camera JPEG/HEIC goes as it is, with all its own metadata
             if r and Path(r["path"]).suffix.lower() in AS_IS:
+                perf.note(served="as-is")
                 return send_file(r["path"], mimetype=AS_IS[Path(r["path"]).suffix.lower()], max_age=3600,
                                  as_attachment=how == "attachment", download_name=r["filename"])
         try:
@@ -1070,12 +1106,18 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             return jsonify({"error": "not found"}), 404
         key = hashlib.md5(f"m:{r['path']}:{edge}".encode()).hexdigest()
         cached = cache_dir / f"m-{key}.jpg"
+        perf.note(cache="hit" if cached.exists() else "miss", size=request.args.get("s", "view"),
+                  ext=Path(r["path"]).suffix.lower())
         if not cached.exists():
             try:
-                im = pc.to_working(pc.load_source(Path(r["path"])), edge)
-                tmp = cached.with_suffix(".tmp")
-                im.save(tmp, "JPEG", quality=85)
-                tmp.replace(cached)
+                with perf.stage("load"):          # NAS read + embedded preview (or full open)
+                    src = pc.load_source(Path(r["path"]))
+                with perf.stage("resize"):
+                    im = pc.to_working(src, edge)
+                with perf.stage("encode"):
+                    tmp = cached.with_suffix(".tmp")
+                    im.save(tmp, "JPEG", quality=85)
+                    tmp.replace(cached)
             except Exception as e:
                 return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
         return send_file(cached, mimetype="image/jpeg", max_age=86400)

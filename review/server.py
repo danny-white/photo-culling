@@ -43,6 +43,7 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import photo_cull as pc  # noqa: E402
 import mobile  # noqa: E402  -- Culling Bay Mobile, the phone routes under /m
+import perf  # noqa: E402  -- request timing: trial_out/perf.jsonl and Server-Timing
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -348,11 +349,15 @@ def api_thumb(rowid):
         return jsonify({"error": "not found"}), 404
     key = hashlib.md5(f"{path}:{edge}".encode()).hexdigest()
     cached = CACHE / f"{key}.jpg"
+    perf.note(cache="hit" if cached.exists() else "miss", ext=Path(path).suffix.lower())
     if not cached.exists():
         try:
-            im = pc.load_source(Path(path))
-            im = pc.to_working(im, edge)
-            im.save(cached, "JPEG", quality=86)
+            with perf.stage("load"):
+                im = pc.load_source(Path(path))
+            with perf.stage("resize"):
+                im = pc.to_working(im, edge)
+            with perf.stage("encode"):
+                im.save(cached, "JPEG", quality=86)
         except Exception as e:  # unreadable file -> 1x1 so the grid still lays out
             return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
     return send_file(cached, mimetype="image/jpeg", max_age=3600)
@@ -822,6 +827,8 @@ def main():
     ap.add_argument("--folders", nargs="*", default=[], help="source folders, to enable resume/redrive from the UI")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--perf-log", type=Path, default=None,
+                    help="Where request timings go, one JSON line each (default: perf.jsonl next to --db).")
     ap.add_argument("--embed-base-url", default="http://localhost:11434/v1",
                     help="OpenAI-compatible base URL for embedding semantic-search queries (default: local Ollama).")
     a = ap.parse_args()
@@ -832,6 +839,7 @@ def main():
     CFG["folders"] = a.folders
     CFG["embed_base_url"] = a.embed_base_url
     anno().close()  # ensure the annotations table exists
+    perf.install(app, a.perf_log or Path(CFG["db"]).parent / "perf.jsonl")
     app.register_blueprint(mobile.make_blueprint(
         db_ro=db_ro, anno=anno, pc=pc, cache_dir=CACHE, static_dir=STATIC / "m",
         state_dir=Path(CFG["db"]).parent / "mobile"))

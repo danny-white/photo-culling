@@ -23,6 +23,8 @@ import time
 
 import numpy as np
 
+import perf
+
 CAPTION_MARGIN = 0.06   # nomic cosine: within this of the best photo
 PICTURE_MARGIN = 0.03   # CLIP cosine runs on a tighter scale than nomic's
 MIN_Z = 3.0
@@ -222,7 +224,8 @@ class Search:
         lex_words = [w for w in words if w not in STOP] or words
         pats = [re.compile(r"\b" + re.escape(w)) for w in lex_words]
         in_days = np.fromiter((d in day_keep for d in idx["days"]), bool, n)
-        lex = in_days & np.fromiter((all(p.search(b) for p in pats) for b in idx["blobs"]), bool, n)
+        with perf.stage("words"):
+            lex = in_days & np.fromiter((all(p.search(b) for p in pats) for b in idx["blobs"]), bool, n)
         if lex.any():
             used.append("words")
         text = " ".join(words)
@@ -235,7 +238,10 @@ class Search:
         if meaning and idx["cap"] is not None:
             try:
                 h = idx["cap_have"] & in_days
-                cap_s, cap_m, cap_k, _ = self._signal(idx["cap"], h, self._caption_vec(text), CAPTION_MARGIN, CAPTION_FLOOR)
+                with perf.stage("caption_query"):     # the query embedded by nomic in Ollama
+                    qv = self._caption_vec(text)
+                with perf.stage("captions"):
+                    cap_s, cap_m, cap_k, _ = self._signal(idx["cap"], h, qv, CAPTION_MARGIN, CAPTION_FLOOR)
                 if h.any():
                     cap_z = (cap_s - cap_s[h].mean()) / (cap_s[h].std() or 1)
                 if cap_m.any():
@@ -244,8 +250,11 @@ class Search:
                 notes.append(f"Caption meaning is off: the search model isn't answering ({type(e).__name__}).")
         if meaning and idx["pic"] is not None:
             try:
-                _, pm, pk, z = self._signal(idx["pic"], idx["pic_have"] & in_days, self.clip.text(text),
-                                            PICTURE_MARGIN, PICTURE_FLOOR)
+                with perf.stage("picture_query"):     # the query through CLIP's text half
+                    tv = self.clip.text(text)
+                with perf.stage("pictures"):
+                    _, pm, pk, z = self._signal(idx["pic"], idx["pic_have"] & in_days, tv,
+                                                PICTURE_MARGIN, PICTURE_FLOOR)
                 if cap_z is not None:
                     pm &= cap_m | lex | (cap_z >= PICTURE_CAPTION_Z) | ~idx["cap_have"]
                 if pm.any() and (lex.any() or cap_m.any() or z >= PICTURE_ALONE_Z):
@@ -259,7 +268,8 @@ class Search:
         return matched, score, pats
 
     def search(self, q: str) -> dict:
-        idx = self.index()
+        with perf.stage("index"):
+            idx = self.index()
         words, dates = parse(q)
         n = len(idx["ids"])
         day_keep = {d for d, iso in idx["day_iso"].items() if date_ok(iso, dates)}
@@ -328,7 +338,8 @@ class Search:
     def photos(self, q: str, limit: int = PHOTOS_OUT) -> dict:
         """Photos for a query, best match first, across every day (the gallery's search).
         A query of only dates gives the photos in that span, newest first."""
-        idx = self.index()
+        with perf.stage("index"):
+            idx = self.index()
         words, dates = parse(q)
         day_keep = {d for d, iso in idx["day_iso"].items() if date_ok(iso, dates)}
         notes, used = [], []

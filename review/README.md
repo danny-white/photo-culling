@@ -112,6 +112,33 @@ only when its facts change. Search matches the summaries too.
 A stack you picked, or rated, in Lightroom counts as done on the phone (a reject flag still
 rejects), and a phone decision that loses to your own flag shows under "Your Lightroom flag won".
 
+## Timing (`trial_out/perf.jsonl`)
+
+Every request is timed by `review/perf.py` and written as one JSON line to `trial_out/perf.jsonl`
+(change it with `--perf-log`; rotated at 20 MB, three old files kept).
+
+- **Each line:** the route, status, handler time (`ms`), time until the body was sent (`send_ms`), size and caller.
+- **Stages:** the parts a handler times, e.g. `load`, `full_decode`, `decode_wait`, `encode`, `receipts`, `days_rebuild`, `caption_query`, `picture_query`.
+- **Facts:** e.g. `cache=hit|miss`, `decode_cache`, `days_cache`, `served=original`.
+
+Responses also carry a `Server-Timing` header with the same stages, so a browser's developer tools show them.
+
+The phone pages load `static/m/perf-client.js` and send their own measurements to `POST /m/api/perf`:
+
+- **Every `/m/api` fetch,** as the phone saw it: waiting in the browser's queue, first byte, download, and browser-cache hits.
+- **Moments you feel:**
+  - `card_photo`: a cull card's photo ready after it is drawn, marked `waited` or `prefetched`;
+  - `day_open`;
+  - `viewer_photo` and `viewer_hd`;
+  - `results_ready`;
+  - `save_ready`.
+
+These are logged as `kind: "client"`. Summarise both with:
+
+    ./venv/bin/python review/perf_report.py              # last 24 h; --hours 168 for a week, --route img to filter
+
+The access log in the journal (`journalctl --user -u photo-review`) is unchanged.
+
 ## Notes
 
 - Single-theme dark by design (a darkroom tool).
