@@ -266,6 +266,54 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(self.client.post("/m/api/perf", json={"items": "x"}, headers=self.H).status_code, 400)
         self.assertEqual(self.client.post("/m/api/perf", json={"items": []}).status_code, 403)
 
+    # ------------------------------------------------ the contract the iPhone app relies on (review/API.md)
+    def assert_shape(self, obj, shape, where):
+        """shape: {field: type, a tuple of types, or (type, None) when the field can be null}"""
+        for k, t in shape.items():
+            self.assertIn(k, obj, f"{where}: missing {k}")
+            nullable = isinstance(t, tuple) and t[-1] is None
+            t = t[0] if nullable else t
+            v = obj[k]
+            if v is None:
+                self.assertTrue(nullable, f"{where}.{k} is null but the contract says it can't be")
+            else:
+                types = t if isinstance(t, tuple) else (t,)
+                ok = isinstance(v, types) and not (isinstance(v, bool) and bool not in types)
+                self.assertTrue(ok, f"{where}.{k}: {type(v).__name__}, expected {t}")
+
+    DAY = {"day": str, "folder": str, "date": (str, None), "frames": int, "stacks": int, "thumbs": list,
+           "last_ts": (int, float), "place": (str, None), "places": list, "gps_frames": int,
+           "summary": (str, None), "decided": int, "sent": int, "landed": int, "conflicts": int,
+           "lr_done": int, "finished": bool, "sent_at": (str, None)}
+    PHOTO = {"id": int, "day": str, "date": (str, None), "ts": ((int, float), None), "file": str,
+             "bytes": (int, None), "camera": (str, None), "lens": (str, None), "caption": (str, None),
+             "place": (str, None), "stars": int, "picked": bool, "rejected": bool, "raw": bool}
+
+    def test_contract_days(self):
+        days = self.client.get("/m/api/days").get_json()["days"]
+        for d in days[:50]:
+            self.assert_shape(d, self.DAY, "Day")
+
+    def test_contract_gallery(self):
+        day = self.client.get(f"/m/api/gallery/day/{DAY}").get_json()
+        self.assert_shape(day, {"day": str, "date": (str, None), "summary": (str, None), "photos": list}, "GalleryDay")
+        for p in day["photos"]:
+            self.assert_shape(p, self.PHOTO, "Photo")
+        found = self.client.get("/m/api/gallery/search?q=DSC05040").get_json()
+        self.assert_shape(found, {"query": str, "total": int, "signals": list, "notes": list, "photos": list}, "Search")
+        for p in found["photos"]:
+            self.assert_shape(p, self.PHOTO, "Photo")
+        like = self.client.get(f"/m/api/gallery/like/{day['photos'][0]['id']}").get_json()
+        self.assert_shape(like, {"total": int, "signals": list, "notes": list, "photos": list}, "Like")
+
+    def test_json_reads_revalidate_with_an_etag(self):
+        r = self.client.get(f"/m/api/gallery/day/{DAY}")
+        tag = r.headers["ETag"]
+        self.assertEqual(r.headers["Cache-Control"], "no-cache")
+        again = self.client.get(f"/m/api/gallery/day/{DAY}", headers={"If-None-Match": tag})
+        self.assertEqual(again.status_code, 304)
+        self.assertEqual(again.data, b"")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -426,6 +426,16 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             abort(404)
         return send_from_directory(static_dir, p)
 
+    @bp.after_request
+    def revalidate(resp):
+        """JSON reads get an ETag, so the app can ask "anything new?" and get a bodiless 304."""
+        if (request.method == "GET" and resp.status_code == 200 and resp.mimetype == "application/json"
+                and not resp.direct_passthrough):
+            resp.add_etag()
+            resp.headers.setdefault("Cache-Control", "no-cache")
+            resp.make_conditional(request)
+        return resp
+
     # ---------------------------------------------------------------- routes: reads
     def refresh_days():
         """Rebuild the day list and each day's stacks when the cache is older than DAYS_TTL_S."""
