@@ -38,7 +38,7 @@ Scope and decisions: https://claude.ai/artifact/FQv95YRVDg1DK6tBvruvob (picks ma
 
 | Phase | Contents | State |
 |---|---|---|
-| Prep (PC) | Server contract and ETags (`review/API.md`), `CullingBayCore` on Linux | in progress 2026-10-17 |
+| Prep (PC) | Server contract and ETags (`review/API.md`), `CullingBayCore` on Linux | done 2026-10-17 (110 tests) |
 | 0 · Build loop | First LiDAR app build as a trial; Culling Bay shell builds over SSH; unsigned .ipa installs via Danny's re-signing | Monday night |
 | 1 · Gallery | Search, Best, 1 per burst, grid, viewer with full-res zoom, Similar, day, Save (JPEG / RAW) and share | |
 | 2 · Cull core | Days, card, stars, keep/reject, undo, Send, receipts, haptics, keep-awake | |
