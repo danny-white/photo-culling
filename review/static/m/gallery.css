@@ -40,6 +40,28 @@ main{max-width:1100px;margin:0 auto;padding:10px 12px 90px;outline:none}
 h2{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:18px 2px 8px}
 
 /* home */
+/* home: year pills, years, months */
+.yearbar{position:relative;margin-top:8px;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+.yearbar::-webkit-scrollbar{display:none}
+.ypill{position:relative;flex:none;border:0;border-radius:999px;background:var(--panel);color:var(--muted);
+  padding:6px 11px 9px;font:600 12.5px/1 var(--body);font-variant-numeric:tabular-nums;overflow:hidden}
+.ypill i{position:absolute;left:50%;bottom:3px;height:2px;transform:translateX(-50%);border-radius:1px;background:var(--line)}
+.ypill[aria-current=true]{background:var(--ink);color:var(--bg)}
+.ypill[aria-current=true] i{background:var(--bg);opacity:.5}
+.yhead{display:flex;align-items:baseline;gap:10px;width:100%;background:none;border:0;border-bottom:1px solid var(--line);
+  padding:22px 2px 10px;text-align:left}
+.yhead b{font-size:26px;font-weight:800;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.yhead small{flex:1;min-width:0;color:var(--muted);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.yhead i,.mhead i{font-style:normal;color:var(--muted);font-size:20px;width:20px;text-align:center}
+.mo{border-bottom:1px solid var(--line)}
+.mhead{display:flex;align-items:center;gap:10px;width:100%;background:none;border:0;padding:12px 2px 6px;text-align:left}
+.mtx{flex:1;min-width:0}
+.mhead b{display:block;font-size:16px}
+.mhead small{display:block;color:var(--muted);font-size:12.5px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mstrip{display:flex;gap:3px;width:100%;background:none;border:0;padding:2px 2px 12px;overflow:hidden}
+.mstrip img{flex:0 0 calc((100% - 15px) / 6);min-width:0;aspect-ratio:1;object-fit:cover;border-radius:5px;background:var(--raise)}
+.mo.open .dayrow{padding-left:10px}
+.mo.open .dayrow:last-child{border-bottom:0}
 .lane{display:flex;gap:8px;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:4px;-webkit-overflow-scrolling:touch}
 .lane .ot{flex:none;width:140px;scroll-snap-align:start;background:none;border:0;padding:0;text-align:left}
 .lane img{width:140px;height:140px;object-fit:cover;border-radius:10px;background:var(--raise);display:block}

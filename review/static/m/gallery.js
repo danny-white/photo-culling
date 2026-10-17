@@ -16,12 +16,22 @@ const PAGE = 120;
 const S = {
   route: { kind: 'home' },
   photos: [], shown: 0, note: '',
-  days: null, homeShown: 30,
+  days: null, open: loadOpen(),   // open: {years: Set, months: Set} on the home page
   best: load('gallery.best', false), bursts: load('gallery.bursts', true),
   select: false, sel: new Set(),
   v: null,   // the viewer: {i, s, tx, ty, base, hd}
 };
 
+function loadOpen() {
+  try {
+    const o = JSON.parse(localStorage.getItem('gallery.open') || 'null');
+    if (o) return { years: new Set(o.years), months: new Set(o.months), set: true };
+  } catch { /* private mode */ }
+  return { years: new Set(), months: new Set(), set: false };
+}
+function storeOpen() {
+  try { localStorage.setItem('gallery.open', JSON.stringify({ years: [...S.open.years], months: [...S.open.months] })); } catch { /* private mode */ }
+}
 function load(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v === '1'; } catch { return d; } }
 function store(k, v) { try { localStorage.setItem(k, v ? '1' : '0'); } catch { /* private mode */ } }
 
@@ -79,6 +89,7 @@ async function route() {
   const r = S.route, seq = ++routeSeq;
   $('#back').hidden = r.kind === 'home';
   $('#filters').hidden = r.kind === 'home';
+  $('#yearbar').hidden = r.kind !== 'home';
   $('#q').value = r.kind === 'q' ? r.arg : '';
   $('#q-clear').hidden = !$('#q').value;
   $('#f-best').setAttribute('aria-pressed', S.best);
@@ -124,6 +135,35 @@ async function route() {
 function setTitle(t, sub) { $('#title').innerHTML = esc(t) + (sub ? '<small>' + esc(sub) + '</small>' : ''); }
 
 /* ---------------------------------------------------------------- home */
+/* ---------------------------------------------------------------- home: years, months, days
+   Year pills in the header jump to a year and light up for the year on screen; each pill's bar
+   shows how many photos the year holds. Years open into months, months into days. A month shows
+   a strip of its photos so it can be recognised before it's opened. What's open is remembered. */
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const yearOf = d => d.date ? d.date.slice(0, 4) : 'Undated';
+const monthKey = d => d.date ? d.date.slice(0, 7) : 'Undated';
+const count = n => n.toLocaleString() + ' photo' + (n === 1 ? '' : 's');
+
+function topTown(days) {   // the town most of these photos were near
+  const n = {};
+  for (const d of days) if (d.place) n[d.place] = (n[d.place] || 0) + d.frames;
+  const best = Object.keys(n).sort((a, b) => n[b] - n[a])[0];
+  return best ? town(best) : '';
+}
+
+function groupDays(days) {   // [{year, days, months: [{key, days}]}], newest first, as the list comes
+  const years = [];
+  for (const d of days) {
+    let y = years[years.length - 1];
+    if (!y || y.year !== yearOf(d)) years.push(y = { year: yearOf(d), days: [], months: [] });
+    y.days.push(d);
+    let m = y.months[y.months.length - 1];
+    if (!m || m.key !== monthKey(d)) y.months.push(m = { key: monthKey(d), days: [] });
+    m.days.push(d);
+  }
+  return years;
+}
+
 async function renderHome(seq) {
   const main = $('#main');
   if (!S.days) {
@@ -131,6 +171,12 @@ async function renderHome(seq) {
     try { S.days = (await getJSON('/m/api/days')).days; }
     catch (e) { if (seq === routeSeq) main.innerHTML = '<div class="empty">Couldn’t load the library: ' + esc(e.message) + '</div>'; return; }
     if (seq !== routeSeq) return;
+  }
+  const years = groupDays(S.days);
+  if (!S.open.set && years.length) {   // first visit: the newest year and its newest month
+    S.open.years.add(years[0].year);
+    S.open.months.add(years[0].months[0].key);
+    S.open.set = true;
   }
   const today = new Date();
   const near = d => {   // within two days of today's month and day, in an earlier year
@@ -146,9 +192,79 @@ async function renderHome(seq) {
       '<button class="ot" data-day="' + esc(d.day) + '"><img loading="lazy" src="' + img(d.thumbs[0], 'thumb') + '" alt="">' +
       '<span>' + isoParts(d.date).y + (d.place ? ' · ' + esc(town(d.place)) : '') + '</span></button>').join('') + '</div>';
   }
-  html += '<h2>Recent days</h2>' + S.days.slice(0, S.homeShown).map(dayRow).join('');
-  if (S.days.length > S.homeShown) html += '<button class="more" data-act="more-days">Show more days</button>';
+  html += years.map(yearHTML).join('');
   main.innerHTML = html;
+  renderYearbar(years);
+  watchYears();
+}
+
+function yearHTML(y) {
+  const open = S.open.years.has(y.year), photos = y.days.reduce((n, d) => n + d.frames, 0);
+  const sub = [y.days.length + ' day' + (y.days.length === 1 ? '' : 's'), count(photos), topTown(y.days)].filter(Boolean).join(' · ');
+  return '<section class="yr" id="yr-' + esc(y.year) + '" data-year="' + esc(y.year) + '">' +
+    '<button class="yhead" data-act="year" data-k="' + esc(y.year) + '" aria-expanded="' + open + '">' +
+    '<b>' + esc(y.year) + '</b><small>' + esc(sub) + '</small><i aria-hidden="true">' + (open ? '−' : '+') + '</i></button>' +
+    (open ? y.months.map(monthHTML).join('') : '') + '</section>';
+}
+
+function monthHTML(m) {
+  const open = S.open.months.has(m.key), photos = m.days.reduce((n, d) => n + d.frames, 0);
+  const name = m.key === 'Undated' ? 'Other folders' : MONTH_NAMES[+m.key.slice(5, 7) - 1];
+  const sub = [m.days.length + ' day' + (m.days.length === 1 ? '' : 's'), count(photos), topTown(m.days)].filter(Boolean).join(' · ');
+  const strip = m.days.flatMap(d => d.thumbs.slice(0, m.days.length > 2 ? 1 : 3)).slice(0, 6);
+  return '<div class="mo' + (open ? ' open' : '') + '">' +
+    '<button class="mhead" data-act="month" data-k="' + esc(m.key) + '" aria-expanded="' + open + '">' +
+    '<span class="mtx"><b>' + esc(name) + '</b><small>' + esc(sub) + '</small></span><i aria-hidden="true">' + (open ? '−' : '+') + '</i></button>' +
+    (open ? m.days.map(dayRow).join('')
+          : '<button class="mstrip" data-act="month" data-k="' + esc(m.key) + '" tabindex="-1" aria-hidden="true">' +
+            strip.map(id => '<img loading="lazy" src="' + img(id, 'thumb') + '" alt="">').join('') + '</button>') +
+    '</div>';
+}
+
+function toggle(set, key) {
+  if (set.has(key)) set.delete(key); else set.add(key);
+  storeOpen();
+  const y = window.scrollY;
+  renderHome(routeSeq).then(() => window.scrollTo(0, y));
+}
+
+function renderYearbar(years) {
+  const max = Math.max(...years.map(y => y.days.reduce((n, d) => n + d.frames, 0)), 1);
+  $('#yearbar').innerHTML = years.map(y => {
+    const photos = y.days.reduce((n, d) => n + d.frames, 0);
+    const bar = Math.max(8, Math.round(100 * Math.sqrt(photos / max)));   // square root, so small years still show
+    return '<button class="ypill" data-year="' + esc(y.year) + '" title="' + esc(count(photos)) + '">' + esc(y.year) +
+      '<i style="width:' + bar + '%"></i></button>';
+  }).join('');
+}
+
+function jumpToYear(year) {
+  if (!S.open.years.has(year)) { S.open.years.add(year); storeOpen(); }
+  renderHome(routeSeq).then(() => {
+    const el = document.getElementById('yr-' + year);
+    if (el) window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - $('.bar').offsetHeight });
+    markYear(year);
+  });
+}
+
+let yearSpy = null;
+function watchYears() {   // light the pill of the year at the top of the screen
+  if (yearSpy) yearSpy.disconnect();
+  const top = $('.bar').offsetHeight;
+  yearSpy = new IntersectionObserver(entries => {
+    const on = [...document.querySelectorAll('.yr')].find(sec => sec.getBoundingClientRect().bottom > top + 8);
+    if (on) markYear(on.dataset.year);
+  }, { rootMargin: `-${top}px 0px 0px 0px`, threshold: [0, 0.01, 1] });
+  document.querySelectorAll('.yr').forEach(sec => yearSpy.observe(sec));
+}
+function markYear(year) {
+  const bar = $('#yearbar');
+  for (const b of bar.querySelectorAll('.ypill')) {
+    const on = b.dataset.year === year;
+    if (on && b.getAttribute('aria-current') !== 'true')   // keep the lit pill in view, without moving the page
+      bar.scrollTo({ left: b.offsetLeft - bar.clientWidth / 2 + b.offsetWidth / 2, behavior: 'smooth' });
+    b.setAttribute('aria-current', on);
+  }
 }
 
 function dayRow(d) {
@@ -482,6 +598,7 @@ $('#search-form').addEventListener('submit', e => {
   $('#q').blur();
   if (q) go('q', q); else go('home');
 });
+$('#yearbar').addEventListener('click', e => { const b = e.target.closest('.ypill'); if (b) jumpToYear(b.dataset.year); });
 $('#q').addEventListener('input', () => { $('#q-clear').hidden = !$('#q').value; });
 $('#q-clear').addEventListener('click', () => { $('#q').value = ''; $('#q-clear').hidden = true; $('#q').focus(); });
 $('#back').addEventListener('click', () => { if (history.length > 1) history.back(); else go('home'); });
@@ -494,7 +611,8 @@ $('#sel-save').addEventListener('click', () => save(S.photos.filter(p => S.sel.h
 $('#main').addEventListener('click', e => {
   const t = e.target.closest('[data-i],[data-day],[data-act]');
   if (!t) return;
-  if (t.dataset.act === 'more-days') { S.homeShown += 60; renderHome(routeSeq); return; }
+  if (t.dataset.act === 'year') { toggle(S.open.years, t.dataset.k); return; }
+  if (t.dataset.act === 'month') { toggle(S.open.months, t.dataset.k); return; }
   if (t.dataset.day) { go('day', t.dataset.day); return; }
   const i = +t.dataset.i, p = S.photos[i];
   if (S.select) {
