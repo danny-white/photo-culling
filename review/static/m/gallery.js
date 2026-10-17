@@ -247,7 +247,7 @@ function closeSheet() { $('#sheet').hidden = true; $('#sheet-list').innerHTML = 
 const viewer = $('#viewer'), stage = $('#stage'), vimg = $('#vimg');
 
 function openViewer(i) {
-  S.v = { i, s: 1, tx: 0, ty: 0, base: null, hd: false };
+  S.v = { i, s: 1, tx: 0, ty: 0, base: null, hd: false, dir: 1, sharp: false, pre: [] };
   viewer.hidden = false;
   viewer.classList.remove('bare');
   document.body.style.overflow = 'hidden';
@@ -272,19 +272,41 @@ function show(i) {
   vimg.style.transition = 'none';
   vimg.style.opacity = '1';
   applyTransform();
+  // The grid's thumbnail is already on the phone, so it goes up at once (soft, same shape), and
+  // the 1616 px view replaces it when it arrives, unless the zoom picture got there first.
   const perfT = performance.now();
+  v.sharp = false;
+  let first = true;
   vimg.onload = () => {
     if (!S.v || S.v.i !== i) return;
     fit();
-    if (window.cbPerf) cbPerf.mark('viewer_photo', performance.now() - perfT, { name: img(p.id, 'view') });
+    if (first && window.cbPerf) cbPerf.mark('viewer_first', performance.now() - perfT, { name: img(p.id, 'thumb') });
+    first = false;
   };
-  vimg.src = img(p.id, 'view');
+  vimg.src = img(p.id, 'thumb');
+  const sharp = new Image();
+  sharp.onload = () => {
+    const swap = () => {
+      if (!S.v || S.v.i !== i || S.v.sharp) return;
+      S.v.sharp = true;
+      vimg.src = sharp.src;
+      if (window.cbPerf) cbPerf.mark('viewer_photo', performance.now() - perfT, { name: img(p.id, 'view') });
+    };
+    (sharp.decode ? sharp.decode() : Promise.resolve()).then(swap, swap);   // swap once decoded: no flash
+  };
+  sharp.src = img(p.id, 'view');
   $('#v-count').textContent = (i + 1) + ' / ' + S.photos.length;
   $('#v-when').textContent = [longDate(p.date), timeOf(p.ts)].filter(Boolean).join(' · ');
   $('#v-where').textContent = [town(p.place), p.camera, p.stars ? '★'.repeat(Math.min(p.stars, 5)) : ''].filter(Boolean).join(' · ');
   $('#v-cap').textContent = p.caption || '';
   $('#v-day').hidden = S.route.kind === 'day';
-  for (const j of [i + 1, i - 1]) if (S.photos[j]) new Image().src = img(S.photos[j].id, 'view');
+  // Preload two ahead in the direction you're swiping, and one behind. The Image objects are kept
+  // so the requests aren't dropped.
+  v.pre = [i + v.dir, i + 2 * v.dir, i - v.dir].filter(j => S.photos[j]).map(j => {
+    const im = new Image();
+    im.src = img(S.photos[j].id, 'view');
+    return im;
+  });
 }
 
 // The image is sized to fit the screen in its own shape, so zoom and pan work on the picture
@@ -334,6 +356,7 @@ function loadHD() {   // the 3000-px picture, decoded from the original, when yo
   hi.onload = () => {
     if (window.cbPerf) cbPerf.mark('viewer_hd', performance.now() - perfT, { name: exportUrl(p.id, 's=large') });
     if (!S.v || S.photos[S.v.i] !== p) return;
+    S.v.sharp = true;   // nothing smaller replaces it now
     vimg.onload = null;
     vimg.src = hi.src;
     $('#v-hd').hidden = true;
@@ -345,6 +368,7 @@ function loadHD() {   // the 3000-px picture, decoded from the original, when yo
 function step(d) {
   const v = S.v, j = v.i + d;
   if (j < 0 || j >= S.photos.length) { snapBack(); return; }
+  v.dir = d > 0 ? 1 : -1;
   const b = v.base, out = d > 0 ? -(b ? b.W : 400) : (b ? b.W : 400);
   vimg.style.transition = 'transform .16s ease-out';
   v.tx = out; applyTransform();

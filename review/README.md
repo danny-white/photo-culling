@@ -129,7 +129,7 @@ The phone pages load `static/m/perf-client.js` and send their own measurements t
 - **Moments you feel:**
   - `card_photo`: a cull card's photo ready after it is drawn, marked `waited` or `prefetched`;
   - `day_open`;
-  - `viewer_photo` and `viewer_hd`;
+  - `viewer_first` (the thumbnail up, at once), `viewer_photo` (the sharp 1616 px picture) and `viewer_hd`;
   - `results_ready`;
   - `save_ready`.
 

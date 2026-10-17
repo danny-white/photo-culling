@@ -23,11 +23,13 @@
     try { u = new URL(e.name); } catch { return; }
     if (u.origin !== location.origin || !u.pathname.startsWith('/m/api/') || u.pathname === '/m/api/perf') return;
     const total = (e.serverTiming || []).find(t => t.name === 'total');
-    const cached = e.transferSize === 0 && e.decodedBodySize > 0;
+    // Safari gives no detail (responseStart 0) for a picture it already holds in memory
+    const hidden = !(e.responseStart > 0);
+    const cached = (e.transferSize === 0 && e.decodedBodySize > 0) || (hidden && e.duration < 5);
     const item = { type: 'fetch', name: (u.pathname + u.search).slice(0, 300), ms: e.duration,
                    bytes: e.encodedBodySize || 0, detail: cached ? 'browser-cache' : 'network' };
     if (total) item.server_ms = total.duration;
-    if (e.requestStart > 0) {   // detailed timing; zero when the browser doesn't expose it
+    if (!hidden && e.requestStart > 0) {   // detailed timing, when the browser exposes it
       item.wait_ms = e.requestStart - e.startTime;
       item.ttfb_ms = e.responseStart - e.requestStart;
       item.dl_ms = e.responseEnd - e.responseStart;
