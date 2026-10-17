@@ -146,6 +146,28 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(r["days"][0]["day"], "2026/2026-09-29", "the deer look like it")
         self.assertIsNone(self.s.like(10 ** 9))
 
+    def test_photos_rank_matches_across_days(self):
+        r = self.s.photos("kayak")
+        self.assertEqual(r["total"], 6)
+        self.assertEqual(len(r["ids"]), 6)
+        days = [day_of(self.con.execute("SELECT path FROM images WHERE rowid=?", (i,)).fetchone()[0]) for i in r["ids"]]
+        self.assertEqual(days[0], "2025/2025-05-25", "the day with five kayaks has the strongest matches")
+        self.assertIn("2019/2019-07-04", days)
+        self.assertNotIn("2026/2026-09-29", days)
+
+    def test_photos_for_dates_alone_newest_first(self):
+        r = self.s.photos("2025")
+        self.assertEqual(r["signals"], ["dates"])
+        self.assertTrue(r["ids"])
+        self.assertEqual(r["total"], len(r["ids"]))
+
+    def test_like_photos_include_its_own_day_but_not_itself(self):
+        rid = self.con.execute("SELECT rowid FROM images WHERE caption LIKE '%yellow kayak%' LIMIT 1").fetchone()[0]
+        r = self.s.like_photos(rid)
+        self.assertTrue(r["ids"])
+        self.assertNotIn(rid, r["ids"])
+        self.assertIsNone(self.s.like_photos(10 ** 9))
+
 
 if __name__ == "__main__":
     unittest.main()

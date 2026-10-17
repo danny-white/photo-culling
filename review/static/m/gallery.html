@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Gallery">
+<meta name="theme-color" content="#0C0D0E">
+<title>Gallery · Culling Bay</title>
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="gallery.css">
+</head>
+<body>
+<header class="bar">
+  <div class="row">
+    <button class="back" id="back" aria-label="Back" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+    </button>
+    <form class="sbox" id="search-form" role="search">
+      <svg class="mag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      <input id="q" type="search" placeholder="Search what, where, when" autocomplete="off" enterkeyhint="search" aria-label="Search photos">
+      <button type="button" class="sx" id="q-clear" aria-label="Clear the search" hidden>×</button>
+    </form>
+    <a class="cull" href="/m/" title="Back to culling">Cull</a>
+  </div>
+  <div class="row filters" id="filters" hidden>
+    <div class="title" id="title"></div>
+    <button class="chip" id="f-best" aria-pressed="false">★ Best</button>
+    <button class="chip" id="f-bursts" aria-pressed="true">1 per burst</button>
+    <button class="chip" id="f-select" aria-pressed="false">Select</button>
+  </div>
+</header>
+
+<main id="main" tabindex="-1"></main>
+
+<div class="selbar" id="selbar" hidden>
+  <span id="sel-n">0 selected</span>
+  <button class="btn" id="sel-clear">Clear</button>
+  <button class="btn primary" id="sel-save">Save to phone</button>
+</div>
+
+<div class="viewer" id="viewer" hidden>
+  <div class="stage" id="stage"><img id="vimg" alt="" draggable="false"></div>
+  <div class="vtop chrome">
+    <button class="ico" id="v-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <span class="count" id="v-count"></span>
+    <span class="hd" id="v-hd" hidden>HD…</span>
+  </div>
+  <div class="vbottom chrome">
+    <div class="meta"><b id="v-when"></b><span id="v-where"></span></div>
+    <div class="cap" id="v-cap"></div>
+    <div class="vbtns">
+      <button class="vbtn" id="v-save">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Save</button>
+      <button class="vbtn" id="v-like">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><path d="M17 14v6M14 17h6"/></svg>Similar</button>
+      <button class="vbtn" id="v-day">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>Whole day</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet-card">
+    <div class="sheet-head"><b id="sheet-title">Save to phone</b><button class="ico" id="sheet-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <p class="hint">Press and hold a photo, then tap <b>Save to Photos</b> (or <b>Share</b> to send it). Each is the full-size picture, dated when it was taken.</p>
+    <p class="hint" id="sheet-raw" hidden><b>RAW</b> downloads the original file to the Files app. Open it from there in Lightroom, Darkroom or Photos to edit.</p>
+    <div class="sheet-list" id="sheet-list"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="gallery.js"></script>
+</body>
+</html>

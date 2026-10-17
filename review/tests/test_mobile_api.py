@@ -195,6 +195,71 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(max(Image.open(io.BytesIO(r.data)).size), 320)
         r.close()
 
+    def test_gallery_day_one_per_stack_in_time_order(self):
+        body = self.client.get(f"/m/api/gallery/day/{DAY}").get_json()
+        photos = body["photos"]
+        self.assertEqual(len(photos), 16)                       # one per stack
+        ts = [p["ts"] for p in photos]
+        self.assertEqual(ts, sorted(ts))
+        self.assertTrue(all(p["raw"] and p["date"] == "2026-10-01" for p in photos))
+        self.assertNotIn("path", photos[0])
+        every = self.client.get(f"/m/api/gallery/day/{DAY}?bursts=0").get_json()["photos"]
+        self.assertEqual(len(every), 32)
+        self.assertEqual(self.client.get("/m/api/gallery/day/1999/nope").status_code, 404)
+
+    def test_gallery_search_by_file_name(self):
+        body = self.client.get("/m/api/gallery/search?q=DSC05040").get_json()
+        # camera file numbers wrap, so the same name turns up on other days too
+        self.assertEqual({p["file"] for p in body["photos"]}, {"DSC05040.ARW"})
+        self.assertIn("2026-10-01", [p["date"] for p in body["photos"]])
+        self.assertEqual(body["signals"], ["words"])
+        self.assertEqual(self.client.get("/m/api/gallery/search").status_code, 400)
+
+    def test_gallery_best_needs_a_pick_or_three_stars(self):
+        lead = self.client.get(f"/m/api/gallery/day/{DAY}").get_json()["photos"][0]
+        self.assertFalse(lead["picked"])
+        none = self.client.get(f"/m/api/gallery/day/{DAY}?best=1").get_json()["photos"]
+        self.assertNotIn(lead["id"], [p["id"] for p in none])
+
+    def test_export_carries_the_capture_time(self):
+        from PIL import Image
+        lead = self.client.get(f"/m/api/gallery/day/{DAY}").get_json()["photos"][0]
+        r = self.client.get(f"/m/api/export/{lead['id']}?s=large&dl=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "image/jpeg")
+        self.assertTrue(r.headers["Content-Disposition"].startswith("attachment;"))
+        self.assertIn(Path(lead["file"]).stem + ".jpg", r.headers["Content-Disposition"])
+        im = Image.open(io.BytesIO(r.data))
+        self.assertEqual(max(im.size), 3000)
+        self.assertTrue(im.getexif().get_ifd(0x8769)[36867].startswith("2026:10:01 "))
+        r.close()
+        self.assertEqual(self.client.get("/m/api/export/999999999").status_code, 404)
+
+    def test_export_of_a_jpeg_is_the_original_file(self):
+        con = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
+        try:
+            rowid, path = con.execute("SELECT rowid, path FROM images WHERE status='ok' AND lower(path) LIKE '%.jpg' "
+                                      "LIMIT 1").fetchone()
+        finally:
+            con.close()
+        if not Path(path).exists():
+            self.skipTest("the NAS is not mounted")
+        r = self.client.get(f"/m/api/export/{rowid}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data, Path(path).read_bytes())
+        r.close()
+
+    def test_export_original_raw_is_a_download_of_the_file(self):
+        lead = self.client.get(f"/m/api/gallery/day/{DAY}").get_json()["photos"][0]
+        self.assertTrue(lead["raw"])
+        self.assertGreater(lead["bytes"], 1_000_000)
+        r = self.client.get(f"/m/api/export/{lead['id']}?s=original")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.headers["Content-Disposition"].startswith("attachment;"))
+        self.assertIn(lead["file"], r.headers["Content-Disposition"])
+        self.assertEqual(len(r.data), lead["bytes"])
+        r.close()
+
 
 if __name__ == "__main__":
     unittest.main()

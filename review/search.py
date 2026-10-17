@@ -45,6 +45,8 @@ IDENT = re.compile(r"\d{3,}")   # DSC04814, IMG_2231: a file name, matched by wo
 REFRESH_S = 60          # how often to look for new photos or vectors
 DAYS_OUT = 40
 MATCH_IDS_MAX = 400     # matching photo ids sent per day, for "matches first"
+PHOTOS_OUT = 600        # photos sent for one gallery search
+LIKE_PHOTOS_OUT = 200
 STOP = {"a", "an", "the", "of", "in", "on", "at", "with", "and", "or", "to", "for", "by", "from",
         "my", "me", "some", "photo", "photos", "picture", "pictures", "shot", "shots", "day", "days"}
 MONTHS = {m: i + 1 for i, m in enumerate(
@@ -214,17 +216,9 @@ class Search:
         sd = float(s[have].std()) or 1.0
         return s, match, strength, (top - float(s[have].mean())) / sd
 
-    def search(self, q: str) -> dict:
-        idx = self.index()
-        words, dates = parse(q)
+    def _score(self, idx, words, day_keep, notes, used):
+        """(match mask, score, word patterns) for a query's words over the photos in day_keep."""
         n = len(idx["ids"])
-        day_keep = {d for d, iso in idx["day_iso"].items() if date_ok(iso, dates)}
-        notes, used = [], []
-        if not words:   # only dates: the days in that span, newest first
-            ds = sorted(day_keep, key=lambda d: idx["day_iso"].get(d) or "", reverse=True)
-            return {"query": q, "days": [{"day": d, "n": 0, "ids": [], "match_ids": [], "why": ""} for d in ds[:200]],
-                    "photos": 0, "signals": ["dates"], "notes": []}
-
         lex_words = [w for w in words if w not in STOP] or words
         pats = [re.compile(r"\b" + re.escape(w)) for w in lex_words]
         in_days = np.fromiter((d in day_keep for d in idx["days"]), bool, n)
@@ -261,6 +255,21 @@ class Search:
                 notes.append(f"Picture search is off ({type(e).__name__}).")
         score = lex * 1.0 + cap_k + pic_k
         matched = lex | cap_m | pic_m
+
+        return matched, score, pats
+
+    def search(self, q: str) -> dict:
+        idx = self.index()
+        words, dates = parse(q)
+        n = len(idx["ids"])
+        day_keep = {d for d, iso in idx["day_iso"].items() if date_ok(iso, dates)}
+        notes, used = [], []
+        if not words:   # only dates: the days in that span, newest first
+            ds = sorted(day_keep, key=lambda d: idx["day_iso"].get(d) or "", reverse=True)
+            return {"query": q, "days": [{"day": d, "n": 0, "ids": [], "match_ids": [], "why": ""} for d in ds[:200]],
+                    "photos": 0, "signals": ["dates"], "notes": []}
+
+        matched, score, pats = self._score(idx, words, day_keep, notes, used)
 
         by_day: dict[str, list[int]] = {}
         for i in np.flatnonzero(matched):
@@ -315,3 +324,40 @@ class Search:
         for r in out:
             r.pop("score")
         return {"days": out[:DAYS_OUT], "photos": int(match.sum()), "signals": [by], "notes": []}
+
+    def photos(self, q: str, limit: int = PHOTOS_OUT) -> dict:
+        """Photos for a query, best match first, across every day (the gallery's search).
+        A query of only dates gives the photos in that span, newest first."""
+        idx = self.index()
+        words, dates = parse(q)
+        day_keep = {d for d, iso in idx["day_iso"].items() if date_ok(iso, dates)}
+        notes, used = [], []
+        if not words:
+            keep = np.fromiter((d in day_keep for d in idx["days"]), bool, len(idx["ids"]))
+            order = sorted(np.flatnonzero(keep), key=lambda i: (idx["day_iso"].get(idx["days"][i]) or "", idx["ids"][i]),
+                           reverse=True)
+            return {"query": q, "ids": [int(idx["ids"][i]) for i in order[:limit]], "total": int(keep.sum()),
+                    "signals": ["dates"], "notes": []}
+        matched, score, _ = self._score(idx, words, day_keep, notes, used)
+        order = sorted(np.flatnonzero(matched), key=lambda i: -score[i])
+        return {"query": q, "ids": [int(idx["ids"][i]) for i in order[:limit]], "total": int(matched.sum()),
+                "signals": used, "notes": notes}
+
+    def like_photos(self, rowid: int, limit: int = LIKE_PHOTOS_OUT) -> dict | None:
+        """Photos most like this one, from any day, most similar first."""
+        idx = self.index()
+        i = idx["pos_id"].get(rowid)
+        if i is None:
+            return None
+        if idx["pic"] is not None and idx["pic_have"][i]:
+            mat, have, margin, by = idx["pic"], idx["pic_have"], LIKE_PICTURE_MARGIN, "pictures"
+        elif idx["cap"] is not None and idx["cap_have"][i]:
+            mat, have, margin, by = idx["cap"], idx["cap_have"], LIKE_CAPTION_MARGIN, "captions"
+        else:
+            return {"ids": [], "total": 0, "signals": [], "notes": ["This photo isn't indexed yet."]}
+        others = have.copy()
+        others[i] = False
+        s, match, _, _ = self._signal(mat, others, mat[i], margin)
+        order = sorted(np.flatnonzero(match), key=lambda j: -s[j])
+        return {"ids": [int(idx["ids"][j]) for j in order[:limit]], "total": int(match.sum()),
+                "signals": [by], "notes": []}

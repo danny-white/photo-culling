@@ -41,6 +41,7 @@ RECEIPT_RE = re.compile(r"^(\d{8}-\d{6})-(receipt|catalog)\.tsv$")   # the plugi
 LOST_AFTER = timedelta(seconds=60)                   # sent this long before a receipt that lacks it
 IMG_EDGE = {"thumb": 320, "view": 1616}   # 1616 = the embedded preview's full width
 DAYS_TTL_S = 30
+AS_IS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".heic": "image/heic", ".heif": "image/heif"}
 CROP_MAX = 2400          # longest side of a crop, in source pixels
 FULL_CACHE_FRAMES = 4    # full decodes kept in memory (~130 MB each for 42 MP)
 DECODES_AT_ONCE = 2
@@ -418,9 +419,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         return send_from_directory(static_dir, p)
 
     # ---------------------------------------------------------------- routes: reads
-    @bp.route("/api/days")
-    def api_days():
-        ingest_receipts()
+    def refresh_days():
+        """Rebuild the day list and each day's stacks when the cache is older than DAYS_TTL_S."""
         now = time.time()
         if cache["days"] is None or now - cache["days_at"] > DAYS_TTL_S:
             by_day = library_rows()
@@ -448,7 +448,13 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                     "summary": sums.get(f"{LIBRARY_ROOT}/{d}"),
                 })
             summary.sort(key=lambda x: (x["date"] or "", x["last_ts"]), reverse=True)
-            cache.update(days=summary, days_at=now, stack_paths=stack_paths)
+            stack_of = {p: (d, i) for d, sts in stack_paths.items() for i, paths in enumerate(sts) for p in paths}
+            cache.update(days=summary, days_at=now, stack_paths=stack_paths, stack_of=stack_of)
+
+    @bp.route("/api/days")
+    def api_days():
+        ingest_receipts()
+        refresh_days()
         con = anno_db()
         try:
             decided = {r["day"]: (r["n"], r["sent"], r["landed"], r["conflicts"]) for r in con.execute(
@@ -899,6 +905,158 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                       "days": len(folders), "caption_errors": errored},
             "model": model, "last_ingest": last, "recent": recent[-8:],
         })
+
+    # ---------------------------------------------------------------- routes: gallery
+    # A read-only view for finding and showing photos (static/m/gallery.html). Nothing here
+    # writes decisions; Save makes a JPEG for the phone's camera roll.
+    def gallery_items(ids: list[int], *, best: bool, bursts: bool) -> list[dict]:
+        """Details for photos in the given order. best: only photos you picked or gave 3+
+        stars, in Lightroom or on the phone. bursts: one photo per stack (the first one listed)."""
+        if not ids:
+            return []
+        refresh_days()
+        con = db_ro()
+        try:
+            q = ",".join("?" * len(ids))
+            rows = {r["rowid"]: dict(r) for r in con.execute(
+                f"SELECT rowid, path, filename, size, capture_ts, camera, lens, caption, place FROM images "
+                f"WHERE rowid IN ({q})", ids)}
+        finally:
+            con.close()
+        paths = [r["path"] for r in rows.values()]
+        con = anno_db()
+        try:
+            q = ",".join("?" * len(paths))
+            lr = {r["path"]: (r["pick"], r["rating"]) for r in con.execute(
+                f"SELECT path, pick, rating FROM lr_state WHERE path IN ({q})", paths)}
+            phone = {r["path"]: (r["flag"], r["stars"]) for r in con.execute(
+                f"SELECT path, flag, stars FROM cull_decisions WHERE path IN ({q})", paths)}
+        finally:
+            con.close()
+        out, seen = [], set()
+        for rid in ids:
+            r = rows.get(rid)
+            if not r:
+                continue
+            pick, rating = lr.get(r["path"], (0, 0))
+            flag, stars = phone.get(r["path"], (None, 0))
+            stars = max(rating or 0, stars or 0)
+            picked = pick == 1 or flag == "pick"
+            rejected = pick == -1 or flag == "reject"
+            if best and (rejected or not (picked or stars >= 3)):
+                continue
+            stack = cache["stack_of"].get(r["path"])
+            if bursts and stack:
+                if stack in seen:
+                    continue
+                seen.add(stack)
+            day = day_of(r["path"])
+            out.append({"id": rid, "day": day, "date": day_date(day) if day else None,
+                        "ts": r["capture_ts"], "file": r["filename"], "bytes": r["size"], "camera": r["camera"],
+                        "lens": r["lens"], "caption": r["caption"], "place": r["place"],
+                        "stars": stars, "picked": picked, "rejected": rejected,
+                        "raw": Path(r["path"]).suffix.lower() in stacks.RAW_EXTENSIONS})
+        return out
+
+    def gallery_flags():
+        return request.args.get("best") == "1", request.args.get("bursts", "1") == "1"
+
+    @bp.route("/api/gallery/search")
+    def api_gallery_search():
+        q = request.args.get("q", "").strip()[:200]
+        if not q:
+            return jsonify({"error": "missing q"}), 400
+        best, bursts = gallery_flags()
+        found = finder.photos(q)
+        return jsonify(dict(found, photos=gallery_items(found.pop("ids"), best=best, bursts=bursts)))
+
+    @bp.route("/api/gallery/like/<int:rowid>")
+    def api_gallery_like(rowid):
+        best, bursts = gallery_flags()
+        found = finder.like_photos(rowid)
+        if found is None:
+            return jsonify({"error": "no such photo"}), 404
+        return jsonify(dict(found, photos=gallery_items(found.pop("ids"), best=best, bursts=bursts)))
+
+    @bp.route("/api/gallery/day/<path:day>")
+    def api_gallery_day(day):
+        rows = day_rows(day)
+        if not rows:
+            return jsonify({"error": "no such day"}), 404
+        best, bursts = gallery_flags()
+        rows.sort(key=lambda r: (r["capture_ts"] or 0, r["rowid"]))
+        if bursts:   # each stack's lead, in time order
+            leads = {s["lead"] for s in stacks.build_stacks(rows)}
+            rows = [r for r in rows if r["rowid"] in leads]
+        return jsonify({"day": day, "date": day_date(day), "summary": day_summaries().get(f"{LIBRARY_ROOT}/{day}"),
+                        "photos": gallery_items([r["rowid"] for r in rows], best=best, bursts=False)})
+
+    def export_jpeg(rowid: int, edge: int | None) -> tuple[bytes, str] | None:
+        """A JPEG of the whole frame for the camera roll, carrying the capture time and
+        place so it lands on the right day in Photos. edge: longest side, None = full size."""
+        con = db_ro()
+        try:
+            r = con.execute("SELECT path, filename, capture_ts, gps_lat, gps_lon FROM images WHERE rowid=?",
+                            (rowid,)).fetchone()
+        finally:
+            con.close()
+        if not r:
+            return None
+        im = full_decode(r["path"])
+        if edge and max(im.size) > edge:
+            im = im.copy()
+            im.thumbnail((edge, edge), Image.LANCZOS)
+        exif = Image.Exif()
+        if r["capture_ts"]:
+            stamp = datetime.fromtimestamp(r["capture_ts"]).strftime("%Y:%m:%d %H:%M:%S")
+            exif[306] = stamp                               # DateTime
+            exif.get_ifd(0x8769)[36867] = stamp             # DateTimeOriginal
+            exif.get_ifd(0x8769)[36868] = stamp             # DateTimeDigitized
+        if r["gps_lat"] is not None and r["gps_lon"] is not None:
+            def dms(v):
+                v = abs(v)
+                d = int(v)
+                m = int((v - d) * 60)
+                return (d, m, round(((v - d) * 60 - m) * 60, 4))
+            gps = exif.get_ifd(0x8825)
+            gps[1], gps[2] = ("N" if r["gps_lat"] >= 0 else "S"), dms(r["gps_lat"])
+            gps[3], gps[4] = ("E" if r["gps_lon"] >= 0 else "W"), dms(r["gps_lon"])
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=92, exif=exif)
+        return buf.getvalue(), Path(r["filename"]).stem + ".jpg"
+
+    @bp.route("/api/export/<int:rowid>")
+    def api_export(rowid):
+        """?s=full (default) or large (3000 px, also the viewer's zoom image) for a JPEG; ?s=original
+        for the file exactly as it is on the NAS, RAWs included, always as a download; ?dl=1 to download."""
+        size = request.args.get("s", "full")
+        edge = {"full": None, "large": 3000}.get(size, None)
+        how = "attachment" if request.args.get("dl") == "1" else "inline"
+        if edge is None:
+            con = db_ro()
+            try:
+                r = con.execute("SELECT path, filename FROM images WHERE rowid=?", (rowid,)).fetchone()
+            finally:
+                con.close()
+            if r and size == "original":   # e.g. a RAW to edit in Lightroom or Darkroom on the phone
+                kind = AS_IS.get(Path(r["path"]).suffix.lower(), "application/octet-stream")
+                return send_file(r["path"], mimetype=kind, as_attachment=True, download_name=r["filename"],
+                                 max_age=3600)
+            # a phone or camera JPEG/HEIC goes as it is, with all its own metadata
+            if r and Path(r["path"]).suffix.lower() in AS_IS:
+                return send_file(r["path"], mimetype=AS_IS[Path(r["path"]).suffix.lower()], max_age=3600,
+                                 as_attachment=how == "attachment", download_name=r["filename"])
+        try:
+            made = export_jpeg(rowid, edge)
+        except Exception as e:
+            return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
+        if made is None:
+            return jsonify({"error": "not found"}), 404
+        data, name = made
+        resp = Response(data, mimetype="image/jpeg")
+        resp.headers["Content-Disposition"] = f'{how}; filename="{name}"'
+        resp.headers["Cache-Control"] = "max-age=3600"
+        return resp
 
     @bp.route("/api/img/<int:rowid>")
     def api_img(rowid):

@@ -293,3 +293,7 @@ button{font:inherit;color:inherit}
 .card.enter-next{animation:enterNext .1s ease-out}
 .card.enter-prev{animation:enterPrev .1s ease-out}
 @media (prefers-reduced-motion:reduce){.card,.toast,.prog i{animation:none!important;transition:none!important}}
+
+/* the way over to the gallery (gallery.html): search and show photos rather than cull */
+.head{position:relative}
+.head .glink{position:absolute;right:16px;top:16px;color:var(--accent);text-decoration:none;font-weight:500;font-size:14px}
