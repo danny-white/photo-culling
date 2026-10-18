@@ -22,3 +22,11 @@ review/cache/
 
 # CLIP model files (~600 MB), downloaded from huggingface.co/immich-app/ViT-B-32__openai
 models/
+
+# Caption eval: private photos, model outputs, labels and grades (scripts, RUBRIC and README are tracked)
+eval/set.json
+eval/images/
+eval/runs/
+eval/labels/
+eval/grades/
+eval/report*

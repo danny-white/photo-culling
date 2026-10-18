@@ -682,13 +682,17 @@ def is_oom(err: Exception) -> bool:
     return any(k in m for k in ("out of memory", "cudamalloc", "cuda error", "vram", "oom"))
 
 
-def analyze_vlm(client, work: Image.Image, fast: bool) -> tuple[dict, str]:
+def analyze_vlm(client, work: Image.Image, fast: bool, prompt: "str | None" = None,
+                model: "str | None" = None) -> tuple[dict, str]:
     """Run the VLM with an OOM ladder: primary@1536 -> primary@1024 -> fallback@1024.
-    Returns (coerced_fields, model_used)."""
+    Returns (coerced_fields, model_used). `prompt` and `model` (the primary) default to VLM_PROMPT
+    and MODEL_PRIMARY; only eval/run_qwen.py passes them."""
+    prompt = VLM_PROMPT if prompt is None else prompt
+    primary = model or MODEL_PRIMARY
     if fast:
         ladder = [(MODEL_FALLBACK, MAX_EDGE), (MODEL_FALLBACK, MAX_EDGE_OOM)]
     else:
-        ladder = [(MODEL_PRIMARY, MAX_EDGE), (MODEL_PRIMARY, MAX_EDGE_OOM), (MODEL_FALLBACK, MAX_EDGE_OOM)]
+        ladder = [(primary, MAX_EDGE), (primary, MAX_EDGE_OOM), (MODEL_FALLBACK, MAX_EDGE_OOM)]
 
     last_err = None
     for model, edge in ladder:
@@ -696,7 +700,7 @@ def analyze_vlm(client, work: Image.Image, fast: bool) -> tuple[dict, str]:
         try:
             resp = client.chat(
                 model=model,
-                messages=[{"role": "user", "content": VLM_PROMPT, "images": [img]}],
+                messages=[{"role": "user", "content": prompt, "images": [img]}],
                 think=False,
                 format=VLM_SCHEMA,
                 options={"num_ctx": NUM_CTX, "temperature": 0},
