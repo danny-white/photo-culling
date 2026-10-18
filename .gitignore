@@ -29,4 +29,5 @@ eval/images/
 eval/runs/
 eval/labels/
 eval/grades/
+eval/audits/
 eval/report*

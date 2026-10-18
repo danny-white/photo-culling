@@ -5,7 +5,7 @@ on its **factual** fields, and whether a new prompt beats it. `RUBRIC.md` define
 grade formats and the metrics. Run everything from the repo root with `./venv/bin/python`.
 
 Photos, labels, grades and run outputs are private or regenerated, so they are gitignored
-(`eval/images/`, `runs/`, `labels/`, `grades/`, `report*`). Only the scripts, RUBRIC and this file
+(`eval/images/`, `runs/`, `labels/`, `grades/`, `audits/`, `report*`). Only the scripts, RUBRIC and this file
 are tracked.
 
 ## Steps
@@ -26,6 +26,11 @@ are tracked.
 7. **Run, grade, score it.** `eval/run_qwen.py --name v2 --prompt-file eval/prompts/v2.txt`, grade
    `v2` as in step 4, then `eval/score.py baseline v2` for the paired comparison (photos fixed and
    broken, with a bootstrap interval on the difference).
+8. **Audit.** Open http://100.82.57.4:8000/m/eval/ on your phone to check references and grades,
+   starting with doubtful references and disagreements. Save corrections and disputed grades in
+   `eval/audits/` (the original labels and grades stay intact). Scoring summarizes audits among each
+   run's valid graded photos; `eval/score.py baseline v2 --drop-disputed` excludes wrong references
+   and that run's disputed grades from every metric, dropping paired photos if either run is disputed.
 
 ## The rule
 

@@ -39,6 +39,7 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import photo_cull as pc  # noqa: E402
 import mobile  # noqa: E402  -- Culling Bay Mobile, the phone routes under /m
+from eval_audit import make_eval_blueprint  # noqa: E402
 import perf  # noqa: E402  -- request timing: trial_out/perf.jsonl and Server-Timing
 
 HERE = Path(__file__).resolve().parent
@@ -485,6 +486,7 @@ def main():
     app.register_blueprint(mobile.make_blueprint(
         db_ro=db_ro, anno=anno, pc=pc, cache_dir=CACHE, static_dir=STATIC / "m",
         state_dir=Path(CFG["db"]).parent / "mobile"))
+    app.register_blueprint(make_eval_blueprint(eval_dir=HERE.parent / "eval"))
     if a.server_pidfile:
         a.server_pidfile.write_text(str(os.getpid()))
         print(f"Review server PID {os.getpid()} -> {a.server_pidfile}")
