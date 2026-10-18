@@ -42,3 +42,10 @@ included, because that writes to the real logs.
 - `ServerTiming.swift`, `PerfReporter.swift`: timing header parsing and `POST /m/api/perf`
 - `TilePlanner.swift`: tile planning and linked zoom, with its own `Point`, `Size`, `Rect`
 - `CropBox.swift`: parses a crop's `X-Crop-Box` header, which gives the full-resolution size `TilePlanner` needs
+- `Gallery/GalleryFormat.swift`: the display strings (`longDate`, `shortDate`, `time`, `megabytes`, `photoCount`, `stars`)
+- `Gallery/LibraryIndex.swift`: days grouped into years and months, month strips, and On this day
+- `Gallery/GallerySettings.swift`: the `GallerySettings` protocol with `InMemoryGallerySettings` and `UserDefaultsGallerySettings`
+- `Gallery/HomeModel.swift`, `FeedModel.swift`, `ViewerModel.swift`: the Gallery screens' state as `@MainActor @Observable` models (home, one results screen, the photo viewer); the SwiftUI views only bind to them
+- `Gallery/SavePlan.swift`: what to download for a save (JPEG or RAW, decision N8) and the save's progress
+- `Gallery/ImageDataLoader.swift`: picture downloads that share one request per URL and keep a memory cache limited by size
+- `Gallery/PerfMarks.swift`: builds the `PerfItem`s for `viewer_first`, `viewer_photo`, `viewer_hd`, `results_ready`, `save_ready` and loader fetches

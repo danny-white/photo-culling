@@ -146,6 +146,24 @@ struct LiveTests {
         #expect(box.contains(" of "), "unexpected X-Crop-Box: \(box)")
     }
 
+    @Test @MainActor func homeModelLoadsAndGroupsTheRealDays() async throws {
+        let settings = InMemoryGallerySettings()
+        let model = HomeModel(client: try makeClient(), settings: settings)
+        await model.load()
+        #expect(model.phase == .loaded)
+        let index = model.index
+        #expect(index.dayCount > 300)
+        #expect(index.years.flatMap(\.days).count == index.dayCount)
+        #expect(index.years.contains { $0.year == "2026" })
+        #expect(index.years.flatMap(\.months).flatMap(\.days).count == index.dayCount)
+        #expect(index.years.allSatisfy { !$0.months.isEmpty && $0.photoCount > 0 })
+        // first visit opens the newest year and its newest month
+        let newest = try #require(index.years.first)
+        #expect(model.openYears == [newest.year])
+        #expect(model.openMonths == [try #require(newest.months.first).key])
+        #expect(settings.hasOpenState)
+    }
+
     @Test func aSecondGalleryDayCallIsNotModified() async throws {
         let client = try makeClient()
         let first: Fetched<GalleryDay> = try await client.fetch(
