@@ -52,11 +52,6 @@ button{font-family:var(--sans)}
 .panel{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:16px}
 
 .errbox{font-family:var(--mono); font-size:12px; color:#ffd9d6; background:#241315; border:1px solid #5a2b2b; border-radius:var(--radius-sm); padding:10px 11px; white-space:pre-wrap; word-break:break-word}
-.mini{font-size:9px; font-weight:700; letter-spacing:.3px; text-transform:uppercase; padding:2px 6px; border-radius:999px; background:rgba(8,11,13,.72); color:var(--ink-2); border:1px solid var(--line-2)}
-.mini.keep{color:#04140b;background:var(--keep);border-color:var(--keep)}
-.mini.review{color:#160f00;background:var(--review);border-color:var(--review)}
-.mini.reject{color:#1a0605;background:var(--reject);border-color:var(--reject)}
-.stars-mini{font-family:var(--mono); font-size:10px; color:#f2c66b; letter-spacing:.5px}
 
 /* lightbox (last processed photo) */
 .lightbox{position:fixed; inset:0; z-index:50; background:rgba(6,8,9,.88); backdrop-filter:blur(3px);

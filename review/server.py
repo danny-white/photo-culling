@@ -339,8 +339,8 @@ def api_monitor():
     attention.sort(key=lambda f: f["last"] or "", reverse=True)
 
     last = con.execute(
-        "SELECT rowid, filename, path, status, base_verdict, quality_stars, caption, subject, scene, "
-        "reason, capture_ts, error_class, error_msg, processed_at, tags, activity, indoor_outdoor, "
+        "SELECT rowid, filename, path, status, caption, subject, scene, "
+        "capture_ts, error_class, error_msg, processed_at, tags, activity, indoor_outdoor, "
         "time_of_day, animals, content_type, visible_text, monochrome FROM images "
         "WHERE processed_at IS NOT NULL ORDER BY processed_at DESC LIMIT 1").fetchone()
     last_processed = row_public(last) if last else None

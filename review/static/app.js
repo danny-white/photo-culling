@@ -111,11 +111,7 @@ function lastProcessedHtml(lp) {
   return `<div style="display:flex;gap:12px">
     <img class="lp-thumb" src="/api/thumb/${lp.rowid}?s=grid" style="width:140px;height:auto;border-radius:var(--radius-sm);border:1px solid var(--line);flex:0 0 auto;cursor:zoom-in">
     <div style="min-width:0">
-      <div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:4px">${esc(lp.filename)} <span class="muted">${esc(lp.shoot_date || "")} &middot; ${when}</span></div>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
-        <span class="mini ${esc(lp.base_verdict)}">${esc(lp.base_verdict || "?")}</span>
-        <span class="stars-mini">${"&#9733;".repeat(lp.quality_stars || 0)}</span>
-        <span class="muted">${esc(lp.reason || "")}</span></div>
+      <div class="fn" style="font-family:var(--mono);font-size:12px;margin-bottom:6px">${esc(lp.filename)} <span class="muted">${esc(lp.shoot_date || "")} &middot; ${when}</span></div>
       <div class="cap" style="font-size:12.5px">${esc(lp.caption || lp.subject || "")}</div>
       ${factsLine}
       ${textLine}
