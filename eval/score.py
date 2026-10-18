@@ -13,6 +13,10 @@ fields, an unknown error type, an id not in the set, no label) are listed and le
 Primary: share of photos with at least one caption error of type hallucination, misidentification,
 wrong_count or over_assertion. Lower is better, so a paired difference below zero means the
 second run is better.
+
+Audits in eval/audits/ are summarized per run. --drop-disputed excludes a photo from every
+metric when its reference was ruled wrong or that run's grade was disputed. Paired comparisons
+use the intersection of the remaining photos, so a dispute of either run excludes the pair.
 """
 import argparse
 import sys
@@ -116,11 +120,42 @@ def ratio_ci(num: np.ndarray, den: np.ndarray, idx: np.ndarray) -> dict:
             "hi": float(np.percentile(r, 97.5)), "n": int((den > 0).sum())}
 
 
-def load_grades(run: str, entries: list, eval_dir: Path = EVAL) -> dict:
-    """{split: {"rows": {id: row}, "low": [primary flags], "malformed": [{file, problems}], "ungraded": n}}."""
+def load_audits(entries: list, eval_dir: Path = EVAL) -> dict:
+    """Read saved human judgements for this set; report unusable files without guessing."""
+    audits = {}
+    for e in entries:
+        path = eval_dir / "audits" / f"{e['id']}.json"
+        if not path.exists():
+            continue
+        try:
+            audit = read_json(path)
+            if (not isinstance(audit, dict) or audit.get("reference") not in ("right", "wrong", "unsure")
+                    or not isinstance(audit.get("grades", {}), dict)
+                    or any(v not in ("agree", "disagree") for v in audit.get("grades", {}).values())):
+                raise ValueError("invalid reference or grade judgement")
+        except (OSError, ValueError) as ex:
+            print(f"MALFORMED AUDIT {path}: {ex}", file=sys.stderr)
+            continue
+        audits[e["id"]] = audit
+    return audits
+
+
+def load_grades(run: str, entries: list, eval_dir: Path = EVAL, *,
+                audits=None, drop_disputed: bool = False) -> dict:
+    """Split buckets of metric rows, low-confidence flags, malformed files and ungraded counts.
+
+    Audit totals count valid graded photos before exclusions. Dropped photos remain graded.
+    """
     by_id = {e["id"]: e for e in entries}
     out = {s: {"rows": {}, "low": {}, "malformed": [], "ungraded": 0, "set": 0} for s in SPLITS}
     out["unmatched"] = []
+    if audits is None:
+        audits = load_audits(entries, eval_dir)
+    if audits:
+        out["audit"] = {"audited": 0, "reference_wrong": 0, "grades_disputed": 0}
+    if drop_disputed:
+        for s in SPLITS:
+            out[s]["excluded_disputed"] = 0
     for e in entries:
         out[e["split"]]["set"] += 1
     gdir = eval_dir / "grades" / run
@@ -147,6 +182,16 @@ def load_grades(run: str, entries: list, eval_dir: Path = EVAL) -> dict:
         if probs:
             bucket["malformed"].append({"file": str(f), "problems": probs})
             continue
+        audit = audits.get(i)
+        if audit is not None:
+            reference_wrong = audit["reference"] == "wrong"
+            grade_disputed = audit.get("grades", {}).get(run) == "disagree"
+            out["audit"]["audited"] += 1
+            out["audit"]["reference_wrong"] += int(reference_wrong)
+            out["audit"]["grades_disputed"] += int(grade_disputed)
+            if drop_disputed and (reference_wrong or grade_disputed):
+                bucket["excluded_disputed"] += 1
+                continue
         row = photo_row(g)
         if conf == "low":
             bucket["low"][i] = row["primary"][0]
@@ -167,6 +212,9 @@ def score_run(data: dict) -> dict:
                  "low_confidence": {"n": len(d["low"]),
                                     "primary_rate": (sum(d["low"].values()) / len(d["low"])) if d["low"] else None},
                  "ungraded": d["ungraded"], "malformed": d["malformed"], "metrics": {}}
+        if "excluded_disputed" in d:
+            entry["excluded_disputed"] = d["excluded_disputed"]
+            entry["graded"] += d["excluded_disputed"]
         if ids:
             idx = bootstrap_idx(len(ids))
             for key, _ in METRICS:
@@ -175,6 +223,8 @@ def score_run(data: dict) -> dict:
                 entry["metrics"][key] = ratio_ci(num, den, idx)
         res[s] = entry
     res["unmatched"] = data["unmatched"]
+    if "audit" in data:
+        res["audit"] = data["audit"]
     return res
 
 
@@ -212,12 +262,20 @@ def render(results: dict, comparison) -> str:
     lines = []
     w = max(len(r) for r in runs) + 2
     col = max(24, w)
+    for r in runs:
+        if "audit" in results[r]:
+            audit = results[r]["audit"]
+            lines.append(f"audit [{r}]: audited {audit['audited']}, reference ruled wrong "
+                         f"{audit['reference_wrong']}, grades disputed {audit['grades_disputed']}")
     for s in SPLITS:
         lines += [f"== {s} " + "=" * 60]
         lines.append(f"{'':40s}" + "".join(f"{r:>{col}s}" for r in runs))
         for label, key in (("photos in set", "set"), ("graded", "graded"), ("scored (not low-confidence)", "scored"),
                            ("not yet graded", "ungraded")):
             lines.append(f"{label:40s}" + "".join(f"{results[r][s][key]:>{col}d}" for r in runs))
+        if any("excluded_disputed" in results[r][s] for r in runs):
+            lines.append(f"{'excluded by audit, n':40s}" + "".join(
+                f"{results[r][s].get('excluded_disputed', 0):>{col}d}" for r in runs))
         low = [results[r][s]["low_confidence"] for r in runs]
         lines.append(f"{'low-confidence (excluded), n':40s}" + "".join(f"{x['n']:>{col}d}" for x in low))
         lines.append(f"{'  their primary error rate':40s}" + "".join(
@@ -252,12 +310,15 @@ def render(results: dict, comparison) -> str:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", nargs="*", metavar="RUN")
+    ap.add_argument("--drop-disputed", action="store_true",
+                    help="Exclude wrong references and disputed grades from every metric.")
     a = ap.parse_args(argv)
-    entries = load_set()
+    entries = load_set(EVAL)
     runs = a.runs or sorted(p.name for p in (EVAL / "grades").glob("*") if p.is_dir())
     if not runs:
         sys.exit("no runs given and eval/grades/ is empty")
-    data = {r: load_grades(r, entries) for r in runs}
+    audits = load_audits(entries, EVAL)
+    data = {r: load_grades(r, entries, EVAL, audits=audits, drop_disputed=a.drop_disputed) for r in runs}
     results = {r: score_run(data[r]) for r in runs}
     comparison = compare(data[runs[0]], data[runs[1]]) if len(runs) == 2 else None
     print(render(results, comparison))
