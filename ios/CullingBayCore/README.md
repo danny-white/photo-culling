@@ -49,3 +49,7 @@ included, because that writes to the real logs.
 - `Gallery/SavePlan.swift`: what to download for a save (JPEG or RAW, decision N8) and the save's progress
 - `Gallery/ImageDataLoader.swift`: picture downloads that share one request per URL and keep a memory cache limited by size
 - `Gallery/PerfMarks.swift`: builds the `PerfItem`s for `viewer_first`, `viewer_photo`, `viewer_hd`, `results_ready`, `save_ready` and loader fetches
+- `CullingBayClient+Crop.swift`: `probeCropURL` and `CropProbe`, which read a crop's `X-Crop-Box` header (the loader returns bodies only)
+- `Gallery/ViewerZoomModel.swift`: the viewer's pinch, double-tap, pan and swipe-to-page maths in points, and the tile plan for the current zoom
+- `Gallery/ExportModel.swift`: Save and Share as a model over a `PhotoExportService` that the app implements with PhotoKit and temp files
+- `Gallery/ServerSettingsModel.swift`: the server address text, its validation, and the `/m/api/days` check

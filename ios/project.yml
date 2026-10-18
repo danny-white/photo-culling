@@ -1,0 +1,52 @@
+name: CullingBay
+options:
+  bundleIdPrefix: co.dannywhite
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+packages:
+  CullingBayCore:
+    path: CullingBayCore
+targets:
+  CullingBay:
+    type: application
+    platform: iOS
+    sources: [CullingBay]
+    dependencies:
+      - package: CullingBayCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.dannywhite.cullingbay
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+    info:
+      path: CullingBay/Info.plist
+      properties:
+        CFBundleDisplayName: Culling Bay
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSPhotoLibraryAddUsageDescription: Save the photos you choose to your photo library.
+        NSLocalNetworkUsageDescription: Connect to your photo server to browse and download photos.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+schemes:
+  CullingBay:
+    build:
+      targets:
+        CullingBay: all
+    run:
+      config: Debug
+    archive:
+      config: Release
