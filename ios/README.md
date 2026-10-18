@@ -72,3 +72,30 @@ App Group) needs checking against Danny's re-signing setup before it's built.
 
 Open question for Monday: where the .ipa should go so the re-signing tool on the phone can pick it
 up (Files, the NAS Drive app, or a URL).
+
+## Delivering a build
+
+Run `ios/build-ipa.sh` on the PC once the app target and `ios/project.yml` are present.
+It copies `ios/` to the Mac, builds an unsigned .ipa, and brings it back to
+`~/photo-culling/trial_out/ios`. It keeps five builds.
+
+```sh
+ios/build-ipa.sh --dry-run
+ios/build-ipa.sh --test
+ios/build-ipa.sh --test --screenshot
+ios/build-ipa.sh --host user@addr --out /path/to/ios
+```
+
+`--test` runs the core tests on the Mac first. `--screenshot` also tries an iPhone simulator
+and saves `CullingBay.png` beside the builds. A screenshot failure does not block delivery.
+`--dry-run` only prints commands. The build number is the PC's Git commit count; rebuilding
+the same commit replaces that build. New commits are needed for new build numbers.
+
+On the phone, open http://100.82.57.4:8000/m/ios/ and download `CullingBay.ipa`.
+Share → SideStore, or open it from Files in SideStore. SideStore re-signs it with the free Apple ID.
+This URL is the delivery destination for the open question above.
+
+To try source updates, add http://100.82.57.4:8000/m/ios/source.json in SideStore.
+SideStore may refuse a plain-HTTP source; check this on the phone. Check installation,
+launching, and update detection after a later build too. The source uses the latest build's
+version and build number; older kept files remain linked from the download page.
