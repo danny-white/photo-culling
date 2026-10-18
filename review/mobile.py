@@ -22,7 +22,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
-from flask import Blueprint, Response, abort, jsonify, request, send_file, send_from_directory
+from flask import (Blueprint, Response, abort, jsonify, render_template_string, request,
+                   send_file, send_from_directory, url_for)
 from PIL import Image, ImageOps
 
 import perf
@@ -140,12 +141,13 @@ def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
 
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
-                   ollama_url: str = OLLAMA_URL) -> Blueprint:
+                   ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
     the narrow AICullInbox mount (tests turn it off and pass a temp dir)."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
+    ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     pano_file = state_dir / "pano.json"
     lock = threading.Lock()
@@ -415,6 +417,113 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 con.commit()
             finally:
                 con.close()
+
+    # ---------------------------------------------------------------- routes: iPhone builds
+    def ios_file(name):
+        # Even a fixed-name symlink must stay inside the delivery directory.
+        try:
+            path = (ios_dir / name).resolve()
+            if path.is_relative_to(ios_dir) and path.is_file():
+                return path
+        except (OSError, RuntimeError):
+            pass
+        return None
+
+    def ios_metadata():
+        path = ios_file("latest.json")
+        if path is None:
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(data, dict)
+                    or not all(isinstance(data.get(k), str) for k in
+                               ("version", "git", "built_at", "sha256", "file"))
+                    or type(data.get("build")) is not int or data["build"] < 0
+                    or type(data.get("bytes")) is not int or data["bytes"] < 0
+                    or data["file"] != f"CullingBay-{data['build']}.ipa"):
+                return None
+            datetime.fromisoformat(data["built_at"])
+            return data
+        except (OSError, ValueError):
+            return None
+
+    @bp.get("/ios/")
+    def ios_index():
+        latest = ios_metadata()
+        previous = sorted(
+            (p.name for p in ios_dir.glob("CullingBay-*.ipa")
+             if re.fullmatch(r"CullingBay-[0-9]+\.ipa", p.name) and ios_file(p.name)
+             and (latest is None or p.name != latest["file"])),
+            key=lambda name: int(name[11:-4]), reverse=True)
+        built = (datetime.fromisoformat(latest["built_at"]).astimezone()
+                 .strftime("%Y-%m-%d %H:%M:%S %Z") if latest else "")
+        html = render_template_string("""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Culling Bay builds</title><style>
+:root { color-scheme: light dark; font: 17px/1.5 system-ui, sans-serif; }
+body { max-width: 36rem; margin: auto; padding: 1.5rem; overflow-wrap: anywhere; }
+h1 { font-size: 1.8rem; } a { color: light-dark(#174caa, #9fc4ff); }
+.download { display: block; padding: 1rem; border-radius: .6rem; text-align: center;
+background: #2055ae; color: white; font-weight: bold; text-decoration: none; }
+dt { font-weight: bold; } dd { margin: 0 0 .6rem; }
+li { margin: .6rem 0; }
+</style></head><body><h1>Culling Bay builds</h1>
+{% if latest %}<dl><dt>Version</dt><dd>{{ latest.version }}</dd>
+<dt>Build</dt><dd>{{ latest.build }}</dd><dt>Git commit</dt><dd>{{ latest.git }}</dd>
+<dt>Built (server local time)</dt><dd>{{ built }}</dd>
+<dt>Size</dt><dd>{{ '%.1f'|format(latest.bytes / 1048576) }} MiB ({{ latest.bytes }} bytes)</dd></dl>
+<a class="download" href="{{ url_for('mobile.ios_latest_ipa') }}">Download CullingBay.ipa</a>
+<p>Download, then Share → SideStore, or open it from Files in SideStore.</p>
+{% else %}<p>No build yet.</p>{% endif %}
+<p><a href="{{ url_for('mobile.ios_source', _external=True) }}">SideStore source JSON</a>:
+SideStore may refuse a plain-HTTP source; test this on the phone.</p>
+{% if previous %}<h2>Previous builds</h2><ul>{% for name in previous %}
+<li><a href="{{ url_for('mobile.ios_kept_ipa', name=name) }}">{{ name }}</a></li>
+{% endfor %}</ul>{% endif %}</body></html>""", latest=latest, built=built, previous=previous)
+        return Response(html, mimetype="text/html", headers={"Cache-Control": "no-cache"})
+
+    def ios_download(name):
+        path = ios_file(name)
+        if path is None:
+            return jsonify(error="iOS build not found"), 404
+        response = send_file(path, as_attachment=True, download_name=name,
+                             mimetype="application/octet-stream")
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    @bp.get("/ios/CullingBay.ipa")
+    def ios_latest_ipa():
+        return ios_download("CullingBay.ipa")
+
+    @bp.get("/ios/latest.json")
+    def ios_latest():
+        data = ios_metadata()
+        return jsonify(data) if data else (jsonify(error="No iOS build yet"), 404)
+
+    @bp.get("/ios/source.json")
+    def ios_source():
+        data = ios_metadata()
+        if data is None:
+            return jsonify(error="No iOS build yet"), 404
+        # Use the versioned file so a source fetch and subsequent download agree.
+        download = url_for("mobile.ios_kept_ipa", name=data["file"], _external=True)
+        version = {"version": data["version"], "buildVersion": str(data["build"]),
+                   "date": data["built_at"], "downloadURL": download, "size": data["bytes"]}
+        return jsonify(name="Culling Bay", identifier="co.dannywhite.cullingbay.source", news=[],
+                       apps=[{"name": "Culling Bay", "bundleIdentifier": "co.dannywhite.cullingbay",
+                              "developerName": "Danny White",
+                              "localizedDescription": "Browse and cull your photos with Culling Bay.",
+                              "versions": [version], "version": data["version"],
+                              "versionDate": data["built_at"], "downloadURL": download,
+                              "size": data["bytes"]}])
+
+    @bp.get("/ios/<path:name>")
+    def ios_kept_ipa(name):
+        # This also blocks unknown iOS paths from falling through to app_static.
+        if not re.fullmatch(r"CullingBay-[0-9]+\.ipa", name):
+            return jsonify(error="iOS build not found"), 404
+        return ios_download(name)
 
     # ---------------------------------------------------------------- routes: app shell
     @bp.route("/")
