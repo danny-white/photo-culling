@@ -2,6 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+import Testing
 @testable import CullingBayCore
 
 let testBaseURL = URL(string: "http://100.82.57.4:8000")!
@@ -92,4 +93,69 @@ func galleryDayJSON(photos: [String] = [photoFullJSON]) -> String {
     """
     {"day":"2026/2026-10-01","date":"2026-10-01","summary":"A day","photos":[\(photos.joined(separator: ","))]}
     """
+}
+
+// MARK: Cull fixtures
+
+/// `GET /m/api/day/2026/2026-10-01` trimmed to three stacks (a single, a burst, a bracket) from
+/// the real server's response. The decision and Lightroom values on the burst and bracket frames
+/// are invented to cover a draft reject with a note, a conflict, a landed outcome, and a pair.
+let cullDayJSON = """
+{"day":"2026/2026-10-01","folder":"2026-10-01","date":"2026-10-01",
+ "summary":"Coastal rock formations and cliffs at dusk.",
+ "budget":{"hours":0.19,"per_hour":10,"stacks":5},
+ "stacks":[
+  {"id":0,"kind":"single","lead":43220,"frames":[
+   {"af":[0.5,0.454],"badges":[],"blown_pct":0.0,"caption":"A dark-feathered bird chick rests inside",
+    "decision":{"flag":"pick","note":"","outcome":null,"stars":null,"state":"landed"},
+    "file":"DSC05036.ARW","id":43220,"lens":"24-70mm F2.8 DG DN | Art 019",
+    "lr":{"by":"phone","pick":1,"rating":0,"stars_by":""},"mean_lum":94.4,
+    "partner_ids":[],"partners":[],"place":null,"sharpness":383.2}]},
+  {"id":1,"kind":"burst","lead":43224,"frames":[
+   {"af":[0.5,0.454],"badges":["Softer"],"blown_pct":0.0,"caption":"A dark-feathered bird chick rests inside",
+    "decision":{"flag":"reject","stars":null,"note":"Burst reject \\u00b7 kept DSC05038","state":"draft","outcome":null},
+    "file":"DSC05037.ARW","id":43207,"lens":"24-70mm F2.8 DG DN | Art 019","lr":null,"mean_lum":95.2,
+    "partner_ids":[],"partners":[],"place":null,"sharpness":441.5},
+   {"af":[0.5,0.454],"badges":[],"blown_pct":0.0,"caption":"A dark-colored bird sits inside a burrow",
+    "decision":{"flag":"pick","stars":4,"note":"","state":"conflict","outcome":"rejected"},
+    "file":"DSC05038.ARW","id":43224,"lens":"24-70mm F2.8 DG DN | Art 019",
+    "lr":{"pick":-1,"rating":2,"by":"you","stars_by":"phone"},"mean_lum":92.9,
+    "partner_ids":[],"partners":[],"place":null,"sharpness":410.1}]},
+  {"id":2,"kind":"bracket","lead":43203,"frames":[
+   {"af":[0.6875,0.454],"badges":[],"blown_pct":0.0,"caption":"silhouettes of people standing on a clif",
+    "decision":null,"file":"DSC05040.ARW","id":43203,"lens":"24-70mm F2.8 DG DN | Art 019","lr":null,
+    "mean_lum":102.4,"partner_ids":[],"partners":[],"place":null,"sharpness":241.5},
+   {"af":null,"badges":[],"blown_pct":0.0,"caption":"silhouettes of people standing on a clif",
+    "decision":{"flag":"pick","stars":null,"note":"","state":"landed","outcome":"your 3 kept"},
+    "file":"DSC05041.ARW","id":43214,"lens":"24-70mm F2.8 DG DN | Art 019",
+    "lr":{"by":"phone","pick":1,"rating":0,"stars_by":""},"mean_lum":32.0,
+    "partner_ids":[99041],"partners":["DSC05041.JPG"],"place":"greenwood, washington, us","sharpness":16.4}]}],
+ "progress":{"pass":2,"cursor":1}}
+"""
+
+let daySearchJSON = """
+{"query":"DSC05040","days":[
+ {"day":"2026/2026-10-01","n":2,"ids":[43203,43214],"match_ids":[43203,43214],"why":"2 photos \\u00b7 \\u201csilhouettes\\u201d"},
+ {"day":"2025/2025-06-02","n":0,"ids":[],"match_ids":[],"why":"Near Greenwood"}],
+ "photos":2,"signals":["words"],"notes":[]}
+"""
+
+let dayLikeJSON = """
+{"days":[{"day":"2025/2025-06-02","n":5,"ids":[1,2,3,4],"match_ids":[1,2,3,4,5],"why":"5 similar photos"}],
+ "photos":5,"signals":["pictures"],"notes":[]}
+"""
+
+/// A `Stack` with `kind` and one frame, for tests that vary one value.
+func stackJSON(kind: String) -> String {
+    """
+    {"id":0,"kind":"\(kind)","lead":1,"frames":[{"id":1,"file":"A.ARW","partners":[],"partner_ids":[],
+     "sharpness":null,"af":null,"badges":[],"lr":null,"decision":null,"lens":null,"caption":null,
+     "blown_pct":null,"mean_lum":null,"place":null}]}
+    """
+}
+
+/// The JSON object a request carries.
+func jsonBody(_ request: URLRequest) throws -> [String: Any] {
+    let data = try #require(request.httpBody)
+    return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
 }

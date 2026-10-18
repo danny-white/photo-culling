@@ -140,6 +140,80 @@ public actor CullingBayClient {
         }
     }
 
+    // MARK: Writes
+
+    /// Which cached GETs a successful write makes stale.
+    enum Stale: Sendable {
+        /// `GET /m/api/day/<day>` for this day.
+        case day(String)
+        /// `GET /m/api/day/<day>` for every day (a write that doesn't say which day it touched).
+        case allDays
+    }
+
+    /// Sends a JSON write (`POST` or `PUT`) with the `X-Culling-Bay` header the server requires.
+    /// Writes never use the ETag cache. After a 2xx the cached cull day(s) in `stale` are
+    /// dropped, so the next read doesn't offer a tag for a day that has just changed. A 409
+    /// becomes `.conflict`, a 503 `.unavailable`, any other non-2xx `.http`, each with the
+    /// server's `error` text.
+    func writeJSON<Body: Encodable & Sendable, T: Decodable & Sendable>(
+        method: String, path: String, body: Body, staling stale: Stale
+    ) async throws -> T {
+        var request = URLRequest(url: URLBuilding.url(base: baseURL, path: path))
+        request.httpMethod = method
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("1", forHTTPHeaderField: "X-Culling-Bay")
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys      // a retry sends the same bytes
+            request.httpBody = try encoder.encode(body)
+        } catch {
+            throw CullingBayError.transport("Could not encode the request: \(error.localizedDescription)")
+        }
+
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await transport.send(request)
+        } catch let error as CullingBayError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw CullingBayError.transport(error.localizedDescription)
+        }
+
+        switch response.statusCode {
+        case 200..<300:
+            let value: T = try Self.decode(data)
+            forget(stale)
+            return value
+        case 409:
+            let details = try? JSONDecoder().decode(WriteErrorBody.self, from: data)
+            throw CullingBayError.conflict(message: details?.error, applied: details?.applied)
+        case 503:
+            throw CullingBayError.unavailable(message: Self.errorMessage(in: data))
+        default:
+            throw CullingBayError.http(status: response.statusCode, message: Self.errorMessage(in: data))
+        }
+    }
+
+    private func forget(_ stale: Stale) {
+        let keys: [String]
+        switch stale {
+        case .day(let day):
+            keys = [URLBuilding.url(base: baseURL, path: "/m/api/day/\(day)").absoluteString]
+        case .allDays:
+            let prefix = URLBuilding.url(base: baseURL, path: "/m/api/day").absoluteString + "/"
+            keys = cache.keys.filter { $0.hasPrefix(prefix) }
+        }
+        for key in keys {
+            cache[key] = nil
+            cacheOrder.removeAll { $0 == key }
+        }
+    }
+
     private func remember(_ key: String, _ response: CachedResponse) {
         cache[key] = response
         cacheOrder.removeAll { $0 == key }
@@ -200,6 +274,12 @@ public actor CullingBayClient {
 
     private struct ErrorBody: Decodable {
         let error: String?
+    }
+
+    /// A 409 from a write also says how many decisions are already in Lightroom.
+    private struct WriteErrorBody: Decodable {
+        let error: String?
+        let applied: Int?
     }
 
     private static func decode<T: Decodable>(_ data: Data) throws -> T {

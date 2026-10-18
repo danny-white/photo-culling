@@ -35,8 +35,10 @@ included, because that writes to the real logs.
 ## Layout
 
 - `Models.swift`, `Place.swift`: `Day`, `Photo`, `PhotoList`, `GalleryDay`, `town(_:)`
-- `CullingBayClient.swift`: the client actor, `Fetched`, `ImageSize`, `SaveKind`, URL builders
-- `HTTPTransport.swift`, `Errors.swift`: the network seam and `CullingBayError`
+- `CullModels.swift`: the Cull tab's models (`CullDay`, `Stack`, `Frame`, `Decision`, `LightroomState`, `DaySearchResult`, write bodies and answers) and the open enums (`StackKind`, `CullFlag`, `CullVia`, `DecisionState`) whose unknown values decode as `.other`
+- `CullingBayClient.swift`: the client actor, `Fetched`, `ImageSize`, `SaveKind`, URL builders, and the JSON write path (never cached)
+- `CullingBayClient+Cull.swift`: `cullDay`, `daySearch`, `dayLike`, and the writes `decide`, `undo`, `saveProgress`, `send`, `reset`
+- `HTTPTransport.swift`, `Errors.swift`: the network seam and `CullingBayError` (including `.conflict` and `.unavailable` for a write's 409 and 503)
 - `ServerTiming.swift`, `PerfReporter.swift`: timing header parsing and `POST /m/api/perf`
 - `TilePlanner.swift`: tile planning and linked zoom, with its own `Point`, `Size`, `Rect`
 - `CropBox.swift`: parses a crop's `X-Crop-Box` header, which gives the full-resolution size `TilePlanner` needs

@@ -75,6 +75,42 @@ struct LiveTests {
         #expect(list.total >= list.photos.count)
     }
 
+    @Test func cullDayDecodesWithSixteenStacks() async throws {
+        let cull = try await makeClient().cullDay(day)
+        #expect(cull.day == day)
+        #expect(cull.date == "2026-10-01")
+        #expect(cull.stacks.count == 16)
+        #expect(cull.stacks.map(\.id) == Array(0..<16))
+        #expect(cull.stacks.allSatisfy { stack in stack.frames.contains { $0.id == stack.lead } })
+        #expect(cull.stacks.contains { $0.kind == .bracket } && cull.stacks.contains { $0.kind == .burst })
+        // an unknown value would decode as .other; the server's known sets should all be named
+        #expect(cull.stacks.allSatisfy { if case .other = $0.kind { false } else { true } })
+        let decisions = cull.stacks.flatMap(\.frames).compactMap(\.decision)
+        #expect(decisions.allSatisfy { d in
+            if case .other = d.flag { return false }
+            if case .other = d.state { return false }
+            return true
+        })
+        #expect(cull.budget.stacks >= 5 && cull.budget.perHour == 10)
+    }
+
+    @Test func daySearchByFileNameFindsTheDay() async throws {
+        let result = try await makeClient().daySearch("DSC05040")
+        #expect(result.query == "DSC05040")
+        #expect(result.signals == ["words"])
+        let hit = try #require(result.days.first { $0.day == day })
+        #expect(hit.n >= 1 && !hit.matchIDs.isEmpty)
+        #expect(hit.ids == Array(hit.matchIDs.prefix(4)))
+    }
+
+    @Test func dayLikeDecodesAndLeavesOutItsOwnDay() async throws {
+        let client = try makeClient()
+        let first = try await firstPhoto(of: client)
+        let result = try await client.dayLike(first.id)
+        #expect(result.query == nil)
+        #expect(!result.days.contains { $0.day == day })
+    }
+
     @Test func anUnknownDayIsA404WithAMessage() async throws {
         let client = try makeClient()
         do {
