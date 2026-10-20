@@ -158,4 +158,59 @@ struct ViewerZoomModelTests {
         #expect(model.viewport == Size(width: 400, height: 800))
         #expect(model.imageSize == Size(width: 1500, height: 1000))
     }
+
+    // MARK: Showing a point (the focus view and linked zoom)
+
+    @Test func theCentreIsTheMiddleOfThePictureUntilYouMove() {
+        let model = makeModel()
+        #expect(model.center == Point(x: 0.5, y: 0.5))
+        model.pinch(4, anchor: centre)
+        #expect(abs(model.center.x - 0.5) < 1e-9 && abs(model.center.y - 0.5) < 1e-9)
+    }
+
+    @Test func showingAPointPutsItInTheMiddleOfTheScreen() {
+        let model = makeModel()
+        model.show(center: Point(x: 0.3, y: 0.6), scale: 5)
+        #expect(model.scale == 5 && model.isZoomed)
+        #expect(abs(model.center.x - 0.3) < 1e-9 && abs(model.center.y - 0.6) < 1e-9)
+        // What the screen shows is centred on that point.
+        #expect(abs(model.visible.midX - 0.3) < 1e-9 && abs(model.visible.midY - 0.6) < 1e-9)
+        // The tile plan then asks for the tile that holds it first.
+        model.setSourceSize(Size(width: 6000, height: 4000))
+        let first = model.plan(screenScale: 3).tiles[0].normalizedRect
+        #expect(first.x <= 0.3 && first.x + first.width >= 0.3 && first.y <= 0.6 && first.y + first.height >= 0.6)
+    }
+
+    @Test func aPointNearTheEdgeIsAsCentredAsThePictureAllows() {
+        let model = makeModel()
+        model.show(center: Point(x: 0.01, y: 0.99), scale: 4)
+        // The picture's left and bottom edges meet the screen's: the point sits as near the middle as it can.
+        #expect(abs(model.visible.x) < 1e-9)
+        #expect(abs(model.visible.y + model.visible.height - 1) < 1e-9 || model.fitSize.height * 4 <= 800)
+        #expect(model.center.x > 0.01 && model.center.x < 0.5)
+    }
+
+    @Test func showingKeepsTheZoomWithinItsLimitsAndIgnoresNonsense() {
+        let model = makeModel()
+        model.show(center: Point(x: 0.5, y: 0.5), scale: 99)
+        #expect(model.scale == 16)
+        model.show(center: Point(x: 0.5, y: 0.5), scale: 0.2)
+        #expect(model.scale == 1 && model.offset == Point(x: 0, y: 0))
+        model.show(center: Point(x: 0.5, y: 0.5), scale: 3)
+        model.show(center: Point(x: 0.2, y: 0.2), scale: .nan)
+        #expect(model.scale == 3)
+        model.show(center: Point(x: -4, y: 9), scale: 3)                  // clamped into the picture
+        #expect(model.center.x >= 0 && model.center.y <= 1)
+    }
+
+    @Test func aShownPointFollowsAPanAndSurvivesAFreshPinch() {
+        let model = makeModel()
+        model.show(center: Point(x: 0.5, y: 0.5), scale: 4)
+        model.pan(Point(x: -200, y: 0))                                    // drag left: look further right
+        #expect(model.center.x > 0.5)
+        let looking = model.center
+        model.pinch(1.5, anchor: centre)
+        #expect(model.scale == 6)
+        #expect(abs(model.center.x - looking.x) < 1e-9)                    // a pinch about the middle keeps the point
+    }
 }

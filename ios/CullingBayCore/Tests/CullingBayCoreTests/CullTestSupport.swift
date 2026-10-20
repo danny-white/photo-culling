@@ -10,11 +10,11 @@ import Testing
 
 func cullFrame(
     _ id: Int, file: String? = nil, lr: LightroomState? = nil, decision: Decision? = nil,
-    badges: [String] = [], partners: [String] = [], sharpness: Double? = nil
+    badges: [String] = [], partners: [String] = [], sharpness: Double? = nil, af: [Double]? = nil
 ) -> Frame {
     Frame(
         id: id, file: file ?? "DSC\(String(format: "%05d", id)).ARW", partners: partners,
-        partnerIDs: partners.indices.map { 90_000 + id + $0 }, sharpness: sharpness, badges: badges,
+        partnerIDs: partners.indices.map { 90_000 + id + $0 }, sharpness: sharpness, af: af, badges: badges,
         lr: lr, decision: decision)
 }
 

@@ -8,8 +8,8 @@ import Observation
 /// Every tap updates the local decisions at once and is sent through the `CullWriteQueue`. Make
 /// a new model per opened day, and call `load()`.
 ///
-/// Phase 2 only: the burst picker and knock-out, the grid, 1:1 and focus views, rescue and drop
-/// from the review, and Start over are not here.
+/// The burst picker (`openPicker`, `keepPicked`) and the 1:1 focus check (`openFocus`) are here.
+/// Not yet: the grid, rescue and drop from the review, and Start over.
 @MainActor
 @Observable
 public final class CullSessionModel {
@@ -27,10 +27,13 @@ public final class CullSessionModel {
         case failed(String)
     }
 
-    /// What the day shows: the cards, or the end-of-day review.
+    /// What the day shows: the cards, the burst picker, the 1:1 focus check over the cards or
+    /// the picker, or the end-of-day review.
     public enum Screen: Sendable, Hashable {
         case cards
         case summary
+        case picker
+        case focus
     }
 
     /// A message for the toast, shown for about 2.8 s. It carries an Undo button when
@@ -66,6 +69,10 @@ public final class CullSessionModel {
     public private(set) var refreshError: String?
     public private(set) var day: CullDay?
     public private(set) var screen: Screen = .cards
+    /// The burst picker, while `screen` is `.picker` (or `.focus` over it).
+    public private(set) var picker: CullPickerModel?
+    /// The focus check, while `screen` is `.focus`.
+    public private(set) var focus: CullFocusModel?
     /// The stack on the card, an index into `stacks`.
     public private(set) var cursor = 0
     /// The pass the server records; always 2.
@@ -201,6 +208,8 @@ public final class CullSessionModel {
         matches = arranged.matches
         history = []
         undone = [:]
+        picker = nil
+        focus = nil
         pass = 2        // one pass now; the server still records pass and position
         var start = 0
         if matches == nil, let saved = body.progress?.cursor {
@@ -231,6 +240,12 @@ public final class CullSessionModel {
             cursor = max(0, min(cursor, board.stacks.count - 1))
         }
         if board.stacks.isEmpty { screen = .summary }
+        // The picker and the focus view hold frames of the day as it was.
+        if screen == .picker || screen == .focus {
+            picker = nil
+            focus = nil
+            screen = board.stacks.isEmpty ? .summary : .cards
+        }
     }
 
     // MARK: Reading
@@ -243,6 +258,9 @@ public final class CullSessionModel {
         board.stacks.indices.contains(cursor) ? board.stacks[cursor] : nil
     }
     public var canUndo: Bool { !history.isEmpty }
+
+    /// The screen whose view is on show: the one under the focus check while it is open.
+    public var baseScreen: Screen { screen == .focus ? focus?.returnScreen ?? .cards : screen }
 
     /// `dayTitle`: `Sat, 17 Oct 2026`.
     public var title: String {
@@ -330,6 +348,7 @@ public final class CullSessionModel {
             pressed: CullPressed(reject: pressed(.reject), keepAll: isBurst && pressed(.keepAll), keep: keepPressed),
             stars: !isBurst && st.isDone && st.verdict != .reject ? board.frameMark(frame)?.stars ?? 0 : 0,
             keepAllLabel: "Keep all \(stack.frames.count)",
+            keepLabel: isBurst ? "Choose" : "Keep",
             fileLine: ([frame.file] + frame.partners).joined(separator: " + ") + " · \(cursor + 1)/\(n)")
     }
 
@@ -441,9 +460,10 @@ public final class CullSessionModel {
 
     // MARK: Deciding
 
-    /// Rejects every frame of the stack and moves on.
+    /// Rejects every frame of the stack and moves on. From the picker this is Reject all.
     public func reject() {
-        guard screen == .cards, let stack = currentStack else { return }
+        guard screen == .cards || screen == .picker, let stack = currentStack else { return }
+        picker = nil
         commit(
             stack.frames.count > 1
                 ? "Rejected all \(stack.frames.count)" : "Rejected " + CullFormat.stem(stack.frames[0].file),
@@ -465,6 +485,100 @@ public final class CullSessionModel {
         guard screen == .cards, let stack = currentStack else { return }
         let frame = board.shown(stack)
         keepFrames(of: stack, [frame], rates: stars.flatMap { (1...5).contains($0) ? [frame.id: $0] : nil }, via: .card)
+    }
+
+    // MARK: Burst picker
+
+    /// `openPicker`: the burst picker for the stack on the card. A swipe up and Choose open it
+    /// on the first frame; the strip under the card, on the frame the card shows
+    /// (`fromStart: false`). Nothing is decided or saved by opening it. A single does not open.
+    public func openPicker(fromStart: Bool = true) {
+        guard screen == .cards, let stack = currentStack, stack.frames.count > 1 else { return }
+        picker = CullPickerModel(stack: stack, board: board, fromStart: fromStart)
+        screen = .picker
+    }
+
+    /// `close-picker`: back to the card with nothing decided.
+    public func closePicker() {
+        guard screen == .picker else { return }
+        picker = nil
+        screen = .cards
+    }
+
+    /// `pk-keep` and `ko-keep`: keeps what the picker has ticked (or, in the knock-out, whatever
+    /// is not out) as picks, with the stars the picker gave, and rejects the rest of the burst
+    /// with the burst note, all by `.burst`. It moves on like any decision, and Undo takes it
+    /// back. With nothing to keep, nothing happens.
+    public func keepPicked() {
+        guard screen == .picker, let picker, let stack = currentStack, picker.canKeep else { return }
+        self.picker = nil
+        keepFrames(of: stack, picker.keeps, rates: picker.keepRates, via: .burst)
+    }
+
+    // MARK: Focus
+
+    /// `openFocus`: the 1:1 focus check, over the card or the picker.
+    ///
+    /// From the card it is on the frame the card shows. From the picker it is on frame
+    /// `frameIndex` (the one on the big picture by default) and the burst's other frames can be
+    /// stepped to. It starts at the camera's AF point, or at `tapped` (fractions of the frame,
+    /// from `CullFocusModel.imagePoint`) when the frame has none, else the middle.
+    public func openFocus(frameIndex: Int? = nil, tapped: Point? = nil) {
+        guard let stack = currentStack else { return }
+        let frames: [Frame]
+        let index: Int
+        switch screen {
+        case .cards:
+            frames = [board.shown(stack)]
+            index = 0
+        case .picker:
+            guard let picker else { return }
+            frames = stack.frames
+            index = frameIndex ?? picker.viewIndex
+        default:
+            return
+        }
+        guard frames.indices.contains(index) else { return }
+        let linked = picker?.linkedFocus ?? false
+        focus = CullFocusModel(
+            frames: frames, index: index, point: frames[index].afPoint ?? tapped ?? frames[index].focusSpot,
+            returnScreen: screen, linked: linked,
+            marks: Dictionary(uniqueKeysWithValues: frames.compactMap { f in board.frameMark(f).map { (f.id, $0) } }))
+        screen = .focus
+    }
+
+    /// `closeFocus`: back to where the check was opened. In the picker, the big picture is on
+    /// the frame last looked at, and the Linked setting stays for next time.
+    public func closeFocus() {
+        guard screen == .focus, let focus else { return }
+        if focus.returnScreen == .picker, let picker {
+            picker.show(focus.index)
+            picker.linkedFocus = focus.linked
+        }
+        screen = focus.returnScreen
+        self.focus = nil
+    }
+
+    /// The Keep button of a focus check opened from the card: leaves the check and keeps, as a
+    /// tap on the card's Keep does.
+    public func keepFromFocus() {
+        guard screen == .focus, focus?.returnScreen == .cards else { return }
+        closeFocus()
+        keep()
+    }
+
+    /// The Reject button of a focus check opened from the card.
+    public func rejectFromFocus() {
+        guard screen == .focus, focus?.returnScreen == .cards else { return }
+        closeFocus()
+        reject()
+    }
+
+    /// Moves the cursor to stack `index` without saving the position or deciding anything. For
+    /// the simulator's launch arguments, which look at a screen and write nothing.
+    public func look(at index: Int) {
+        guard screen == .cards, board.stacks.indices.contains(index) else { return }
+        cursor = index
     }
 
     /// `keepFrames`: keeps `keeps` and rejects the rest of the stack with the burst note.
@@ -545,6 +659,8 @@ public final class CullSessionModel {
         showToast("Undone: " + entry.label)
         signal(.undone)
         cursor = max(0, min(entry.cursor, board.stacks.count - 1))
+        picker = nil
+        focus = nil
         screen = .cards
         saveProgress()
     }

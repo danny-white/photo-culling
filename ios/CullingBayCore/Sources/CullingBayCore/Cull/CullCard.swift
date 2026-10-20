@@ -86,6 +86,8 @@ public struct CullCard: Sendable, Hashable {
     public let stars: Int
     /// `Keep all 7`; a burst only.
     public let keepAllLabel: String
+    /// `Choose` on a burst card, which opens the picker; `Keep` on a single.
+    public let keepLabel: String
     /// `DSC05040.ARW + DSC05040.JPG · 3/84`.
     public let fileLine: String
 }

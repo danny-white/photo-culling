@@ -42,6 +42,7 @@ included, because that writes to the real logs.
 - `ServerTiming.swift`, `PerfReporter.swift`: timing header parsing and `POST /m/api/perf`
 - `TilePlanner.swift`: tile planning and linked zoom, with its own `Point`, `Size`, `Rect`
 - `CropBox.swift`: parses a crop's `X-Crop-Box` header, which gives the full-resolution size `TilePlanner` needs
+- `CropLoadGate.swift`: `CropLoadGate`, which lets only a couple of full-resolution crops download at once (the web's serial `CROPS` queue), cancelled callers leaving the line, so a decision's write always has a connection free
 - `Gallery/GalleryFormat.swift`: the display strings (`longDate`, `shortDate`, `time`, `megabytes`, `photoCount`, `stars`)
 - `Gallery/LibraryIndex.swift`: days grouped into years and months, month strips, and On this day
 - `Gallery/GallerySettings.swift`: the `GallerySettings` protocol with `InMemoryGallerySettings` and `UserDefaultsGallerySettings`
@@ -50,7 +51,7 @@ included, because that writes to the real logs.
 - `Gallery/ImageDataLoader.swift`: picture downloads that share one request per URL and keep a memory cache limited by size
 - `Gallery/PerfMarks.swift`: builds the `PerfItem`s for `viewer_first`, `viewer_photo`, `viewer_hd`, `results_ready`, `save_ready` and loader fetches
 - `CullingBayClient+Crop.swift`: `probeCropURL` and `CropProbe`, which read a crop's `X-Crop-Box` header (the loader returns bodies only)
-- `Gallery/ViewerZoomModel.swift`: the viewer's pinch, double-tap, pan and swipe-to-page maths in points, and the tile plan for the current zoom
+- `Gallery/ViewerZoomModel.swift`: the viewer's pinch, double-tap, pan and swipe-to-page maths in points, and the tile plan for the current zoom; `center` and `show(center:scale:)` read and set the point at the middle of the screen, for the focus check and linked zoom
 - `Gallery/ExportModel.swift`: Save and Share as a model over a `PhotoExportService` that the app implements with PhotoKit and temp files
 - `Gallery/ServerSettingsModel.swift`: the server address text, its validation, and the `/m/api/days` check
 - `Cull/CullWriteStore.swift`: `CullWrite` (a decide, undo or progress write that can be replayed exactly) and the `CullWriteStore` protocol with `InMemoryCullWriteStore` and `FileCullWriteStore` (JSON in a directory the app passes, written atomically)
@@ -59,4 +60,6 @@ included, because that writes to the real logs.
 - `Cull/CullFormat.swift`: `stem`, `starText`, `dayTitle` (`Sat, 17 Oct 2026`) and the other small helpers the Cull strings share
 - `Cull/CullCard.swift`: the plain data a view binds to: `CullCard` (badges, chip, pressed buttons, strip), `CullSummary` (counts, Lightroom lines, the lists, the budget note, the Send label), `CullBudgetBar`
 - `Cull/CullDaysModel.swift`: the Cull tab's home as a `@MainActor @Observable` model: days grouped as In progress, On this day and by year and month, and a debounced day search whose hits pass their match ids on
-- `Cull/CullSessionModel.swift`: one opened day: opening with matches first, `reject()`, `keepAll()`, `keep(stars:)`, `undo()` (with the 409 rollback), `go(_:)`, debounced progress saves, `send()`, `refresh()`, the toast and the feedback event; the burst picker, grid, 1:1/focus, rescue, drop and Start over are not here yet
+- `Cull/CullSessionModel.swift`: one opened day: opening with matches first, `reject()`, `keepAll()`, `keep(stars:)`, `undo()` (with the 409 rollback), `go(_:)`, debounced progress saves, `send()`, `refresh()`, the toast and the feedback event, and the burst picker (`openPicker`, `keepPicked`, `closePicker`) and the 1:1 focus check (`openFocus`, `closeFocus`) that open over the cards; the grid, rescue, drop and Start over are not here yet
+- `Cull/CullPickerModel.swift`: the burst picker of `app.js` as a `@MainActor @Observable` model: a filmstrip for up to six frames (tick, stars, swipe) or a knock-out grid for more, what a decided burst starts with, and the `keeps` and `keepRates` that a keep saves as one tap by `.burst`. `CullPickerFrame` is what a thumbnail and the big frame show
+- `Cull/CullFocusModel.swift`: the 1:1 focus check: the frame and its start point (AF point, tap, or middle), stepping between a burst's frames, and linked zoom (`TilePlanner.linkedZoom`) that carries the point and the source pixels per point from one frame to the next. Also `imagePoint`, the AF box size and `Frame.afPoint`

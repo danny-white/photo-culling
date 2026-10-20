@@ -30,6 +30,14 @@ public final class ViewerZoomModel {
         let bottom = min(1, (h / 2 + viewport.height / 2 - offset.y) / h)
         return Rect(x: left, y: top, width: max(0, right - left), height: max(0, bottom - top))
     }
+    /// The point at the middle of the viewport, as fractions of the image (0...1). With the
+    /// image smaller than the viewport it is the middle of the image.
+    public var center: Point {
+        let fit = fitSize
+        let w = fit.width * scale, h = fit.height * scale
+        guard w > 0, h > 0 else { return Point(x: 0.5, y: 0.5) }
+        return Point(x: min(1, max(0, 0.5 - offset.x / w)), y: min(1, max(0, 0.5 - offset.y / h)))
+    }
     public func plan(screenScale: Double) -> TilePlan {
         TilePlanner.plan(sourceSize: sourceSize ?? Size(width: 0, height: 0), fitSize: fitSize,
                          zoomScale: scale, screenScale: screenScale, visible: visible)
@@ -48,6 +56,19 @@ public final class ViewerZoomModel {
     public func reset() {
         scale = 1; offset = Point(x: 0, y: 0)
         pinchStart = nil; panStart = nil; draggedWhileZoomed = false
+    }
+    /// Zooms to `scale` (1...16) with `center` (fractions of the image) in the middle of the
+    /// viewport, as far as the image's edges allow. For a view that opens already zoomed in, and
+    /// for linked zoom, where another frame is shown at the same place and zoom.
+    public func show(center: Point, scale proposed: Double) {
+        guard proposed.isFinite else { return }
+        scale = min(16, max(1, proposed))
+        let fit = fitSize
+        offset = Point(
+            x: (0.5 - min(1, max(0, center.x))) * fit.width * scale,
+            y: (0.5 - min(1, max(0, center.y))) * fit.height * scale)
+        pinchStart = nil; panStart = nil; draggedWhileZoomed = false
+        clampPan()
     }
     /// Anchor is in viewport points. Keep the point beneath the fingers stationary.
     public func pinch(_ magnification: Double, anchor: Point) {
