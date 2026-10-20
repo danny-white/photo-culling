@@ -30,6 +30,9 @@ targets:
       path: CullingBay/Info.plist
       properties:
         CFBundleDisplayName: Culling Bay
+        # XcodeGen writes literal 1.0 / 1 unless told otherwise, which would hide the build number.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         NSPhotoLibraryAddUsageDescription: Save the photos you choose to your photo library.
