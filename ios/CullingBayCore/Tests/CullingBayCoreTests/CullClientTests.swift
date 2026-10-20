@@ -165,7 +165,18 @@ struct CullClientTests {
         #expect(first["pass"] as? Int == 2)
         #expect(first["cursor"] as? Int == 7)
         #expect(first["finished"] as? Bool == false)
+        #expect(first["lead"] == nil)
         #expect(try jsonBody(requests[1])["finished"] as? Bool == true)
+    }
+
+    @Test func saveProgressSendsTheLeadFrameWhenGiven() async throws {
+        let (client, transport) = client()
+        try await client.saveProgress(day: day, pass: 2, cursor: 7, lead: 43224)
+        let request = try #require(await transport.requests.first)
+        let body = try jsonBody(request)
+        #expect(Set(body.keys) == ["pass", "cursor", "finished", "lead"])
+        #expect(body["lead"] as? Int == 43224)
+        #expect(body["cursor"] as? Int == 7)
     }
 
     @Test func sendPostsAnEmptyObjectAndReadsTheCounts() async throws {

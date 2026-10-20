@@ -37,7 +37,7 @@ included, because that writes to the real logs.
 - `Models.swift`, `Place.swift`: `Day`, `Photo`, `PhotoList`, `GalleryDay`, `town(_:)`
 - `CullModels.swift`: the Cull tab's models (`CullDay`, `Stack`, `Frame`, `Decision`, `LightroomState`, `DaySearchResult`, write bodies and answers) and the open enums (`StackKind`, `CullFlag`, `CullVia`, `DecisionState`) whose unknown values decode as `.other`
 - `CullingBayClient.swift`: the client actor, `Fetched`, `ImageSize`, `SaveKind`, URL builders, and the JSON write path (never cached)
-- `CullingBayClient+Cull.swift`: `cullDay`, `daySearch`, `dayLike`, and the writes `decide`, `undo`, `saveProgress`, `send`, `reset`
+- `CullingBayClient+Cull.swift`: `cullDay`, `daySearch`, `dayLike`, and the writes `decide`, `undo`, `saveProgress` (with the stack's `lead`), `send`, `reset`
 - `HTTPTransport.swift`, `Errors.swift`: the network seam and `CullingBayError` (including `.conflict` and `.unavailable` for a write's 409 and 503)
 - `ServerTiming.swift`, `PerfReporter.swift`: timing header parsing and `POST /m/api/perf`
 - `TilePlanner.swift`: tile planning and linked zoom, with its own `Point`, `Size`, `Rect`
@@ -53,3 +53,10 @@ included, because that writes to the real logs.
 - `Gallery/ViewerZoomModel.swift`: the viewer's pinch, double-tap, pan and swipe-to-page maths in points, and the tile plan for the current zoom
 - `Gallery/ExportModel.swift`: Save and Share as a model over a `PhotoExportService` that the app implements with PhotoKit and temp files
 - `Gallery/ServerSettingsModel.swift`: the server address text, its validation, and the `/m/api/days` check
+- `Cull/CullWriteStore.swift`: `CullWrite` (a decide, undo or progress write that can be replayed exactly) and the `CullWriteStore` protocol with `InMemoryCullWriteStore` and `FileCullWriteStore` (JSON in a directory the app passes, written atomically)
+- `Cull/CullWriteQueue.swift`: `CullWriteQueue`, the port of the web app's `Q`/`send`/`pump`: writes go out one at a time in order, a transport error or 5xx keeps the write and retries after 4 s (or at once on `resume()`), a 4xx drops it and says why (`lastDrop`, `observeDrops`), what is waiting survives a relaunch, and `drain(timeout:)` waits for it to empty. Also `CullSleep` and `CullClock`, so tests don't wait in real time
+- `Cull/CullBoard.swift`: the rules of `app.js` as pure functions over a day's stacks and decisions (`status`, `lrMark`, `frameMark`, `firstOpen`, Lightroom clashes, the budget, the status line), with `StackStatus`, `FrameMark` and `CullStatusLine`
+- `Cull/CullFormat.swift`: `stem`, `starText`, `dayTitle` (`Sat, 17 Oct 2026`) and the other small helpers the Cull strings share
+- `Cull/CullCard.swift`: the plain data a view binds to: `CullCard` (badges, chip, pressed buttons, strip), `CullSummary` (counts, Lightroom lines, the lists, the budget note, the Send label), `CullBudgetBar`
+- `Cull/CullDaysModel.swift`: the Cull tab's home as a `@MainActor @Observable` model: days grouped as In progress, On this day and by year and month, and a debounced day search whose hits pass their match ids on
+- `Cull/CullSessionModel.swift`: one opened day: opening with matches first, `reject()`, `keepAll()`, `keep(stars:)`, `undo()` (with the 409 rollback), `go(_:)`, debounced progress saves, `send()`, `refresh()`, the toast and the feedback event; the burst picker, grid, 1:1/focus, rescue, drop and Start over are not here yet

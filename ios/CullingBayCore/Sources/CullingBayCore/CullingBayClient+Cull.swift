@@ -63,14 +63,17 @@ extension CullingBayClient {
     }
 
     /// Saves where the session stopped. `pass` is 1 or 2 and `cursor` a `Stack.id`. `finished`
-    /// marks the day finished; it can't be turned off again except by `reset`.
+    /// marks the day finished; it can't be turned off again except by `reset`. `lead` is that
+    /// stack's `Stack.lead`: the server keeps it, so the cursor stays on the same stack when
+    /// photos are added to the day. It is left out of the request when nil.
     @discardableResult
     public func saveProgress(
-        day: String, pass: Int, cursor: Int, finished: Bool = false
+        day: String, pass: Int, cursor: Int, finished: Bool = false, lead: Int? = nil
     ) async throws -> CullAck {
         try await writeJSON(
             method: "PUT", path: "/m/api/day/\(day)/progress",
-            body: ProgressBody(pass: pass, cursor: cursor, finished: finished), staling: .day(day))
+            body: ProgressBody(pass: pass, cursor: cursor, finished: finished, lead: lead),
+            staling: .day(day))
     }
 
     /// Queues the day's unsent decisions for the next Lightroom sync. Throws `.unavailable` when
@@ -112,6 +115,7 @@ private struct ProgressBody: Encodable, Sendable {
     let pass: Int
     let cursor: Int
     let finished: Bool
+    let lead: Int?
 }
 
 private struct EmptyBody: Encodable, Sendable {}
