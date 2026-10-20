@@ -21,6 +21,7 @@ targets:
       - package: CullingBayCore
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: co.dannywhite.cullingbay
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTS_MACCATALYST: NO
