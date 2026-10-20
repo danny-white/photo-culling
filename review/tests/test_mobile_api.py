@@ -8,7 +8,9 @@ import sys
 import tempfile
 import unittest
 import uuid
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "review"))
@@ -48,6 +50,8 @@ class MobileApi(unittest.TestCase):
         cls.log = tmp / "ingest.log"
         cls.inbox = tmp / "inbox"
         cls.anno_path = tmp / "annotations.db"
+        cls.db_ro = staticmethod(db_ro)
+        cls.anno = staticmethod(anno)
         cls.client = app.test_client()
 
     @classmethod
@@ -319,7 +323,7 @@ class MobileApi(unittest.TestCase):
     LR = {"pick": int, "rating": int, "by": str, "stars_by": str}
     DECISION = {"flag": str, "stars": (int, None), "note": str, "state": str, "outcome": (str, None)}
     BUDGET = {"stacks": int, "per_hour": int, "hours": (int, float)}
-    PROGRESS = {"pass": (int, None), "cursor": (int, None)}
+    PROGRESS = {"pass": int, "cursor": int}
     CULL_DAY = {"day": str, "folder": str, "date": (str, None), "summary": (str, None), "budget": dict,
                 "stacks": list, "progress": (dict, None)}
     DAY_MATCH = {"day": str, "n": int, "ids": list, "match_ids": list, "why": str}
@@ -483,12 +487,198 @@ class MobileApi(unittest.TestCase):
         self.assertFalse((self.inbox / "cull-decisions.tsv").exists())
         self.assertEqual(post(f"/m/api/day/{DAY}/reset", {}).get_json(), {"ok": True, "cleared": 0, "withdrawn": 0})
 
-    def test_contract_cull_send_before_any_progress_leaves_nulls(self):
+    def test_contract_cull_send_before_any_progress_leaves_progress_null(self):
         self.addCleanup(self.wipe)
         self.wipe()
         r = self.client.post(f"/m/api/day/{DAY}/send", json={}, headers=self.H)
         self.assertEqual(r.get_json(), {"ok": True, "queued": 0, "file_rows": 0})
-        self.assertEqual(self.frames()[1]["progress"], {"pass": None, "cursor": None})   # not null
+        self.assertIsNone(self.frames()[1]["progress"])
+
+    def test_contract_cull_progress_follows_path_when_stacks_change(self):
+        import stacks
+        self.addCleanup(self.wipe)
+        self.wipe()
+        day = self.frames()[1]
+        target = day["stacks"][1]
+        put = lambda body: self.client.put(f"/m/api/day/{DAY}/progress", json=body, headers=self.H)
+        body = {"pass": 2, "cursor": target["id"], "lead": target["lead"]}
+        self.assertEqual(put(body).get_json(), {"ok": True})
+        with closing(self.db_ro()) as con:
+            path = con.execute("SELECT path FROM images WHERE rowid=?", (target["lead"],)).fetchone()[0]
+        with closing(self.anno()) as con, con:
+            self.assertEqual(con.execute("SELECT cursor_path FROM cull_days WHERE day=?", (DAY,)).fetchone()[0], path)
+
+        build = stacks.build_stacks
+        def earlier_stack(rows):
+            extra = dict(rows[0], rowid=-1, filename="earlier.JPG", path=f"/mnt/passport/Pictures/{DAY}/earlier.JPG",
+                         capture_ts=min(r["capture_ts"] for r in rows) - 3600, seq=None, drive=None)
+            return build([extra] + rows)
+        with patch.object(stacks, "build_stacks", side_effect=earlier_stack):
+            changed = self.frames()[1]
+        self.assertEqual(len(changed["stacks"]), len(day["stacks"]) + 1)
+        self.assertEqual(changed["progress"], {"pass": 2, "cursor": target["id"] + 1})
+        self.assertEqual(changed["stacks"][changed["progress"]["cursor"]]["lead"], target["lead"])
+        self.assertEqual([s["id"] for s in changed["stacks"]], list(range(len(changed["stacks"]))))
+
+        # The saved photo can become a pair partner, or leave the response altogether.
+        def as_partner(rows):
+            result = build([r for r in rows if r["rowid"] != target["lead"]])
+            result[-1]["frames"][0]["partners"].append(Path(path).name)
+            result[-1]["frames"][0]["partner_ids"].append(target["lead"])
+            return result
+        with patch.object(stacks, "build_stacks", side_effect=as_partner):
+            paired = self.frames()[1]
+            self.assertEqual(paired["progress"]["cursor"], len(paired["stacks"]) - 1)
+        with patch.object(stacks, "build_stacks", side_effect=lambda rows: build(
+                [r for r in rows if r["rowid"] != target["lead"]])):
+            self.assertEqual(self.frames()[1]["progress"], {"pass": 2, "cursor": target["id"]})
+
+        # A later save from an old client replaces the anchor with its integer cursor.
+        self.assertEqual(put({"pass": 1, "cursor": 4}).status_code, 200)
+        self.assertEqual(self.frames()[1]["progress"], {"pass": 1, "cursor": 4})
+        with closing(self.anno()) as con, con:
+            self.assertIsNone(con.execute("SELECT cursor_path FROM cull_days WHERE day=?", (DAY,)).fetchone()[0])
+
+    def test_contract_cull_progress_migrates_old_days_table(self):
+        self.addCleanup(self.wipe)
+        self.wipe()
+        with closing(self.anno()) as con, con:
+            con.execute("DROP TABLE IF EXISTS cull_days")
+            con.execute("CREATE TABLE cull_days(day TEXT PRIMARY KEY, pass INTEGER, cursor INTEGER, "
+                        "finished_at TEXT, sent_at TEXT)")
+            con.execute("INSERT INTO cull_days VALUES (?, 2, 3, 'finished', 'sent')", (DAY,))
+        for _ in range(2):
+            self.assertEqual(self.frames()[1]["progress"], {"pass": 2, "cursor": 3})
+        with closing(self.anno()) as con, con:
+            row = dict(con.execute("SELECT * FROM cull_days WHERE day=?", (DAY,)).fetchone())
+        self.assertEqual(row, {"day": DAY, "pass": 2, "cursor": 3, "cursor_path": None,
+                               "finished_at": "finished", "sent_at": "sent"})
+        lead = self.frames()[1]["stacks"][3]["lead"]
+        r = self.client.put(f"/m/api/day/{DAY}/progress", json={"pass": 2, "cursor": 3, "lead": lead}, headers=self.H)
+        self.assertEqual(r.status_code, 200)
+        with closing(self.anno()) as con, con:
+            self.assertIsInstance(con.execute("SELECT cursor_path FROM cull_days WHERE day=?", (DAY,)).fetchone()[0], str)
+
+    def test_contract_cull_queued_decide_and_undo_withdraw_partners(self):
+        import stacks
+        self.addCleanup(self.wipe)
+        self.wipe()
+        frame = self.frames()[0]["DSC05061.ARW"]
+        pair = stacks.pair_frames
+        def paired(rows):
+            frames = pair(rows)
+            for f in frames:
+                if f["rowid"] == frame["id"]:
+                    f["partners"].append(dict(f, rowid=-1, filename="DSC05061.JPG",
+                                               path=str(Path(f["path"]).with_suffix(".JPG"))))
+            return frames
+        post = lambda path, body: self.client.post(path, json=body, headers=self.H)
+        action = str(uuid.uuid4())
+        original = {"action_id": action, "day": DAY,
+                    "changes": [{"id": frame["id"], "flag": "pick", "stars": 4, "via": "card"}]}
+        inbox = self.inbox / "cull-decisions.tsv"
+        other = "2026-09-29\tother.ARW\treject\t\t\n"
+        with patch.object(stacks, "pair_frames", side_effect=paired):
+            self.assertEqual(post("/m/api/decide", original).status_code, 200)
+            self.assertEqual(post(f"/m/api/day/{DAY}/send", {}).get_json()["file_rows"], 2)
+            inbox.write_text(inbox.read_text() + other)
+            queued = inbox.read_bytes()
+            self.assertIn(b"DSC05061.JPG", queued)
+            # A retry never withdraws the original action's queued rows.
+            self.assertEqual(post("/m/api/decide", original).get_json(), {"ok": True, "replay": True})
+            self.assertEqual(inbox.read_bytes(), queued)
+
+            second = str(uuid.uuid4())
+            self.assertEqual(post("/m/api/decide", dict(original, action_id=second, changes=[
+                {"id": frame["id"], "flag": "reject", "via": "card"}])).status_code, 200)
+            self.assertEqual(inbox.read_text().splitlines()[1:], [other.rstrip("\n")])
+            self.assertEqual(self.frames()[0][frame["file"]]["decision"]["state"], "draft")
+            # Undoing the second decision restores the queued pick and both file rows.
+            self.assertEqual(post("/m/api/undo", {"action_id": second}).get_json(), {"ok": True})
+            self.assertEqual(set(inbox.read_text().splitlines()), set(queued.decode().splitlines()))
+            self.assertEqual(self.frames()[0][frame["file"]]["decision"]["state"], "queued")
+            self.assertEqual(post("/m/api/undo", {"action_id": action}).get_json(), {"ok": True})
+            self.assertIsNone(self.frames()[0][frame["file"]]["decision"])
+            self.assertEqual(inbox.read_text().splitlines()[1:], [other.rstrip("\n")])
+
+            # A replayed undo must not withdraw a later action on the same photo.
+            post("/m/api/decide", dict(original, action_id=str(uuid.uuid4())))
+            post(f"/m/api/day/{DAY}/send", {})
+            queued = inbox.read_bytes()
+            self.assertEqual(post("/m/api/undo", {"action_id": action}).get_json(), {"ok": True, "replay": True})
+            self.assertEqual(inbox.read_bytes(), queued)
+
+    def test_contract_cull_undo_refuses_once_in_lightroom(self):
+        self.addCleanup(self.wipe)
+        frame = self.frames()[0]["DSC05061.ARW"]
+        post = lambda path, body: self.client.post(path, json=body, headers=self.H)
+        for outcome, state in (("applied", "landed"), ("your_flag_kept", "conflict")):
+            with self.subTest(state=state):
+                self.wipe()
+                action = str(uuid.uuid4())
+                post("/m/api/decide", {"action_id": action, "day": DAY,
+                                      "changes": [{"id": frame["id"], "flag": "pick", "via": "card"}]})
+                post(f"/m/api/day/{DAY}/send", {})
+                applied = self.inbox / "applied"
+                applied.mkdir(exist_ok=True)
+                (applied / "20261001-120000-receipt.tsv").write_text(f"2026-10-01\tDSC05061.ARW\t{outcome}\n")
+                before = self.cull_snapshot()
+                r = post("/m/api/undo", {"action_id": action})   # undo itself reads the new receipt
+                self.assertEqual(r.status_code, 409)
+                self.assertEqual(set(r.get_json()), {"error", "applied"})
+                self.assertEqual(r.get_json()["applied"], 1)
+                self.assertIn("already in Lightroom", r.get_json()["error"])
+                after = self.cull_snapshot()
+                self.assertEqual(after[0]["cull_actions"], before[0]["cull_actions"])   # not marked undone
+                self.assertEqual(after[1], before[1])                                   # inbox untouched
+                decision = self.frames()[0][frame["file"]]["decision"]
+                self.assertEqual((decision["flag"], decision["state"]), ("pick", state))
+
+    def cull_snapshot(self):
+        """Decisions, actions, progress and inbox, for assertions that failures change nothing."""
+        with closing(self.anno()) as con, con:
+            rows = {t: [dict(r) for r in con.execute(f"SELECT * FROM {t} ORDER BY rowid")]
+                    for t in ("cull_decisions", "cull_actions", "cull_days")}
+        inbox = self.inbox / "cull-decisions.tsv"
+        return rows, inbox.read_bytes() if inbox.exists() else None
+
+    def test_contract_cull_unavailable_inbox_keeps_decide_and_undo_unchanged(self):
+        from flask import Flask
+        import mobile
+        self.addCleanup(self.wipe)
+        self.wipe()
+        frame = self.frames()[0]["DSC05061.ARW"]
+        app = Flask(__name__)
+        tmp = Path(self.tmp.name)
+        app.register_blueprint(mobile.make_blueprint(
+            db_ro=self.db_ro, anno=self.anno, pc=None, cache_dir=tmp, static_dir=tmp, state_dir=tmp / "unmounted",
+            inbox=self.inbox, check_mount=True))
+        unavailable = app.test_client()   # this temp inbox is not a mount
+        for method, route, body in (("put", "progress", {"pass": 2, "cursor": 0}),
+                                     ("post", "send", {}), ("post", "reset", {})):
+            r = getattr(unavailable, method)(f"/m/api/day/no-such-day/{route}", json=body, headers=self.H)
+            self.assertEqual((r.status_code, r.get_json()), (404, {"error": "no such day"}))
+        post = lambda path, body: self.client.post(path, json=body, headers=self.H)
+        original = {"action_id": str(uuid.uuid4()), "day": DAY,
+                    "changes": [{"id": frame["id"], "flag": "pick", "via": "card"}]}
+        post("/m/api/decide", original)
+        post(f"/m/api/day/{DAY}/send", {})
+        second = dict(original, action_id=str(uuid.uuid4()))
+        before = self.cull_snapshot()
+        for path, body in (("/m/api/decide", second), ("/m/api/undo", {"action_id": original["action_id"]})):
+            r = unavailable.post(path, json=body, headers=self.H)
+            self.assertEqual(r.status_code, 503)
+            self.assertIsInstance(r.get_json()["error"], str)
+            self.assertEqual(self.cull_snapshot(), before)
+        self.assertEqual(unavailable.post("/m/api/decide", json=original, headers=self.H).get_json(),
+                         {"ok": True, "replay": True})
+        self.assertEqual(self.cull_snapshot(), before)
+        # Restoring a queued before-row also needs the inbox, even if the current row is draft.
+        post("/m/api/decide", second)
+        before = self.cull_snapshot()
+        r = unavailable.post("/m/api/undo", json={"action_id": second["action_id"]}, headers=self.H)
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(self.cull_snapshot(), before)
 
     def test_contract_cull_progress_finished_sticks(self):
         self.addCleanup(self.wipe)
@@ -510,7 +700,7 @@ class MobileApi(unittest.TestCase):
                                "changes": [{"id": x, "flag": "pick", "via": "card"}]})
         post(f"/m/api/day/{DAY}/send", {})
         applied = self.inbox / "applied"                            # what the plug-in leaves after a sync
-        applied.mkdir()
+        applied.mkdir(exist_ok=True)
         (applied / "20261001-120000-receipt.tsv").write_text("2026-10-01\tDSC05061.ARW\tapplied\n")
         fr, _ = self.frames()
         self.assertEqual(fr["DSC05061.ARW"]["decision"]["state"], "landed")
@@ -523,13 +713,22 @@ class MobileApi(unittest.TestCase):
 
     def test_contract_cull_write_errors(self):
         self.addCleanup(self.wipe)
+        self.wipe()
         fr, _ = self.frames()
         x = fr["DSC05061.ARW"]["id"]
+        before = self.cull_snapshot()
         for method, path in (("post", "/m/api/decide"), ("post", "/m/api/undo"), ("put", f"/m/api/day/{DAY}/progress"),
                              ("post", f"/m/api/day/{DAY}/send"), ("post", f"/m/api/day/{DAY}/reset")):
             r = getattr(self.client, method)(path, json={})            # no X-Culling-Bay header
             self.assertEqual(r.status_code, 403, path)
             self.assertIn("error", r.get_json())
+            for raw in ("", "null", "[]", '[{"id": 1}]', '"text"', "42", "true", "{invalid"):
+                with self.subTest(path=path, body=raw):
+                    r = getattr(self.client, method)(path, data=raw, content_type="application/json", headers=self.H)
+                    self.assertEqual(r.status_code, 400)
+                    self.assertEqual(set(r.get_json()), {"error"})
+                    self.assertIsInstance(r.get_json()["error"], str)
+            self.assertEqual(getattr(self.client, method)(path, headers=self.H).status_code, 400)
         post = lambda body: self.client.post("/m/api/decide", json=body, headers=self.H)
         for body in ({}, {"action_id": "e1", "day": DAY}, {"action_id": "e2", "day": DAY, "changes": []},
                      {"action_id": "e3", "changes": [{"id": x, "flag": "pick", "via": "card"}]},
@@ -537,11 +736,90 @@ class MobileApi(unittest.TestCase):
             r = post(body)
             self.assertEqual(r.status_code, 400, body)
             self.assertIsInstance(r.get_json()["error"], str)
-        for p in ({}, {"pass": 1}, {"pass": 0, "cursor": 1}, {"pass": 2, "cursor": "1"}):
+        valid = {"action_id": "bad-body", "day": DAY, "changes": [{"id": x, "flag": "pick", "via": "card"}]}
+        bad_bodies = [dict(valid, changes=c) for c in (None, {}, "change", 1, True, [None], [[]], ["change"], [1])]
+        bad_bodies += [dict(valid, **{key: value}) for key in ("action_id", "day")
+                       for value in (None, "", [], {}, True, 1)]
+        bad_bodies += [dict(valid, label=v) for v in (False, 1, [], {})]
+        bad_changes = [{"id": v} for v in (True, False, None, "1", 1.5, [], {}, 999999999)]
+        bad_changes += [{"stars": v} for v in (True, False, 0, -1, 6, 2.5, "3", [], {})]
+        bad_changes += [{"note": v} for v in (True, 1, [], {})]
+        bad_changes += [{key: v} for key in ("flag", "via") for v in (None, "invalid", [], {})]
+        with closing(self.db_ro()) as con:
+            other = con.execute("SELECT rowid FROM images WHERE path NOT LIKE ? LIMIT 1", (f"%/{DAY}/%",)).fetchone()[0]
+        bad_changes.append({"id": other})
+        bad_bodies += [dict(valid, changes=[dict(valid["changes"][0], **change)]) for change in bad_changes]
+        for body in bad_bodies:
+            with self.subTest(body=body):
+                r = post(body)
+                self.assertEqual(r.status_code, 400)
+                self.assertIsInstance(r.get_json()["error"], str)
+        bad_progress = [{}, {"pass": 1}, {"pass": 0, "cursor": 1}, {"pass": 2, "cursor": "1"}]
+        bad_progress += [dict({"pass": 2, "cursor": 0}, **{key: value})
+                         for key, values in (("pass", (True, False, 1.0, None, "2", [], {})),
+                                             ("cursor", (True, False, 1.0, None, [], {})),
+                                             ("lead", (True, False, 1.0, "1", [], {}, 999999999, other)),
+                                             ("finished", (None, 0, 1, "true", [], {}))) for value in values]
+        for p in bad_progress:
             r = self.client.put(f"/m/api/day/{DAY}/progress", json=p, headers=self.H)
             self.assertEqual(r.status_code, 400, p)
+            self.assertIsInstance(r.get_json()["error"], str)
+        for body in ({}, {"action_id": None}, {"action_id": ""}, {"action_id": []}, {"action_id": {}}, {"action_id": True}):
+            r = self.client.post("/m/api/undo", json=body, headers=self.H)
+            self.assertEqual(r.status_code, 400, body)
+            self.assertIsInstance(r.get_json()["error"], str)
+        self.assertEqual(self.cull_snapshot(), before)
+        r = self.client.put(f"/m/api/day/{DAY}/progress", json={"pass": 2, "cursor": 0, "lead": None}, headers=self.H)
+        self.assertEqual(r.status_code, 200)    # a null lead is the same as none
+
+        # Null/omitted strings and stars are allowed; reject/none ignore stars of any type.
+        for flag, stars in (("pick", None), ("pick", 1), ("pick", 5), ("reject", {"ignored": True}), ("none", True)):
+            body = dict(valid, action_id=str(uuid.uuid4()), label=None,
+                        changes=[dict(valid["changes"][0], flag=flag, stars=stars, note=None)])
+            self.assertEqual(post(body).status_code, 200)
+            decision = self.frames()[0]["DSC05061.ARW"]["decision"]
+            self.assertEqual(decision["stars"], stars if flag == "pick" else None)
+            self.assertEqual(decision["note"], "")
+            with closing(self.anno()) as con, con:
+                self.assertEqual(con.execute("SELECT label FROM cull_actions WHERE action_id=?",
+                                             (body["action_id"],)).fetchone()[0], "")
         self.assertEqual(post({"action_id": "e5", "day": DAY, "changes": [{"id": x, "flag": "none", "via": "sweep"}]})
                          .get_json(), {"ok": True})                 # the whole flag and via lists are accepted
+
+    def test_contract_cull_writes_reject_unknown_days(self):
+        import stacks
+        self.addCleanup(self.wipe)
+        self.wipe()
+        self.frames()   # initialise the phone tables
+        before = self.cull_snapshot()
+        for day in ("no-such-day", "2026"):
+            for method, route, body in (("put", "progress", {"pass": 2, "cursor": 0}),
+                                         ("post", "send", {}), ("post", "reset", {})):
+                with self.subTest(day=day, route=route), patch.object(stacks, "build_stacks", side_effect=AssertionError):
+                    r = getattr(self.client, method)(f"/m/api/day/{day}/{route}", json=body, headers=self.H)
+                    self.assertEqual((r.status_code, r.get_json()), (404, {"error": "no such day"}))
+                    self.assertEqual(self.cull_snapshot(), before)
+
+    def test_contract_cull_writes_accept_days_with_only_phone_state(self):
+        import stacks
+        self.addCleanup(self.wipe)
+        self.frames()
+        day = "vanished/day"
+        for table in ("cull_days", "cull_decisions"):
+            for method, route, body in (("put", "progress", {"pass": 2, "cursor": 0}),
+                                         ("post", "send", {}), ("post", "reset", {})):
+                with self.subTest(table=table, route=route):
+                    self.wipe()
+                    with closing(self.anno()) as con, con:
+                        if table == "cull_days":
+                            con.execute("INSERT INTO cull_days(day) VALUES (?)", (day,))
+                        else:
+                            con.execute("INSERT INTO cull_decisions(path, day, flag, via, decided_at) VALUES (?,?,?,?,?)",
+                                        (f"/mnt/passport/Pictures/{day}/gone.ARW", day, "reject", "card", "now"))
+                    with patch.object(stacks, "build_stacks", side_effect=AssertionError):
+                        r = getattr(self.client, method)(f"/m/api/day/{day}/{route}", json=body, headers=self.H)
+                    self.assertEqual(r.status_code, 200, r.get_json())
+                    self.assertTrue(r.get_json()["ok"])
 
     def test_json_reads_revalidate_with_an_etag(self):
         r = self.client.get(f"/m/api/gallery/day/{DAY}")

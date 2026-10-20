@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS cull_days(
   day         TEXT PRIMARY KEY,
   pass        INTEGER,
   cursor      INTEGER,
+  cursor_path TEXT,
   finished_at TEXT,
   sent_at     TEXT);
 CREATE TABLE IF NOT EXISTS cull_receipts(
@@ -107,8 +108,12 @@ def guarded(fn):
     without a CORS preflight, which this server never answers."""
     @functools.wraps(fn)
     def wrapper(*a, **kw):
-        if request.headers.get("X-Culling-Bay") != "1" or not request.is_json:
-            return jsonify({"error": "missing X-Culling-Bay header or JSON body"}), 403
+        if request.headers.get("X-Culling-Bay") != "1":
+            return jsonify({"error": "missing X-Culling-Bay header"}), 403
+        if not request.is_json and request.get_data():
+            return jsonify({"error": "missing JSON content type"}), 403
+        if not isinstance(request.get_json(silent=True), dict):
+            return jsonify({"error": "a JSON object body is required"}), 400
         return fn(*a, **kw)
     return wrapper
 
@@ -196,7 +201,17 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
 
     def anno_db() -> sqlite3.Connection:
         con = anno()
-        con.executescript(SCHEMA)
+        try:
+            con.executescript(SCHEMA)
+            if "cursor_path" not in {r["name"] for r in con.execute("PRAGMA table_info(cull_days)")}:
+                # Recheck under a database write lock: another worker may migrate it first.
+                with con:
+                    con.execute("BEGIN IMMEDIATE")
+                    if "cursor_path" not in {r["name"] for r in con.execute("PRAGMA table_info(cull_days)")}:
+                        con.execute("ALTER TABLE cull_days ADD COLUMN cursor_path TEXT")
+        except Exception:
+            con.close()
+            raise
         return con
 
     # ---------------------------------------------------------------- stacks
@@ -233,6 +248,22 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         finally:
             con.close()
         return [r for r in rows if day_of(r["path"]) == day]
+
+    def known_day(con, day: str) -> bool:
+        """Accept library days or retained phone state, without building stacks."""
+        if con.execute("SELECT 1 FROM cull_days WHERE day=?", (day,)).fetchone() or con.execute(
+                "SELECT 1 FROM cull_decisions WHERE day=? LIMIT 1", (day,)).fetchone():
+            return True
+        library = db_ro()
+        try:
+            prefix = f"{LIBRARY_ROOT}/{day}/"
+            # Unary + keeps SQLite on the path index instead of scanning the status index.
+            return library.execute(
+                "SELECT 1 FROM images WHERE +status='ok' AND path >= ? AND path < ? "
+                "AND instr(substr(path, ?), '/')=0 LIMIT 1",
+                (prefix, prefix[:-1] + "0", len(prefix) + 1)).fetchone() is not None
+        finally:
+            library.close()
 
     def load_pano() -> dict:
         try:
@@ -319,6 +350,15 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
 
     def partner_paths(day: str) -> dict[str, list[str]]:
         return {f["path"]: [p["path"] for p in f["partners"]] for f in stacks.pair_frames(day_rows(day))}
+
+    def withdraw_queued(day: str, decisions: list[dict]) -> int:
+        """Withdraw queued paths and their partners. Caller checks the inbox before any changes."""
+        queued = [d["path"] for d in decisions if d["state"] == "queued"]
+        if not queued:
+            return 0
+        partners = partner_paths(day)
+        return remove_rows({(Path(p).parent.name, Path(p).name)
+                            for q in queued for p in [q] + partners.get(q, [])})
 
     def queue_decisions(con, decisions: list[dict]) -> int:
         """Write decisions (and their pair partners) to the inbox file and mark them queued."""
@@ -661,6 +701,15 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 f"SELECT {DETAIL_COLS} FROM images WHERE rowid IN ({q})", ids)}
         finally:
             con.close()
+        progress = None
+        if ds and ds["pass"] is not None:
+            cursor = ds["cursor"]
+            if ds["cursor_path"]:
+                path_by_id = {r["rowid"]: r["path"] for r in rows}
+                cursor = next((i for i, s in enumerate(day_stacks) for f in s["frames"]
+                               if ds["cursor_path"] == f["path"] or any(
+                                   path_by_id.get(pid) == ds["cursor_path"] for pid in f["partner_ids"])), cursor)
+            progress = {"pass": ds["pass"], "cursor": cursor}
         for i, s in enumerate(day_stacks):
             s["id"] = i
             s.pop("pano_candidate", None)
@@ -684,7 +733,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             "budget": {"stacks": stacks.keep_budget(rows), "per_hour": stacks.KEEP_PER_HOUR,
                        "hours": round(stacks.shooting_hours(rows), 2)},
             "stacks": day_stacks,
-            "progress": {"pass": ds["pass"], "cursor": ds["cursor"]} if ds else None,
+            "progress": progress,
         })
 
     # ---------------------------------------------------------------- routes: writes
@@ -703,13 +752,23 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         """One tap: {action_id, day, label, changes: [{id, flag, stars?, note?, via}]}. The
         rows as they were go into cull_actions, so undo is exact. A repeated action_id (a retry
         after a dropped response) is acknowledged and ignored."""
-        body = request.get_json()
-        action_id, day, changes = body.get("action_id"), body.get("day"), body.get("changes") or []
-        if not action_id or not day or not changes:
+        body = request.get_json(silent=True)
+        action_id, day, changes = body.get("action_id"), body.get("day"), body.get("changes")
+        if not isinstance(action_id, str) or not action_id or not isinstance(day, str) or not day:
             return jsonify({"error": "action_id, day and changes are required"}), 400
+        if not isinstance(changes, list) or not changes:
+            return jsonify({"error": "changes must be a non-empty list of objects"}), 400
+        if body.get("label") is not None and not isinstance(body["label"], str):
+            return jsonify({"error": "label must be a string or null"}), 400
         for c in changes:
-            if c.get("flag") not in FLAGS or c.get("via") not in VIAS or not isinstance(c.get("id"), int):
+            if (not isinstance(c, dict) or c.get("flag") not in FLAGS or c.get("via") not in VIAS
+                    or type(c.get("id")) is not int):
                 return jsonify({"error": f"bad change: {c}"}), 400
+            if c["flag"] == "pick" and c.get("stars") is not None and (
+                    type(c["stars"]) is not int or not 1 <= c["stars"] <= 5):
+                return jsonify({"error": "pick stars must be an int from 1 to 5 or null"}), 400
+            if c.get("note") is not None and not isinstance(c["note"], str):
+                return jsonify({"error": "note must be a string or null"}), 400
         paths = paths_for([c["id"] for c in changes])
         if len(paths) != len({c["id"] for c in changes}) or any(day_of(p) != day for p in paths.values()):
             return jsonify({"error": "unknown frame, or a frame from another day"}), 400
@@ -721,6 +780,11 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 q = ",".join("?" * len(paths))
                 before = {r["path"]: dict(r) for r in con.execute(
                     f"SELECT * FROM cull_decisions WHERE path IN ({q})", list(paths.values()))}
+                if any(d["state"] == "queued" for d in before.values()):
+                    problem = inbox_problem()
+                    if problem:
+                        return jsonify({"error": problem + "; nothing was changed"}), 503
+                withdraw_queued(day, list(before.values()))
                 at = now_iso()
                 con.execute("INSERT INTO cull_actions(action_id, day, at, label, before) VALUES (?,?,?,?,?)",
                             (action_id, day, at, body.get("label") or "",
@@ -742,7 +806,10 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
     @bp.route("/api/undo", methods=["POST"])
     @guarded
     def api_undo():
-        action_id = (request.get_json() or {}).get("action_id")
+        action_id = request.get_json(silent=True).get("action_id")
+        if not isinstance(action_id, str) or not action_id:
+            return jsonify({"error": "action_id must be a non-empty string"}), 400
+        ingest_receipts()   # a receipt not read yet may say the action already landed
         with lock:
             con = anno_db()
             try:
@@ -751,7 +818,21 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                     return jsonify({"error": "unknown action"}), 404
                 if a["undone"]:
                     return jsonify({"ok": True, "replay": True})
-                for path, row in json.loads(a["before"]).items():
+                before = json.loads(a["before"])
+                q = ",".join("?" * len(before))
+                current = [dict(r) for r in con.execute(
+                    f"SELECT path, state FROM cull_decisions WHERE path IN ({q})", list(before))]
+                applied = sum(r["state"] in ("landed", "conflict") for r in current)
+                if applied:
+                    return jsonify({"error": f"{applied} decision(s) from this action are already in Lightroom; "
+                                             "change those there", "applied": applied}), 409
+                restore_queued = [r for r in before.values() if r and r["state"] == "queued"]
+                if restore_queued or any(r["state"] == "queued" for r in current):
+                    problem = inbox_problem()
+                    if problem:
+                        return jsonify({"error": problem + "; nothing was undone"}), 503
+                withdraw_queued(a["day"], current)
+                for path, row in before.items():
                     if row is None:
                         con.execute("DELETE FROM cull_decisions WHERE path=?", (path,))
                     else:
@@ -759,6 +840,8 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                         con.execute(
                             f"INSERT OR REPLACE INTO cull_decisions({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                             [row[c] for c in cols])
+                if restore_queued:
+                    queue_decisions(con, restore_queued)
                 con.execute("UPDATE cull_actions SET undone=1 WHERE action_id=?", (action_id,))
                 con.commit()
             finally:
@@ -768,17 +851,29 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
     @bp.route("/api/day/<path:day>/progress", methods=["PUT"])
     @guarded
     def api_progress(day):
-        body = request.get_json()
+        body = request.get_json(silent=True)
         p, cur = body.get("pass"), body.get("cursor")
-        if p not in (1, 2) or not isinstance(cur, int):
+        if type(p) is not int or p not in (1, 2) or type(cur) is not int:
             return jsonify({"error": "pass (1 or 2) and cursor are required"}), 400
+        if "finished" in body and type(body["finished"]) is not bool:
+            return jsonify({"error": "finished must be a bool"}), 400
+        cursor_path = None
+        if body.get("lead") is not None:     # null is the same as leaving it out
+            if type(body["lead"]) is not int:
+                return jsonify({"error": "lead must be an int"}), 400
+            cursor_path = paths_for([body["lead"]]).get(body["lead"])
+            if cursor_path is None or day_of(cursor_path) != day:
+                return jsonify({"error": "unknown frame, or a frame from another day"}), 400
         con = anno_db()
         try:
+            if not known_day(con, day):
+                return jsonify({"error": "no such day"}), 404
             con.execute(
-                """INSERT INTO cull_days(day, pass, cursor, finished_at) VALUES (?,?,?,?)
+                """INSERT INTO cull_days(day, pass, cursor, cursor_path, finished_at) VALUES (?,?,?,?,?)
                    ON CONFLICT(day) DO UPDATE SET pass=excluded.pass, cursor=excluded.cursor,
+                     cursor_path=excluded.cursor_path,
                      finished_at=COALESCE(excluded.finished_at, cull_days.finished_at)""",
-                (day, p, cur, now_iso() if body.get("finished") else None))
+                (day, p, cur, cursor_path, now_iso() if body.get("finished") else None))
             con.commit()
         finally:
             con.close()
@@ -790,12 +885,15 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         """Queue the day's unsent decisions for the next Lightroom sync. Decisions that landed or
         met your own flag (conflict) are not sent again unless you change them on the phone."""
         problem = inbox_problem()
-        if problem:
-            return jsonify({"error": problem + "; nothing was sent"}), 503
-        ingest_receipts()
+        if not problem:
+            ingest_receipts()
         with lock:
             con = anno_db()
             try:
+                if not known_day(con, day):
+                    return jsonify({"error": "no such day"}), 404
+                if problem:
+                    return jsonify({"error": problem + "; nothing was sent"}), 503
                 todo = [dict(r) for r in con.execute(
                     "SELECT * FROM cull_decisions WHERE day=? AND state IN ('draft','missing')", (day,))]
                 rows = queue_decisions(con, todo) if todo else 0
@@ -816,20 +914,18 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         with lock:
             con = anno_db()
             try:
+                if not known_day(con, day):
+                    return jsonify({"error": "no such day"}), 404
                 rows = [dict(r) for r in con.execute("SELECT path, state FROM cull_decisions WHERE day=?", (day,))]
                 applied = sum(1 for r in rows if r["state"] in ("landed", "conflict"))
                 if applied:
                     return jsonify({"error": f"{applied} decision(s) from this day are already in Lightroom; "
                                              "change those there", "applied": applied}), 409
-                queued = [r["path"] for r in rows if r["state"] == "queued"]
-                withdrawn = 0
-                if queued:
+                if any(r["state"] == "queued" for r in rows):
                     problem = inbox_problem()
                     if problem:
                         return jsonify({"error": problem + "; nothing was reset"}), 503
-                    partners = partner_paths(day)
-                    withdrawn = remove_rows({(Path(p).parent.name, Path(p).name)
-                                             for q in queued for p in [q] + partners.get(q, [])})
+                withdrawn = withdraw_queued(day, rows)
                 con.execute("DELETE FROM cull_decisions WHERE day=?", (day,))
                 con.execute("DELETE FROM cull_days WHERE day=?", (day,))
                 con.commit()

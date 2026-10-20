@@ -92,6 +92,7 @@ function saveProgress(finished) {
   if (!S.day) return;
   clearTimeout(progressT);
   const st = S.stacks[S.cursor], day = S.day.day, body = { pass: S.pass, cursor: st ? st.id : 0, finished: !!finished };
+  if (st && typeof st.lead === 'number') body.lead = st.lead;
   progressT = setTimeout(() => send('PUT', '/m/api/day/' + dayPath(day) + '/progress', body), finished ? 0 : 600);
 }
 window.addEventListener('online', pump);

@@ -84,13 +84,13 @@ decision's `state` is current.
 | Field | Type | Meaning |
 |---|---|---|
 | `budget` | `{stacks, per_hour, hours}` | Soft limit of stacks to keep: `per_hour` (10) per hour of shooting, at least 5. `hours` is the shooting time (pauses over 10 min count as 10), 2 decimals. |
-| `progress` | `{pass, cursor}?` | Where the last session stopped; null until the first progress save. **After a Send with no saved progress it is `{pass: null, cursor: null}`**, so both can be null. |
+| `progress` | `{pass, cursor}?` | Where the last session stopped; null until the first progress save, including after Send. When present, `pass` and `cursor` are ints. |
 
 Stack (stacks are in shot order):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `id` | int | Position in this response (0, 1, 2 ...). What `progress.cursor` refers to. Not stable if photos are added to the day. |
+| `id` | int | Position in this response (0, 1, 2 ...). What `progress.cursor` refers to. Positions can change when photos are added. Save progress with `lead` so the cursor follows that photo's stack. |
 | `kind` | string | `single`, `burst`, `bracket` or `pano`. Brackets and panoramas suggest Keep all. `pano` shows only once a pixel check has confirmed a burst of 3+ frames that slides one way. |
 | `lead` | int | Frame `id` to show first: the sharpest frame; a bracket's base exposure |
 | `frames` | [Frame] | In shot order. A single stack has one frame. |
@@ -152,8 +152,11 @@ DayMatch:
 
 ### Writes
 
-Every write needs `X-Culling-Bay: 1` and `Content-Type: application/json`, or it gets `403 {error}`.
-Errors are `{error: string}`. A `400` means the request itself is wrong: do not retry it.
+Every write needs `X-Culling-Bay: 1` (`403 {error}` without it) and `Content-Type: application/json`.
+An existing body sent without a JSON content type also gets `403 {error}`.
+A missing, invalid, null or non-object JSON body gets `400 {error}`. `send` and `reset` accept `{}`.
+Errors are `{error: string}` unless more fields are listed. A `400` means the request itself is wrong: do not retry it.
+Booleans do not count as ints.
 
 **`POST /m/api/decide`**: one tap.
 
@@ -163,31 +166,43 @@ Errors are `{error: string}`. A `400` means the request itself is wrong: do not 
 
 | Field | Meaning |
 |---|---|
-| `action_id` | Any unique string you make up (the web app uses time plus 12 random bytes in hex). Keep it: it is what `undo` takes. |
-| `day` | Day id; every change must be a frame of that day |
-| `label` | Free text kept with the action; `""` if omitted. The web app puts the toast text, e.g. `Kept DSC05050 ★3 · 1 rejected with a note`. Nothing reads it back. |
+| `action_id` | Any unique non-empty string you make up (the web app uses time plus 12 random bytes in hex). Keep it: it is what `undo` takes. |
+| `day` | Non-empty day id string; every change must be a frame of that day |
+| `label` | String kept with the action; `""` if omitted or null. The web app puts the toast text, e.g. `Kept DSC05050 ★3 · 1 rejected with a note`. Nothing reads it back. |
+| `changes` | Non-empty list of objects |
 | `changes[].id` | A frame `id` (or a `partner_ids` entry). Required, an int. |
 | `changes[].flag` | `pick`, `reject` or `none` (`none` takes a flag back off) |
 | `changes[].via` | `card` (a decision on the card), `burst` (from the burst picker), `rescue` (a photo pulled back from the reject pile) or `sweep` (the web app no longer sends it) |
-| `changes[].stars` | 1 to 5. **Kept only for `pick`**; for `reject` and `none` it is dropped. Not range-checked. |
-| `changes[].note` | Free text. The web app writes `Burst reject · kept DSC05050, DSC05051` on the rejected frames of a burst it kept frames of. |
+| `changes[].stars` | For `pick`, an int from 1 to 5, null or omitted. For `reject` and `none` it is dropped. |
+| `changes[].note` | String; `""` if omitted or null. The web app writes `Burst reject · kept DSC05050, DSC05051` on the rejected frames of a burst it kept frames of. |
 
 → `{ok: true}`. A change replaces whatever decision the frame had and sets it to `draft`. All changes in one
 call are one action. A pick or reject on a RAW is also written for its `partners` at Send time.
+Replacing a `queued` decision withdraws its inbox rows, including partners. `503 {error}` if those rows
+need withdrawing but the inbox is unavailable; nothing changes.
 
 **Replay.** If `action_id` was seen before (a retry after a dropped response, or after the action was undone) the
 call does nothing and answers `{ok: true, replay: true}`. The body is not compared. Validation runs first, so a bad
 body still gets 400. To decide again after an undo, use a new `action_id`.
 
-`400` for: missing `action_id`, `day` or `changes`; a change with a flag or via outside the lists above or a
-non-int `id`; an unknown frame id, or one from another day.
+`400` for missing or invalid fields above; an unknown frame id, or one from another day.
 
 **`POST /m/api/undo`**: `{action_id}` → `{ok: true}`. Puts the rows back exactly as they were before that
 action (a frame that had no decision loses it). `{ok: true, replay: true}` if already undone; `404` for an
-unknown `action_id`.
+unknown `action_id`. `400` if `action_id` is not a non-empty string. It reads new plug-in receipts first.
+Current `queued` rows and their partners
+are withdrawn. Restored `queued` decisions go back into the inbox.
+`409 {error, applied}` if `applied` current decisions from this action are `landed` or `conflict`;
+nothing changes. `503 {error}` if withdrawing or restoring queued rows needs an unavailable inbox;
+nothing changes. Replaying an already-undone action has no side effects.
 
-**`PUT /m/api/day/<day>/progress`**: `{pass, cursor, finished?}` → `{ok: true}`. `pass` is 1 or 2 (the web app
-always uses 2 now) and `cursor` an int (a stack `id`); anything else is `400`. `finished: true` marks the day
+**`PUT /m/api/day/<day>/progress`**: `{pass, cursor, lead?, finished?}` → `{ok: true}`. `pass` is the int 1 or 2
+(the web app always uses 2 now) and `cursor` an int (a stack `id`); anything else is `400`.
+`lead`, if present and not null, must be an int frame id from this day; unknown ids and ids from another day get `400`.
+The server stores that photo's library path. On the next day read, `progress.cursor` is the current position
+of the stack containing that photo, including as a pair partner. If the path is absent, it falls back to the
+saved integer cursor. Omitting `lead` (or sending null) clears the path and saves only the integer cursor, as older clients do.
+`finished`, if present, must be a bool (`400` otherwise). `finished: true` marks the day
 finished (the `finished` field in Days). It can't be turned off again except by `reset`; `finished: false` leaves
 it as it was. The web app saves 600 ms after the last move, and at once with `finished: true` when the last
 open stack is decided. On opening a day it jumps to the stack whose `id` is `progress.cursor`.
@@ -204,7 +219,9 @@ progress and finished flag, and takes `queued` rows back out of the inbox file (
 `conflict`: the phone can't take those back. `503 {error}` when rows are queued but the inbox is not mounted;
 nothing is reset. Lightroom flags and stars are never touched.
 
-`send` and `reset` don't check that the day exists: an unknown day answers `ok` with zeros.
+`progress`, `send` and `reset` return `404 {error: "no such day"}` for an unknown day.
+A day is known if it has library rows or retained phone decisions or progress/Send state.
+This allows resetting a day whose folder vanished.
 
 **Order.** The web app sends its writes one at a time, in order, from a queue saved on the phone, and drops a
 request after a 4xx; a 5xx or no connection is retried unchanged, which is safe because `decide` is idempotent

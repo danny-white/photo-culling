@@ -170,6 +170,11 @@ class RoundTrip(unittest.TestCase):
         from flask import Flask
         app = Flask(__name__)
         tmp = Path(self.tmp.name)
+        con = self.anno()
+        con.executescript(mobile.SCHEMA)
+        con.execute("INSERT INTO cull_days(day) VALUES (?)", (DAY,))  # a known day, without reading the library
+        con.commit()
+        con.close()
         app.register_blueprint(mobile.make_blueprint(
             db_ro=lambda: None, anno=self.anno, pc=None, cache_dir=tmp, static_dir=tmp, state_dir=tmp / "s2",
             inbox=tmp / "not-a-mount", check_mount=True))
