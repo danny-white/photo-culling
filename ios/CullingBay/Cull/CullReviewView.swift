@@ -244,7 +244,8 @@ private struct CullReviewThumb: View {
     }
 }
 
-private struct CullFooterStyle: ButtonStyle {
+/// The two buttons at the foot of the review, the picker and a card's focus check.
+struct CullFooterStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
     let isPrimary: Bool
 

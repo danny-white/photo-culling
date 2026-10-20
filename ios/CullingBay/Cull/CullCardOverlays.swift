@@ -43,8 +43,8 @@ struct CullBadgesView: View {
     }
 }
 
-/// The chip at the bottom right: how many frames a burst has, or `RAW + JPG`. Opening the burst
-/// comes with the burst picker in phase 3, so for now it only says.
+/// The chip at the bottom right: how many frames a burst has, or `RAW + JPG`. It only says; the
+/// strip under a burst card, its Choose button and a swipe up open the burst.
 struct CullChipView: View {
     let chip: CullChip
 
@@ -110,8 +110,7 @@ struct CullStatusLineView: View {
     }
 }
 
-/// KEEP or REJECT, fading in as the card is dragged towards it. `note` says what a keep does to
-/// the rest of a burst.
+/// KEEP, CHOOSE or REJECT, fading in as the card is dragged towards it. `note` is a line under it.
 struct CullStampView: View {
     let action: CullAction
     let strength: Double
@@ -119,7 +118,7 @@ struct CullStampView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            Text(action == .keep ? "KEEP" : "REJECT")
+            Text(action.word)
                 .font(.system(size: 32, weight: .heavy))
                 .tracking(2.5)
                 .padding(.horizontal, 14)
@@ -134,7 +133,7 @@ struct CullStampView: View {
                     .background(Color.black.opacity(0.5), in: Capsule())
             }
         }
-        .foregroundStyle(action == .keep ? Color.green : Color.red)
+        .foregroundStyle(action.tint)
         .rotationEffect(.degrees(-8))
         .opacity(strength)
         .accessibilityHidden(true)
@@ -142,7 +141,39 @@ struct CullStampView: View {
     }
 }
 
-/// What a swipe or a tap on Keep or Reject asks for.
+/// What a swipe on the card asks for. Up keeps a single and, on a burst, chooses: it opens the
+/// burst picker instead of deciding.
 enum CullAction {
-    case keep, reject
+    case keep, reject, choose
+
+    var word: String {
+        switch self {
+        case .keep: "KEEP"
+        case .reject: "REJECT"
+        case .choose: "CHOOSE"
+        }
+    }
+
+    var tint: Color { self == .reject ? .red : .green }
+}
+
+/// The camera's autofocus point: a small yellow box, 9% of the photo's width and three to two
+/// (`.af` in `app.css`), centred on the point. Sized by the photo it sits over, so put it in an
+/// overlay of the photo itself, not of a box with bars around it.
+struct CullAFBoxView: View {
+    /// Fractions of the photo.
+    let point: Point
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width * CullFocusModel.afBoxWidth
+            Rectangle()
+                .strokeBorder(Color.yellow, lineWidth: 2)
+                .shadow(color: .black.opacity(0.45), radius: 0.6)
+                .frame(width: width, height: width / CullFocusModel.afBoxAspect)
+                .position(x: geometry.size.width * point.x, y: geometry.size.height * point.y)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
 }

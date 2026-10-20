@@ -51,8 +51,12 @@ final class DecodedImageCache: Sendable {
 /// Fetches through the shared `ImageDataLoader` and decodes off the main thread with ImageIO.
 enum ImagePipeline {
     /// The decoded picture, or nil if it could not be fetched or decoded, or the caller was
-    /// cancelled.
-    static func load(_ url: URL, maxPixel: Int, loader: ImageDataLoader) async -> LoadedImage? {
+    /// cancelled. `cacheDecoded: false` keeps the decoded picture out of the shared cache, for
+    /// full-resolution crops, which are large and are not looked at twice; the loader's cache of
+    /// the compressed data still serves a second look.
+    static func load(
+        _ url: URL, maxPixel: Int, loader: ImageDataLoader, cacheDecoded: Bool = true
+    ) async -> LoadedImage? {
         if let cached = DecodedImageCache.shared.image(for: url, maxPixel: maxPixel) {
             return LoadedImage(image: cached)
         }
@@ -61,7 +65,7 @@ enum ImagePipeline {
             Self.decode(data, maxPixel: maxPixel)
         }.value
         guard let decoded else { return nil }
-        DecodedImageCache.shared.store(decoded.image, for: url, maxPixel: maxPixel)
+        if cacheDecoded { DecodedImageCache.shared.store(decoded.image, for: url, maxPixel: maxPixel) }
         return decoded
     }
 

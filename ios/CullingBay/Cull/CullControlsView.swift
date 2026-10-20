@@ -2,7 +2,8 @@ import CullingBayCore
 import SwiftUI
 
 /// Under the card: one row that is the star row on a single and the strip of frames on a burst
-/// (so the buttons below never move between the two), then Reject, Undo, Keep all and Keep.
+/// (so the buttons below never move between the two), then Reject, Undo, Keep all and Keep, which
+/// on a burst is Choose and opens the picker.
 struct CullControlsView: View {
     @Environment(AppServices.self) private var services
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -49,8 +50,15 @@ struct CullControlsView: View {
     // MARK: Burst strip
 
     /// The first six frames of the burst, the kept ones outlined and the rejected ones dimmed.
-    /// It only shows for now; the picker that opens from it is phase 3.
+    /// A tap opens the picker on the frame the card shows.
     private var strip: some View {
+        Button { session.openPicker(fromStart: false) } label: { stripContent }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Burst of \(card.stack.frames.count) frames")
+            .accessibilityHint("Opens the burst to choose the frames to keep")
+    }
+
+    private var stripContent: some View {
         HStack(spacing: 4) {
             ForEach(card.strip) { item in
                 RemoteImage(url: services.client.imageURL(id: item.frame.id, size: .thumb))
@@ -67,12 +75,14 @@ struct CullControlsView: View {
                 Text("+\(card.stripMore)").font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
+            Text("Choose")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(CullStyle.panel, in: RoundedRectangle(cornerRadius: 12))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Burst of \(card.stack.frames.count) frames")
+        .contentShape(RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: Buttons
@@ -105,8 +115,11 @@ struct CullControlsView: View {
                 isOn: card.pressed.keepAll, isSuggested: card.suggestsKeepAll
             ) { session.keepAll() }
         }
-        CullControlButton(title: "Keep", systemImage: "checkmark", tint: .green, isOn: card.pressed.keep) {
-            session.keep()
+        CullControlButton(
+            title: card.keepLabel, systemImage: card.isBurst ? "rectangle.stack" : "checkmark", tint: .green,
+            isOn: card.pressed.keep
+        ) {
+            if card.isBurst { session.openPicker() } else { session.keep() }
         }
     }
 }

@@ -1,12 +1,15 @@
 import CullingBayCore
 import SwiftUI
 
-/// One opened day: the cards while stacks are open, the review when they are done. Which one
-/// shows is `session.screen`; the screens are `CullCardsView` and `CullReviewView`. A darkroom in
-/// every theme, as the web version is: a neutral surround to judge photos against.
+/// One opened day: the cards while stacks are open, the review when they are done, the burst
+/// picker over a card, and the 1:1 focus check over a card or the picker. Which one shows is
+/// `session.screen`; the screens are `CullCardsView`, `CullReviewView`, `CullPickerView` and
+/// `CullFocusView`. A darkroom in every theme, as the web version is: a neutral surround to judge
+/// photos against.
 struct CullDayView: View {
     @Environment(\.dismiss) private var dismiss
     let session: CullSessionModel
+    @State private var appliedLaunchOptions = false
 
     var body: some View {
         ZStack {
@@ -26,9 +29,14 @@ struct CullDayView: View {
                     .padding(.horizontal, 24)
                 }
             case .loaded:
-                switch session.screen {
-                case .cards: CullCardsView(session: session)
+                // The focus check sits over the screen it was opened from, which stays as it was.
+                switch session.baseScreen {
+                case .cards, .focus: CullCardsView(session: session)
                 case .summary: CullReviewView(session: session)
+                case .picker: CullPickerView(session: session)
+                }
+                if let focus = session.focus {
+                    CullFocusView(session: session, focus: focus)
                 }
             }
         }
@@ -40,6 +48,12 @@ struct CullDayView: View {
         .toolbar(.hidden, for: .tabBar)
         // A load the tab bar cut short starts again when the day comes back.
         .task { if session.phase == .idle { await session.load() } }
+        // The simulator's launch arguments look at a screen; they read and decide nothing.
+        .task(id: session.phase) {
+            guard session.phase == .loaded, !appliedLaunchOptions else { return }
+            appliedLaunchOptions = true
+            LaunchOptions.apply(to: session)
+        }
         .sensoryFeedback(trigger: session.feedback) { _, new in
             switch new?.kind {
             case .kept: .impact(weight: .light)
@@ -66,15 +80,18 @@ struct CullDayHeader<Subtitle: View>: View {
     let title: String
     /// Nil for no back button.
     let backTitle: String?
+    /// The symbol before the back button's words; nil for none (Cancel).
+    let backIcon: String?
     let onBack: () -> Void
     let subtitle: Subtitle
 
     init(
-        title: String, backTitle: String?, onBack: @escaping () -> Void,
+        title: String, backTitle: String?, backIcon: String? = "chevron.left", onBack: @escaping () -> Void,
         @ViewBuilder subtitle: () -> Subtitle
     ) {
         self.title = title
         self.backTitle = backTitle
+        self.backIcon = backIcon
         self.onBack = onBack
         self.subtitle = subtitle()
     }
@@ -122,7 +139,9 @@ struct CullDayHeader<Subtitle: View>: View {
         if let backTitle {
             Button(action: onBack) {
                 HStack(spacing: 3) {
-                    Image(systemName: "chevron.left").font(.body.weight(.semibold))
+                    if let backIcon {
+                        Image(systemName: backIcon).font(.body.weight(.semibold))
+                    }
                     Text(backTitle)
                 }
                 .frame(minWidth: 44, minHeight: 44, alignment: .leading)

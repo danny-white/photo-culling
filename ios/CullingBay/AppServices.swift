@@ -20,6 +20,9 @@ final class AppServices {
     /// Every tap on a Cull card goes through this one queue, which keeps what is unsent on disk.
     private(set) var cullQueue: CullWriteQueue
     private(set) var cullDays: CullDaysModel
+    /// Every full-resolution crop of the focus check goes through this, a couple at a time, so
+    /// the writes of a decision always have a connection to the server free.
+    let cropGate = CropLoadGate(limit: 2)
     private(set) var generation = 0
     /// The Settings sheet. Any screen can open it.
     var showsSettings = false
@@ -75,15 +78,17 @@ final class AppServices {
     }
 
     private static func connect(to url: URL, settings: any GallerySettings) -> Connection {
-        let perf = PerfReporter(client: url)
+        // `-CBReadOnly`: a simulator run that looks at the real server and cannot write to it.
+        let transport: any HTTPTransport = LaunchOptions.readOnly ? ReadOnlyTransport() : URLSessionTransport()
+        let perf = PerfReporter(client: url, transport: transport)
         // Thumbnails are many and each is small news, and the queue holds only 400 marks, so
         // only the larger pictures are reported as fetches.
-        let loader = ImageDataLoader(report: { fetched, ms, bytes, timing in
+        let loader = ImageDataLoader(transport: transport, report: { fetched, ms, bytes, timing in
             guard !fetched.absoluteString.contains("s=thumb") else { return }
             let item = PerfMarks.fetch(url: fetched, ms: ms, bytes: bytes, serverTiming: timing)
             Task { await perf.mark(item) }
         })
-        let client = CullingBayClient(baseURL: url)
+        let client = CullingBayClient(baseURL: url, transport: transport)
         let queue = CullWriteQueue(
             client: client, store: FileCullWriteStore(directory: cullStoreDirectory(for: url)))
         return Connection(
@@ -100,5 +105,18 @@ final class AppServices {
         let digest = SHA256.hash(data: Data(address.utf8))
         let name = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
         return URL.applicationSupportDirectory.appending(path: "CullWrites/\(name)", directoryHint: .isDirectory)
+    }
+}
+
+/// The network for a `-CBReadOnly` run: GETs go through, anything else is refused before it
+/// leaves the phone. A refused write is an error like a lost connection, so the Cull queue keeps
+/// it and never gets it to the server.
+struct ReadOnlyTransport: HTTPTransport {
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let method = request.httpMethod ?? "GET"
+        guard method == "GET" else {
+            throw CullingBayError.transport("Read-only run: \(method) \(request.url?.path ?? "") was not sent.")
+        }
+        return try await URLSessionTransport().send(request)
     }
 }

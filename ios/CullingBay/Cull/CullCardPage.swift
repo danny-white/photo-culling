@@ -5,10 +5,11 @@ import UIKit
 /// The card for one stack: the picture fitted inside the space it is given, never cropped, with
 /// its status line, badges and chip over it, and the swipes of `bindStage` in `app.js`.
 ///
-/// - Drag up past 80 pt keeps, with a KEEP stamp fading in; drag down rejects.
+/// - Drag up past 80 pt keeps a single, with a KEEP stamp fading in; on a burst it chooses
+///   (CHOOSE) and the card springs back while the picker opens. Drag down rejects.
 /// - Drag sideways 70 pt or more browses to the next (left) or previous (right) stack.
-/// - A shorter drag springs back. A single tap hides or shows the controls. A double tap does
-///   nothing yet: the focus view arrives in phase 3.
+/// - A shorter drag springs back. A single tap hides or shows the controls. A double tap opens
+///   the 1:1 focus check, at the camera's AF point or where you tapped.
 ///
 /// The drag state lives here, so a new card starts at rest. The card is made with `.id` of its
 /// frame, so the next stack gets a new page.
@@ -23,6 +24,8 @@ struct CullCardPage: View {
     let onToggleChrome: () -> Void
     let onDecide: (CullAction) -> Void
     let onBrowse: (Int) -> Void
+    /// A double tap, as fractions of the photo.
+    let onFocus: (Point) -> Void
 
     private let viewURL: URL
     private let thumbURL: URL
@@ -40,7 +43,7 @@ struct CullCardPage: View {
     init(
         card: CullCard, viewURL: URL, thumbURL: URL, chrome: Bool,
         onToggleChrome: @escaping () -> Void, onDecide: @escaping (CullAction) -> Void,
-        onBrowse: @escaping (Int) -> Void
+        onBrowse: @escaping (Int) -> Void, onFocus: @escaping (Point) -> Void
     ) {
         self.card = card
         self.viewURL = viewURL
@@ -49,6 +52,7 @@ struct CullCardPage: View {
         self.onToggleChrome = onToggleChrome
         self.onDecide = onDecide
         self.onBrowse = onBrowse
+        self.onFocus = onFocus
         // What swiping to a card prefetched is on screen in the first frame.
         let full = DecodedImageCache.shared.image(for: viewURL, maxPixel: ImagePixels.view)
         _hasFullSize = State(initialValue: full != nil)
@@ -69,7 +73,7 @@ struct CullCardPage: View {
                     .opacity(flightFade)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
-            .gesture(taps)
+            .gesture(taps(photo: photoRect(fit: fit, in: geometry.size, edge: edge)))
             .gesture(drag(stageHeight: geometry.size.height))
         }
         .onChange(of: isTouching) { _, touching in
@@ -128,7 +132,7 @@ struct CullCardPage: View {
                     ProgressView().tint(.white)
                 }
                 if let action = stampAction {
-                    (action == .keep ? Color.green : Color.red)
+                    action.tint
                         .opacity(0.25 * stampStrength)
                         .allowsHitTesting(false)
                     CullStampView(action: action, strength: stampStrength, note: stampNote(action))
@@ -156,6 +160,9 @@ struct CullCardPage: View {
                 CullBadgesView(badges: card.badges)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(8)
+            }
+            if let af = card.frame.afPoint {
+                CullAFBoxView(point: af)
             }
             if let chip = card.chip {
                 CullChipView(chip: chip)
@@ -194,18 +201,16 @@ struct CullCardPage: View {
     private var stampAction: CullAction? {
         if let flying { return flying }
         guard lockedAxis == .vertical, dragOffset.height != 0 else { return nil }
-        return dragOffset.height < 0 ? .keep : .reject
+        return dragOffset.height < 0 ? (card.isBurst ? .choose : .keep) : .reject
     }
 
     private var stampStrength: Double {
         flying != nil ? 1 : min(1, Double(abs(dragOffset.height) / Self.decideDistance))
     }
 
-    /// On a burst, keeping the photo shown rejects the other frames. The line says so before you let go.
+    /// On a burst, a swipe up chooses: the line says what opens before you let go.
     private func stampNote(_ action: CullAction) -> String? {
-        guard action == .keep, card.isBurst else { return nil }
-        let others = card.stack.frames.count - 1
-        return "the other \(others) rejected"
+        action == .choose ? "pick the keepers" : nil
     }
 
     // MARK: Gestures
@@ -229,6 +234,10 @@ struct CullCardPage: View {
                 let axis = lockedAxis
                 lockedAxis = nil
                 switch axis {
+                case .vertical where dy <= -Self.decideDistance && card.isBurst:
+                    // A burst is chosen, not kept: the picker opens and the card comes back.
+                    settle()
+                    onDecide(.choose)
                 case .vertical where dy <= -Self.decideDistance:
                     fly(.keep, from: stageHeight)
                 case .vertical where dy >= Self.decideDistance:
@@ -242,13 +251,27 @@ struct CullCardPage: View {
             }
     }
 
-    /// A single tap hides or shows the controls; a second tap quickly after it does nothing yet.
-    private var taps: some Gesture {
-        TapGesture(count: 2).onEnded {}
+    /// A single tap hides or shows the controls; a double tap opens the focus check, where the
+    /// camera focused or, with no AF point, where you tapped (`photo` is where the picture is).
+    private func taps(photo: CGRect) -> some Gesture {
+        SpatialTapGesture(count: 2)
+            .onEnded { value in
+                guard flying == nil else { return }
+                let rect = Rect(
+                    x: Double(photo.minX), y: Double(photo.minY), width: Double(photo.width), height: Double(photo.height))
+                onFocus(CullFocusModel.imagePoint(x: Double(value.location.x), y: Double(value.location.y), in: rect))
+            }
             .exclusively(before: TapGesture().onEnded {
                 guard flying == nil else { return }
                 if loadFailed { retry() } else { onToggleChrome() }
             })
+    }
+
+    /// Where the picture sits in the stage: centred, a burst's edges above it pushing it down.
+    private func photoRect(fit: CGSize, in stage: CGSize, edge: CGFloat) -> CGRect {
+        CGRect(
+            x: (stage.width - fit.width) / 2, y: (stage.height - fit.height) / 2 + edge / 2,
+            width: fit.width, height: fit.height)
     }
 
     /// Sends the card off the top or bottom (the web version takes 0.1 s), then decides.

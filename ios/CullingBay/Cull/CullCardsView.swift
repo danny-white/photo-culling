@@ -80,7 +80,8 @@ struct CullCardsView: View {
                     chrome: chrome,
                     onToggleChrome: toggleChrome,
                     onDecide: { decide(card.stack.id, $0) },
-                    onBrowse: browse)
+                    onBrowse: browse,
+                    onFocus: { session.openFocus(tapped: $0) })
                     .id(card.frame.id)
                     .transition(transition)
             }
@@ -119,10 +120,15 @@ struct CullCardsView: View {
     /// button while it was flying), the swipe is dropped rather than landing on the next stack.
     private func decide(_ stackID: Int, _ action: CullAction) {
         guard session.card?.stack.id == stackID else { return }
+        if action == .choose {
+            session.openPicker()
+            return
+        }
         move(.decided) {
             switch action {
             case .keep: session.keep()
             case .reject: session.reject()
+            case .choose: break
             }
         }
     }
