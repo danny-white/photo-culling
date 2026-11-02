@@ -8,6 +8,7 @@
 'use strict';
 
 const $ = s => document.querySelector(s);
+const wide = () => window.cbWide();
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const img = (id, size) => '/m/api/img/' + id + '?s=' + size;
 const exportUrl = (id, extra) => '/m/api/export/' + id + (extra ? '?' + extra : '');
@@ -262,7 +263,7 @@ function markYear(year) {
   for (const b of bar.querySelectorAll('.ypill')) {
     const on = b.dataset.year === year;
     if (on && b.getAttribute('aria-current') !== 'true')   // keep the lit pill in view, without moving the page
-      bar.scrollTo({ left: b.offsetLeft - bar.clientWidth / 2 + b.offsetWidth / 2, behavior: 'smooth' });
+      bar.scrollTo({ left: b.offsetLeft - bar.clientWidth / 2 + b.offsetWidth / 2, behavior: wide() ? 'auto' : 'smooth' });
     b.setAttribute('aria-current', on);
   }
 }
@@ -325,6 +326,7 @@ function updateSelbar() {
 // the share sheet comes up directly.
 async function save(photos) {
   if (!photos.length) return;
+  if (wide()) return openSheet(photos);
   if (navigator.canShare && window.isSecureContext) {
     try {
       toast('Preparing ' + photos.length + ' full-size photo' + (photos.length > 1 ? 's' : '') + '…', 10000);
@@ -343,21 +345,27 @@ async function save(photos) {
   openSheet(photos);
 }
 
+const phoneSaveHint = $('#sheet .hint').innerHTML;
+let sheetPhotos = null;
+// The full-size export preserves HEIC/HEIF originals; label those truthfully too.
+const downloadLabel = p => 'Download ' + (/\.(heic|heif)$/i.exec(p.file)?.[1].toUpperCase() || 'JPEG');
 function openSheet(photos) {
-  $('#sheet-title').textContent = photos.length > 1 ? 'Save ' + photos.length + ' photos' : 'Save to phone';
+  sheetPhotos = photos;
+  $('#sheet .hint').innerHTML = wide() ? 'Download the full-size picture or its original RAW file.' : phoneSaveHint;
+  $('#sheet-title').textContent = photos.length > 1 ? 'Save ' + photos.length + ' photos' : wide() ? 'Save photo' : 'Save to phone';
   $('#sheet-list').innerHTML = photos.map(p =>
-    '<figure><img src="' + exportUrl(p.id) + '" alt="Preparing the full-size picture…">' +
+    '<figure>' + (wide() ? '' : '<img src="' + exportUrl(p.id) + '" alt="Preparing the full-size picture…">') +
     '<figcaption><span>' + esc(p.file) + ' · ' + esc(shortDate(p.date)) + '</span><span class="dl">' +
-    '<a href="' + exportUrl(p.id, 'dl=1') + '" download>' + (p.raw ? 'JPEG' : 'Download') + '</a>' +
-    (p.raw ? '<a href="' + exportUrl(p.id, 's=original') + '" download>RAW · ' + esc(mb(p.bytes)) + '</a>' : '') +
+    '<a href="' + exportUrl(p.id, wide() ? 's=full&dl=1' : 'dl=1') + '" download>' + (wide() ? downloadLabel(p) : p.raw ? 'JPEG' : 'Download') + '</a>' +
+    (p.raw ? '<a href="' + exportUrl(p.id, 's=original') + '" download>' + (wide() ? 'Download RAW' : 'RAW') + ' · ' + esc(mb(p.bytes)) + '</a>' : '') +
     '</span></figcaption></figure>').join('');
-  $('#sheet-raw').hidden = !photos.some(p => p.raw);
+  $('#sheet-raw').hidden = wide() || !photos.some(p => p.raw);
   $('#sheet').hidden = false;
   const first = $('#sheet-list img'), perfT = performance.now();
   if (first && window.cbPerf) first.addEventListener('load', () =>
     cbPerf.mark('save_ready', performance.now() - perfT, { name: first.getAttribute('src'), n: photos.length }), { once: true });
 }
-function closeSheet() { $('#sheet').hidden = true; $('#sheet-list').innerHTML = ''; }
+function closeSheet() { $('#sheet').hidden = true; $('#sheet-list').innerHTML = ''; sheetPhotos = null; }
 
 /* ---------------------------------------------------------------- viewer */
 const viewer = $('#viewer'), stage = $('#stage'), vimg = $('#vimg');
@@ -415,6 +423,7 @@ function show(i) {
   $('#v-when').textContent = [longDate(p.date), timeOf(p.ts)].filter(Boolean).join(' · ');
   $('#v-where').textContent = [town(p.place), p.camera, p.stars ? '★'.repeat(Math.min(p.stars, 5)) : ''].filter(Boolean).join(' · ');
   $('#v-cap').textContent = p.caption || '';
+  viewerDetails();
   $('#v-day').hidden = S.route.kind === 'day';
   // Preload two ahead in the direction you're swiping, and one behind. The Image objects are kept
   // so the requests aren't dropped.
@@ -423,6 +432,22 @@ function show(i) {
     im.src = img(S.photos[j].id, 'view');
     return im;
   });
+}
+
+function viewerDetails() {
+  const rail = $('.vbottom');
+  const old = $('.gallery-details'); if (old) old.remove();
+  if (!S.v) return;
+  const p = S.photos[S.v.i];
+  if (!wide()) {
+    rail.removeAttribute('role'); rail.removeAttribute('aria-label');
+    $('#v-where').textContent = [town(p.place), p.camera, p.stars ? '★'.repeat(Math.min(p.stars, 5)) : ''].filter(Boolean).join(' · ');
+    return;
+  }
+  rail.setAttribute('role', 'complementary'); rail.setAttribute('aria-label', 'Photo details');
+  $('#v-where').textContent = '';
+  const fields = [['File', p.file], ['Camera', p.camera], ['Lens', p.lens], ['Place', p.place], ['Stars', p.stars ? '★'.repeat(Math.min(p.stars, 5)) : '']];
+  $('#v-cap').insertAdjacentHTML('beforebegin', '<dl class="gallery-details">' + fields.filter(([, v]) => v).map(([k, v]) => '<dt>' + k + '</dt><dd>' + esc(v) + '</dd>').join('') + '</dl>');
 }
 
 // The image is sized to fit the screen in its own shape, so zoom and pan work on the picture
@@ -485,6 +510,7 @@ function step(d) {
   const v = S.v, j = v.i + d;
   if (j < 0 || j >= S.photos.length) { snapBack(); return; }
   v.dir = d > 0 ? 1 : -1;
+  if (wide()) return show(j);
   const b = v.base, out = d > 0 ? -(b ? b.W : 400) : (b ? b.W : 400);
   vimg.style.transition = 'transform .16s ease-out';
   v.tx = out; applyTransform();
@@ -492,7 +518,7 @@ function step(d) {
 }
 function snapBack() {
   const v = S.v;
-  vimg.style.transition = 'transform .16s ease-out, opacity .16s';
+  vimg.style.transition = wide() ? 'none' : 'transform .16s ease-out, opacity .16s';
   vimg.style.opacity = '1';
   if (v.s === 1) { v.tx = 0; v.ty = 0; } else clampPan();
   applyTransform();
@@ -505,6 +531,7 @@ let g = null, lastTap = null, tapT = 0;
 
 stage.addEventListener('pointerdown', e => {
   if (!S.v) return;
+  if (wide() && e.button !== 0) return;
   stage.setPointerCapture(e.pointerId);
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
   vimg.style.transition = 'none';
@@ -535,6 +562,7 @@ stage.addEventListener('pointermove', e => {
   const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
   if (Math.hypot(dx, dy) > 8) g.moved = true;
   if (v.s > 1) { v.tx = g.tx0 + dx; v.ty = g.ty0 + dy; clampPan(); applyTransform(); return; }
+  if (wide()) return;
   if (!g.axis && g.moved) g.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
   if (g.axis === 'x') { v.tx = dx; applyTransform(); }
   else if (g.axis === 'y' && dy > 0) {
@@ -560,6 +588,7 @@ function endPointer(e) {
   const kind = g.axis;
   const moved = g.moved;
   g = null;
+  if (wide()) return;
   if (!moved && quick) return tap(e.clientX, e.clientY);
   if (v.s > 1) return;
   if (kind === 'x' && Math.abs(dx) > 60) return step(dx < 0 ? 1 : -1);
@@ -570,6 +599,7 @@ stage.addEventListener('pointerup', endPointer);
 stage.addEventListener('pointercancel', endPointer);
 
 function tap(x, y) {
+  if (wide()) return;
   const now = Date.now();
   if (lastTap && now - lastTap.t < 280 && Math.hypot(x - lastTap.x, y - lastTap.y) < 30) {
     clearTimeout(tapT);
@@ -584,7 +614,26 @@ function tap(x, y) {
 }
 
 window.addEventListener('resize', () => { if (S.v) { fit(); S.v.s = 1; S.v.tx = 0; S.v.ty = 0; applyTransform(); } });
+stage.addEventListener('wheel', e => {
+  if (!wide() || !S.v) return;
+  e.preventDefault(); vimg.style.transition = 'none';
+  const r = stage.getBoundingClientRect();
+  zoomAt(S.v.s * Math.exp(-e.deltaY * (e.deltaMode === 1 ? .03 : .002)), e.clientX - r.left, e.clientY - r.top);
+}, { passive: false });
+window.addEventListener('cbwidechange', () => {
+  clearTimeout(tapT); lastTap = null; pts.clear(); g = null;
+  viewer.classList.remove('bare'); viewerDetails();
+  if (S.v) { fit(); S.v.s = 1; S.v.tx = 0; S.v.ty = 0; applyTransform(); }
+  if (sheetPhotos) openSheet(sheetPhotos);
+  $('#sel-save').textContent = wide() ? 'Save' : 'Save to phone';
+});
+if (wide()) $('#sel-save').textContent = 'Save';
 document.addEventListener('keydown', e => {
+  if (wide()) {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, [contenteditable="true"]')) return;
+    if (!$('#sheet').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeSheet(); } return; }
+    if (S.v && ['ArrowRight', 'ArrowLeft', 'Escape'].includes(e.key)) e.preventDefault();
+  }
   if (!S.v) { if (e.key === 'Escape') closeSheet(); return; }
   if (e.key === 'ArrowRight') step(1);
   else if (e.key === 'ArrowLeft') step(-1);

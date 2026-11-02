@@ -1,0 +1,100 @@
+/* Desktop additions only. wide.js owns the capability query for both pages. */
+html.wide{--rail:clamp(340px,24vw,520px)}
+html.wide *{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+html.wide :is(button,a,input,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+html.wide #view{max-width:1800px}
+html.wide #view[data-screen="cull"],html.wide #view[data-screen="picker"]{max-width:none;display:grid;grid-template-columns:minmax(0,1fr) var(--rail);grid-template-rows:auto minmax(0,1fr) auto;grid-template-areas:"header rail" "stage rail" "strip strip"}
+html.wide .wide-header{grid-area:header;min-width:0;padding:8px 12px 12px}
+html.wide .wide-header .top .t{text-align:left;padding-left:18px;font-size:17px}
+html.wide .wide-header .budget{max-width:650px;margin-left:auto}
+html.wide #view .stage,html.wide #view .pk-main{grid-area:stage;min-width:0;min-height:0;margin:0;background:var(--bg);padding:0;display:block}
+html.wide #view .stage .card{position:absolute;inset:12px;width:auto;height:auto;max-height:none;margin:0;aspect-ratio:auto!important;animation:none;will-change:auto}
+html.wide #view .photo>img{position:absolute;inset:0;object-fit:contain}
+html.wide #view .card .photo::before,html.wide #view .card .photo::after{display:none}
+html.wide #view .stage .fname,html.wide #view .stage .ov,html.wide #view .photo .chip{display:none}
+html.wide #view .photo{cursor:zoom-in}
+html.wide #view .pk-box{inset:12px}
+html.wide .detail-rail{grid-area:rail;min-height:0;min-width:0;display:flex;flex-direction:column;gap:10px;overflow:auto;padding:18px 16px;background:var(--panel);border-left:1px solid var(--line);user-select:text;-webkit-user-select:text}
+html.wide .detail-rail p{margin:0;overflow-wrap:anywhere}
+html.wide .detail-rail .sh-id{font-size:13px}
+html.wide .detail-rail .badges,html.wide .detail-rail .pk-bd{position:static;max-width:none;display:flex;flex-wrap:wrap;gap:5px}
+html.wide .detail-rail .bd{background:none;padding:4px 0;margin-right:8px;color:var(--muted);border-radius:0;box-shadow:none}
+html.wide .detail-rail .bd-dot::before{background:var(--muted)}
+html.wide .rail-crop{flex:none;width:100%;padding:0;border:0;background:none;text-align:left;cursor:zoom-in}
+html.wide #view .detail-rail .band{display:block!important;height:clamp(160px,38vh,560px);width:100%;min-height:100px}
+html.wide .detail-rail .band .bd{left:0;top:0;right:0;margin:0;padding:5px 8px;background:var(--bg);color:var(--muted)}
+html.wide .rail-facts{flex:1 1 auto;min-height:60px;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:2px}
+html.wide .detail-rail .sh-why{padding:0;background:none;border-radius:0;line-height:1.5}
+html.wide .detail-rail .sh-cap{font-size:13px;color:var(--muted)}
+html.wide .detail-rail .rail-facts .pb2{flex:none;min-height:32px;background:none;text-align:left;padding:0;color:var(--muted);font-size:12px;font-weight:400;text-decoration:underline}
+html.wide #view .detail-rail .rcol{display:block;width:auto;padding:0}
+html.wide #view .detail-rail .stars{flex-direction:row;padding:0;gap:4px}
+html.wide #view .detail-rail .stars button{height:34px;background:none;border-radius:4px;max-width:none}
+html.wide #view .detail-rail .bar{padding:6px 0 0;flex-direction:row;flex-wrap:wrap}
+html.wide .detail-rail .pb{border:1px solid var(--line);border-radius:4px;min-width:60px;min-height:48px;background:none;font-size:12px}
+html.wide .detail-rail .pb-all{color:var(--ink)}
+html.wide .detail-rail .pb.on,html.wide .detail-rail .pb.sugg{background:none;box-shadow:none;border-color:currentColor}
+html.wide .detail-rail .pb-undo{flex:.7}
+html.wide .detail-rail .hint,html.wide .detail-rail .pk-note{margin:0;padding:0;text-align:left;line-height:1.6}
+html.wide .detail-rail>.link{text-align:left;font-size:11px}
+html.wide .detail-rail .pk-id,html.wide .detail-rail .pk-flag{position:static;color:var(--muted);background:none;padding:0;opacity:1}
+html.wide .detail-rail .pk-tick{position:static;flex:none;width:auto;height:36px;border:1px solid var(--line);border-radius:4px;color:var(--ink);background:none;display:flex;gap:8px;justify-content:center}
+html.wide .detail-rail .pk-tick.on{color:var(--keep);border-color:var(--keep)}
+html.wide .detail-rail .pk-tick svg{width:16px}
+html.wide .detail-rail .foot{padding:0;gap:8px}
+html.wide .detail-rail .pb2{border-radius:4px;font-size:12px;min-height:42px}
+html.wide .day-filmstrip,html.wide #view>.pk-strip{grid-area:strip;display:flex;gap:8px;overflow:auto;min-width:0;padding:12px 16px;max-height:240px;border-top:1px solid var(--line);scroll-behavior:auto;overflow-anchor:none}
+html.wide .film-thumb,html.wide .pk-th{position:relative;flex:none;width:100px;height:70px;background:none;padding:3px;border:2px solid transparent;border-radius:0;cursor:pointer}
+html.wide .film-thumb img,html.wide .pk-th img{width:100%;height:100%;object-fit:contain;display:block;border-radius:0}
+html.wide .film-thumb.st-keep,html.wide .film-thumb.st-hero{border-bottom-color:var(--keep)}
+html.wide .film-thumb.st-reject{border-bottom-color:var(--reject)}
+html.wide .film-thumb.st-reject img,html.wide .pk-th.excluded img{opacity:.4;filter:grayscale(1)}
+html.wide .film-thumb.cur,html.wide .pk-th.cur{outline:2px solid var(--ink);outline-offset:0}
+html.wide .film-thumb span{position:absolute;right:4px;bottom:4px;padding:2px 5px;background:var(--bg);font-size:11px}
+html.wide .pk-th b{background:var(--keep);border-radius:0;right:2px;top:2px}
+html.wide .pk-th .dot{background:var(--muted);bottom:0}
+html.wide #view[data-screen="days"]{padding:12px 24px 0}
+html.wide .day-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:8px 20px}
+html.wide .day-grid .day{margin:0}
+html.wide .monitor-link{position:absolute;right:110px;top:16px;color:var(--muted);text-decoration:none}
+html.wide .sec,html.wide h2{text-transform:none;letter-spacing:normal}
+html.wide .gv-grid,html.wide .sm-grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+html.wide #view[data-screen="summary"] .scroll,html.wide #view[data-screen="grid"] .scroll{padding:12px 24px 24px}
+html.wide .counts{max-width:720px;margin:12px 0}
+html.wide .counts div{background:none}
+html.wide .fz{cursor:grab}
+html.wide .fz:active{cursor:grabbing}
+html.wide .sheet-wrap{align-items:center;justify-content:center}
+html.wide .sheet-wrap .sheet{max-width:560px;border:1px solid var(--line);border-radius:4px;padding:24px}
+html.wide .key-sheet dl{display:grid;grid-template-columns:190px 1fr;gap:10px;margin:8px 0}
+html.wide .key-sheet dt{font-weight:600}
+html.wide .key-sheet dd{margin:0;color:var(--muted)}
+html.wide #app>.toast{top:auto;bottom:110px;transition:none}
+/* Gallery uses the same rail width and neutral surround. */
+html.wide body>.bar{background:var(--bg);backdrop-filter:none;-webkit-backdrop-filter:none}
+html.wide body>.bar .row,html.wide main{max-width:1800px}
+html.wide main .grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+html.wide .viewer{background:var(--bg)}
+html.wide .viewer .stage{right:var(--rail);top:56px}
+html.wide .viewer .vtop{right:var(--rail);background:none;padding:8px 16px}
+html.wide .viewer .vbottom{left:auto;right:0;top:0;bottom:0;width:var(--rail);padding:24px 20px;background:var(--panel);border-left:1px solid var(--line);overflow:auto;touch-action:auto;user-select:text;-webkit-user-select:text}
+html.wide .viewer .meta{display:flex;flex-direction:column;align-items:flex-start;gap:12px}
+html.wide .viewer .cap{max-height:none;overflow:visible;margin-top:20px;line-height:1.6;color:var(--muted)}
+html.wide .viewer .vbtns{gap:10px;flex-wrap:wrap;justify-content:flex-start;margin-top:24px}
+html.wide .viewer .vbtn{padding:8px;color:var(--ink);font-size:12px}
+html.wide .viewer .gallery-details{margin:18px 0;display:grid;gap:6px;overflow-wrap:anywhere}
+html.wide .gallery-details dt{color:var(--muted);font-size:12px}
+html.wide .gallery-details dd{margin:0 0 8px}
+html.wide .viewer.bare .chrome{opacity:1;pointer-events:auto}
+html.wide body>.sheet{align-items:center}
+html.wide .sheet-card{border:1px solid var(--line);border-radius:4px}
+html.wide .sheet-list figcaption{flex-direction:column;gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}
+html.wide .sheet-list .dl{gap:24px}
+html.wide .prog i,html.wide .budget-bar i,html.wide .chrome{transition:none}
+@media (prefers-reduced-motion:reduce){html.wide *,html.wide *::before,html.wide *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+html.wide .detail-rail .stline{position:static;padding:0;background:none;color:var(--muted);font-weight:500;flex:none}
+html.wide .detail-rail .stline span{white-space:normal;overflow:visible}
+html.wide .film-thumb.st-keep,html.wide .film-thumb.st-hero{background:color-mix(in srgb,var(--keep) 12%,var(--bg))}
+html.wide .film-thumb.st-reject{background:color-mix(in srgb,var(--reject) 12%,var(--bg))}
+html.wide #view[data-screen="focus"],html.wide #view[data-screen="large"]{max-width:none}
+html.wide .toast{transition:none}
