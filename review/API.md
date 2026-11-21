@@ -69,6 +69,41 @@ Photo:
 | `picked`, `rejected` | bool | Lightroom or phone flag |
 | `raw` | bool | The original is a RAW (ARW, NEF, CR2, CR3, DNG, ...) |
 
+## Practice
+
+The challenge list is hand-maintained in `trial_out/mobile/practice.json`. Its `path` is resolved
+against `images.path` on each list refresh and is never returned to the phone. Challenges keep the
+file's order; entries whose photo is no longer in the library are omitted and counted in `missing`.
+The file is re-read when its modification time changes. A missing file means an empty list; an
+invalid file returns `{challenges: [], error}` without exposing file contents or paths.
+
+- `GET /m/api/practice` → `{challenges: [PracticeChallenge], missing}`
+- `POST /m/api/practice/<cid>` → `{ok, id, status, note, updated_at, downloaded_at, done_at}`
+  (writes need `X-Culling-Bay: 1` and JSON; 400 for invalid fields, 404 for an unknown challenge)
+
+PracticeChallenge contains the challenge file's fields other than `path`, plus:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Stable challenge key used by the write route |
+| `title` | string | Short challenge name |
+| `mode` | string | `phone` or `mac` |
+| `minutes` | int | Approximate time budget |
+| `tools` | [string] | Allowed Lightroom tools |
+| `aim`, `why` | string | Desired result and why the photo suits it |
+| `hints` | [string]? | Optional editing suggestions |
+| `level` | string | `easy`, `medium`, or `hard` |
+| `picked_by`, `added` | string | Challenge attribution and date |
+| `photo` | Photo | Gallery photo fields used for previews and original download |
+| `status` | string | `todo`, `downloaded`, `done`, or `skipped`; no row means `todo` |
+| `note` | string | Danny's note, up to 2000 characters |
+| `updated_at` | string? | Last state update time |
+| `downloaded_at`, `done_at` | string? | First download and completion times |
+
+POST accepts `status` and/or `note`. Setting `downloaded` records the first download time. It does
+not move a `done` challenge back; moving off `done` clears `done_at`. Setting `done` preserves its
+first completion time until the challenge leaves that state.
+
 ## Cull
 
 The Cull tab works one day at a time. Everything it writes is the phone's own state in

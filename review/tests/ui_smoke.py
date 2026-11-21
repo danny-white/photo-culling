@@ -32,6 +32,16 @@ APP_PORT, WD_PORT = 8765, 4444
 
 def start_app(tmp: Path):
     (tmp / "inbox" / "applied").mkdir(parents=True, exist_ok=True)
+    state_dir = tmp / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(f"file:{ROOT / 'trial_out' / 'trial.db'}?mode=ro", uri=True) as con:
+        path = con.execute("SELECT path FROM images WHERE filename='DSC05036.ARW' AND path LIKE ? LIMIT 1",
+                           (f"%/{DAY}/%",)).fetchone()[0]
+    (state_dir / "practice.json").write_text(json.dumps({"challenges": [{
+        "id": "smoke-lantern", "path": path, "title": "Smoke challenge", "mode": "phone", "minutes": 10,
+        "tools": ["Crop", "Color › Mix"], "aim": "Keep the light warm.", "why": "One clear light source.",
+        "hints": ["Start with the light."], "level": "easy", "picked_by": "Smoke test", "added": "2026-11-21"
+    }]}), encoding="utf-8")
     # what the plugin would report from a Lightroom sync: two stacks you already picked by hand
     (tmp / "inbox" / "applied" / "19990101-000000-catalog.tsv").write_text(
         "#cull-catalog v1\n2026-10-01\tDSC05062.ARW\t1\t0\tyou\t\n2026-10-01\tDSC05066.ARW\t1\t3\tyou\tyou\n"
@@ -56,7 +66,7 @@ def start_app(tmp: Path):
     app = Flask(__name__)
     app.register_blueprint(mobile.make_blueprint(
         db_ro=db_ro, anno=anno, pc=pc, cache_dir=ROOT / "review" / "cache",
-        static_dir=ROOT / "review" / "static" / "m", state_dir=tmp / "state",
+        static_dir=ROOT / "review" / "static" / "m", state_dir=state_dir,
         inbox=tmp / "inbox", check_mount=False))
     srv = make_server("127.0.0.1", APP_PORT, app, threaded=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -362,6 +372,24 @@ def main():
     try:
         wd = WD(1600, 1000, mouse=True) if a.desktop else WD()
         app = f"http://127.0.0.1:{APP_PORT}/m/"
+        wd.go(app + "practice.html")
+        wd.wait("document.querySelector('.challenge-card')")
+        check(wd.text(".practice-head h1") == "Practice" and "Smoke challenge" in wd.text(".challenge-card"),
+              "Practice list loads a challenge")
+        wd.click(".challenge-card")
+        wd.wait("document.querySelector('.p-download') && document.querySelector('#practice-note')")
+        loaded(".p-detail-photo")
+        href = wd.js("return document.querySelector('.p-download').getAttribute('href')")
+        check("Smoke challenge" in wd.text(".practice-detail") and "/m/api/export/" in href and href.endswith("?s=original"),
+              "Practice detail links to the original download")
+        wd.click(".p-hints summary")
+        check(wd.js("return document.querySelector('.p-hints').open"), "Practice hints expand")
+        wd.js("const n=document.querySelector('#practice-note'); n.value='Warm light worked.'; n.dispatchEvent(new Event('input',{bubbles:true}));")
+        wd.click('[data-action="done"]')
+        wd.wait("document.querySelector('.p-done')")
+        with sqlite3.connect(tmp / "annotations.db") as con:
+            saved = con.execute("SELECT status,note FROM practice_state WHERE id='smoke-lantern'").fetchone()
+        check(saved == ("done", "Warm light worked."), "Practice saves completion and its note")
         wd.go(app)
         wd.wait("document.querySelectorAll('.year').length > 10")
         if a.desktop:

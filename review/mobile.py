@@ -90,6 +90,13 @@ CREATE TABLE IF NOT EXISTS lr_state(      -- what Lightroom held at the last syn
   stars_by TEXT NOT NULL,
   seen_at  TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS lr_state_day ON lr_state(day);
+CREATE TABLE IF NOT EXISTS practice_state(
+  id            TEXT PRIMARY KEY,
+  status        TEXT NOT NULL,
+  note          TEXT NOT NULL DEFAULT '',
+  updated_at    TEXT NOT NULL,
+  downloaded_at TEXT,
+  done_at       TEXT);
 """
 
 ROW_COLS = ("rowid, path, filename, capture_ts, camera, sharpness, exposure_flag, mean_lum, "
@@ -155,6 +162,9 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     pano_file = state_dir / "pano.json"
+    practice_file = state_dir / "practice.json"
+    practice_cache = {"stamp": object(), "items": [], "error": None}
+    practice_lock = threading.Lock()
     lock = threading.Lock()
     cache = {"days": None, "days_at": 0.0, "days_key": None}
     full_cache: dict[str, Image.Image] = {}          # path -> full-resolution decode, oldest first
@@ -213,6 +223,60 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             con.close()
             raise
         return con
+
+    def load_practice_file() -> tuple[list[dict], str | None]:
+        """Read the hand-maintained challenge list again whenever practice.json changes."""
+        try:
+            st = practice_file.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            stamp = None
+        except OSError:
+            stamp = ("unreadable",)
+        with practice_lock:
+            if stamp == practice_cache["stamp"]:
+                return practice_cache["items"], practice_cache["error"]
+            items, error = [], None
+            if stamp == ("unreadable",):
+                error = "practice.json could not be read"
+            elif stamp is not None:
+                try:
+                    data = json.loads(practice_file.read_text(encoding="utf-8"))
+                    raw = data.get("challenges") if isinstance(data, dict) else None
+                    if not isinstance(raw, list):
+                        raise ValueError("challenges must be a list")
+                    seen = set()
+                    for i, item in enumerate(raw):
+                        if not isinstance(item, dict):
+                            raise ValueError("challenge must be an object")
+                        cid = item.get("id")
+                        if not isinstance(cid, str) or not cid.strip() or len(cid) > 200 or cid in seen:
+                            raise ValueError("challenge id is missing, invalid, or repeated")
+                        seen.add(cid)
+                        if not isinstance(item.get("path"), str) or not item["path"]:
+                            raise ValueError("challenge path is missing")
+                        for key in ("title", "aim", "why", "picked_by", "added"):
+                            if not isinstance(item.get(key), str):
+                                raise ValueError(f"challenge {key} must be a string")
+                        if item.get("mode") not in ("phone", "mac"):
+                            raise ValueError("challenge mode must be phone or mac")
+                        if item.get("level") not in ("easy", "medium", "hard"):
+                            raise ValueError("challenge level must be easy, medium, or hard")
+                        if not isinstance(item.get("minutes"), int) or isinstance(item.get("minutes"), bool) or item["minutes"] < 1:
+                            raise ValueError("challenge minutes must be a positive integer")
+                        for key in ("tools", "hints"):
+                            if key == "tools" and key not in item:
+                                raise ValueError("challenge tools are missing")
+                            values = item.get(key, [])
+                            if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+                                raise ValueError(f"challenge {key} must be a list of strings")
+                        items.append(dict(item))
+                except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, AttributeError) as e:
+                    # Do not include file content or paths in this message.
+                    error = "practice.json is malformed" if not isinstance(e, OSError) else "practice.json could not be read"
+                    items = []
+            practice_cache.update(stamp=stamp, items=items, error=error)
+            return items, error
 
     # ---------------------------------------------------------------- stacks
     def library_rows():
@@ -1205,6 +1269,99 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                         "stars": stars, "picked": picked, "rejected": rejected,
                         "raw": Path(r["path"]).suffix.lower() in stacks.RAW_EXTENSIONS})
         return out
+
+    # --------------------------------------------------------------- practice
+    @bp.get("/api/practice")
+    def api_practice():
+        configured, error = load_practice_file()
+        if error:
+            return jsonify(challenges=[], error=error)
+
+        matched = []
+        missing = 0
+        if configured:
+            con = db_ro()
+            try:
+                for challenge in configured:
+                    row = con.execute("SELECT rowid FROM images WHERE path=? LIMIT 1", (challenge["path"],)).fetchone()
+                    if row is None:
+                        missing += 1
+                    else:
+                        matched.append((challenge, row["rowid"]))
+            finally:
+                con.close()
+
+        photos = {p["id"]: p for p in gallery_items([rowid for _, rowid in matched], best=False, bursts=False)}
+        con = anno_db()
+        try:
+            states = {r["id"]: dict(r) for r in con.execute("SELECT * FROM practice_state")}
+        finally:
+            con.close()
+
+        out = []
+        for challenge, rowid in matched:
+            photo = photos.get(rowid)
+            if photo is None:
+                missing += 1
+                continue
+            item = {k: v for k, v in challenge.items() if k != "path"}
+            state = states.get(challenge["id"], {})
+            item.update({"photo": photo,
+                         "status": state.get("status", "todo"),
+                         "note": state.get("note", ""),
+                         "updated_at": state.get("updated_at"),
+                         "downloaded_at": state.get("downloaded_at"),
+                         "done_at": state.get("done_at")})
+            out.append(item)
+        return jsonify(challenges=out, missing=missing)
+
+    @bp.post("/api/practice/<path:cid>")
+    @guarded
+    def api_practice_update(cid):
+        configured, error = load_practice_file()
+        if error or not any(c["id"] == cid for c in configured):
+            return jsonify(error="unknown practice challenge"), 404
+        body = request.get_json(silent=True) or {}
+        if not body or set(body) - {"status", "note"}:
+            return jsonify(error="body must contain status or note"), 400
+        if "status" in body and (not isinstance(body["status"], str) or
+                                  body["status"] not in {"todo", "downloaded", "done", "skipped"}):
+            return jsonify(error="status must be todo, downloaded, done, or skipped"), 400
+        if "note" in body and (not isinstance(body["note"], str) or len(body["note"]) > 2000):
+            return jsonify(error="note must be a string up to 2000 characters"), 400
+
+        con = anno_db()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            old = con.execute("SELECT * FROM practice_state WHERE id=?", (cid,)).fetchone()
+            old_state = dict(old) if old else {"status": "todo", "note": "", "updated_at": None,
+                                                "downloaded_at": None, "done_at": None}
+            requested = body.get("status", old_state["status"])
+            status = "done" if old_state["status"] == "done" and requested == "downloaded" else requested
+            note = body.get("note", old_state["note"])
+            updated_at = now_iso()
+            downloaded_at = old_state["downloaded_at"]
+            if requested == "downloaded" and downloaded_at is None:
+                downloaded_at = updated_at
+            done_at = old_state["done_at"]
+            if status == "done":
+                done_at = done_at or updated_at
+            else:
+                done_at = None
+            con.execute("INSERT INTO practice_state(id,status,note,updated_at,downloaded_at,done_at) "
+                        "VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                        "status=excluded.status,note=excluded.note,updated_at=excluded.updated_at, "
+                        "downloaded_at=excluded.downloaded_at,done_at=excluded.done_at",
+                        (cid, status, note, updated_at, downloaded_at, done_at))
+            con.commit()
+            state = {"id": cid, "status": status, "note": note, "updated_at": updated_at,
+                     "downloaded_at": downloaded_at, "done_at": done_at}
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+        return jsonify(ok=True, **state)
 
     def gallery_flags():
         return request.args.get("best") == "1", request.args.get("bursts", "1") == "1"

@@ -3,6 +3,7 @@ annotations.db, cache and state dir. Skipped when trial.db is missing. Run from 
     ./venv/bin/python -m unittest discover -s review/tests -t .
 """
 import io
+import json
 import sqlite3
 import sys
 import tempfile
@@ -53,6 +54,7 @@ class MobileApi(unittest.TestCase):
         cls.db_ro = staticmethod(db_ro)
         cls.anno = staticmethod(anno)
         cls.client = app.test_client()
+        cls.state_dir = tmp / "state"
 
     @classmethod
     def tearDownClass(cls):
@@ -108,6 +110,28 @@ class MobileApi(unittest.TestCase):
     def frames(self):
         body = self.client.get(f"/m/api/day/{DAY}").get_json()
         return {f["file"]: f for s in body["stacks"] for f in s["frames"]}, body
+
+    @property
+    def practice_file(self):
+        return self.state_dir / "practice.json"
+
+    def practice_challenge(self, cid="test-light", path=None):
+        if path is None:
+            con = self.db_ro()
+            try:
+                path = con.execute("SELECT path FROM images WHERE filename='DSC05040.ARW' AND path LIKE ?",
+                                   (f"%/{DAY}/%",)).fetchone()[0]
+            finally:
+                con.close()
+        return {"id": cid, "path": path, "title": "Test lantern", "mode": "phone", "minutes": 10,
+                "tools": ["Color › Mix", "Crop"], "aim": "Keep the light warm.", "why": "One clear light source.",
+                "hints": ["Start with the light."], "level": "easy", "picked_by": "Claude", "added": "2026-11-21"}
+
+    def write_practice(self, challenges):
+        self.practice_file.write_text(json.dumps({"challenges": challenges}), encoding="utf-8")
+
+    def clear_practice(self):
+        self.practice_file.unlink(missing_ok=True)
 
     def test_writes_need_the_header(self):
         r = self.client.post("/m/api/decide", json={"action_id": "x", "day": DAY, "changes": []})
@@ -274,6 +298,100 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(self.client.post("/m/api/perf", json={"items": "x"}, headers=self.H).status_code, 400)
         self.assertEqual(self.client.post("/m/api/perf", json={"items": []}).status_code, 403)
 
+    # --------------------------------------------------------------- Practice
+    def test_practice_list_without_file(self):
+        self.clear_practice()
+        body = self.client.get("/m/api/practice").get_json()
+        self.assertEqual(body, {"challenges": [], "missing": 0})
+
+    def test_practice_malformed_file_is_safe(self):
+        self.practice_file.write_text('{"challenges": ["/private/path', encoding="utf-8")
+        body = self.client.get("/m/api/practice").get_json()
+        self.assertEqual(body["challenges"], [])
+        self.assertNotIn("missing", body)
+        self.assertEqual(body["error"], "practice.json is malformed")
+        self.assertNotIn("/private/path", str(body))
+
+    def test_practice_missing_path_and_order(self):
+        a = self.practice_challenge("third", path=None)
+        b = self.practice_challenge("missing", path="/path/not/in/the/library.ARW")
+        c = self.practice_challenge("first", path=a["path"])
+        self.write_practice([a, b, c])
+        body = self.client.get("/m/api/practice").get_json()
+        self.assertEqual(body["missing"], 1)
+        self.assertEqual([x["id"] for x in body["challenges"]], ["third", "first"])
+        self.assertNotIn("path", body["challenges"][0])
+        self.assertEqual(body["challenges"][0]["photo"]["file"], "DSC05040.ARW")
+
+    def test_practice_table_created_in_fresh_annotations_db(self):
+        import mobile
+        import photo_cull as pc
+        from flask import Flask
+
+        fresh_db = self.state_dir / "fresh-annotations.db"
+        fresh_state = self.state_dir / "fresh-state"
+
+        def fresh_anno():
+            con = sqlite3.connect(fresh_db)
+            con.row_factory = sqlite3.Row
+            return con
+
+        app = Flask(__name__)
+        app.register_blueprint(mobile.make_blueprint(
+            db_ro=self.db_ro, anno=fresh_anno, pc=pc, cache_dir=self.state_dir / "fresh-cache",
+            static_dir=self.state_dir / "static", state_dir=fresh_state,
+            inbox=self.inbox, check_mount=False, ingest_log=self.state_dir / "fresh-ingest.log",
+            ollama_url="http://127.0.0.1:9"))
+        self.assertEqual(app.test_client().get("/m/api/practice").status_code, 200)
+        with sqlite3.connect(fresh_db) as con:
+            columns = {r[1] for r in con.execute("PRAGMA table_info(practice_state)")}
+        self.assertEqual(columns, {"id", "status", "note", "updated_at", "downloaded_at", "done_at"})
+
+    def test_practice_status_transitions_and_note(self):
+        self.write_practice([self.practice_challenge(path="/not-in-library.ARW")])
+        self.addCleanup(self.clear_practice)
+        url = "/m/api/practice/test-light"
+
+        downloaded = self.client.post(url, json={"status": "downloaded"}, headers=self.H).get_json()
+        first_download = downloaded["downloaded_at"]
+        self.assertEqual(downloaded["status"], "downloaded")
+        self.assertIsNotNone(first_download)
+
+        done = self.client.post(url, json={"status": "done", "note": "Warm light."}, headers=self.H).get_json()
+        first_done = done["done_at"]
+        self.assertEqual((done["status"], done["note"]), ("done", "Warm light."))
+        self.assertIsNotNone(first_done)
+
+        redownload = self.client.post(url, json={"status": "downloaded"}, headers=self.H).get_json()
+        self.assertEqual(redownload["status"], "done")
+        self.assertEqual(redownload["done_at"], first_done)
+        self.assertEqual(redownload["downloaded_at"], first_download)
+
+        noted = self.client.post(url, json={"note": "Less yellow next time."}, headers=self.H).get_json()
+        self.assertEqual((noted["status"], noted["note"], noted["done_at"]),
+                         ("done", "Less yellow next time.", first_done))
+        skipped = self.client.post(url, json={"status": "skipped"}, headers=self.H).get_json()
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertIsNone(skipped["done_at"])
+        waiting = self.client.post(url, json={"status": "todo"}, headers=self.H).get_json()
+        self.assertEqual(waiting["status"], "todo")
+        self.assertIsNone(waiting["done_at"])
+        self.assertEqual(waiting["downloaded_at"], first_download)
+
+    def test_practice_write_validation_and_unknown_challenge(self):
+        self.write_practice([self.practice_challenge(path="/not-in-library.ARW")])
+        self.addCleanup(self.clear_practice)
+        url = "/m/api/practice/test-light"
+        self.assertEqual(self.client.post(url, json={}, headers=self.H).status_code, 400)
+        self.assertEqual(self.client.post(url, json={"status": "finished"}, headers=self.H).status_code, 400)
+        self.assertEqual(self.client.post(url, json={"status": ["done"]}, headers=self.H).status_code, 400)
+        self.assertEqual(self.client.post(url, json={"note": 42}, headers=self.H).status_code, 400)
+        self.assertEqual(self.client.post(url, json={"note": "x" * 2001}, headers=self.H).status_code, 400)
+        self.assertEqual(self.client.post(url, json={"status": "todo", "extra": True}, headers=self.H).status_code, 400)
+        self.assertEqual(self.client.post("/m/api/practice/no-such-id", json={"status": "done"},
+                                          headers=self.H).status_code, 404)
+        self.assertEqual(self.client.post(url, json={"status": "done"}).status_code, 403)
+
     # ------------------------------------------------ the contract the iPhone app relies on (review/API.md)
     def assert_shape(self, obj, shape, where):
         """shape: {field: type, a tuple of types, or (type, None) when the field can be null}"""
@@ -313,6 +431,24 @@ class MobileApi(unittest.TestCase):
             self.assert_shape(p, self.PHOTO, "Photo")
         like = self.client.get(f"/m/api/gallery/like/{day['photos'][0]['id']}").get_json()
         self.assert_shape(like, {"total": int, "signals": list, "notes": list, "photos": list}, "Like")
+
+    def test_contract_practice(self):
+        self.write_practice([self.practice_challenge()])
+        self.addCleanup(self.clear_practice)
+        body = self.client.get("/m/api/practice").get_json()
+        self.assert_shape(body, {"challenges": list, "missing": int}, "Practice")
+        challenge = body["challenges"][0]
+        self.assert_shape(challenge, {"id": str, "title": str, "mode": str, "minutes": int, "tools": list,
+                                     "aim": str, "why": str, "hints": list, "level": str, "picked_by": str,
+                                     "added": str, "photo": dict, "status": str, "note": str,
+                                     "updated_at": (str, None), "downloaded_at": (str, None), "done_at": (str, None)},
+                          "PracticeChallenge")
+        self.assert_shape(challenge["photo"], self.PHOTO, "PracticePhoto")
+        self.assertNotIn("path", challenge)
+        saved = self.client.post("/m/api/practice/test-light", json={"status": "downloaded"}, headers=self.H).get_json()
+        self.assert_shape(saved, {"ok": bool, "id": str, "status": str, "note": str,
+                                  "updated_at": str, "downloaded_at": str, "done_at": (str, None)},
+                          "PracticeState")
 
     # ------------------------------------------------ the Cull half of the contract
     STACK = {"id": int, "kind": str, "lead": int, "frames": list}

@@ -1,0 +1,74 @@
+/* Practice uses the shared Culling Bay colours from app.css. */
+html,body{height:auto;min-height:100%;overscroll-behavior:auto}
+body{min-height:100vh;padding:0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+a{color:var(--accent)}
+.practice-head{position:sticky;top:0;z-index:5;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;
+  padding:calc(env(safe-area-inset-top) + 8px) 14px 10px;background:rgba(12,13,14,.96);border-bottom:1px solid var(--line);}
+.practice-head a{text-decoration:none;font-size:14px;font-weight:600;white-space:nowrap}
+.practice-head .gallery-link{text-align:right}
+.practice-head h1{margin:0;font:800 22px/1.1 var(--display);text-align:center}
+#practice{max-width:820px;margin:0 auto;padding:12px 14px calc(30px + env(safe-area-inset-bottom));}
+.practice-list{display:grid;gap:8px}
+.challenge-section{margin:0 0 8px}
+.challenge-section h2,.challenge-section summary{display:flex;align-items:center;gap:8px;margin:10px 2px 7px;color:var(--muted);font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;}
+.challenge-section h2 span,.challenge-section summary span{font-size:12px;color:var(--ink);background:var(--panel);border-radius:999px;padding:2px 7px;letter-spacing:0}
+.challenge-section summary{cursor:pointer;list-style:none}
+.challenge-section summary::-webkit-details-marker{display:none}
+.challenge-section summary::after{content:"⌄";margin-left:auto;font-size:17px;font-weight:400;transform:rotate(-90deg)}
+.challenge-section[open] summary::after{transform:none}
+.challenge-list{display:grid;gap:8px}
+.challenge-card{display:flex;align-items:center;gap:12px;min-width:0;padding:9px;background:var(--panel);border:1px solid var(--line);border-radius:13px;color:var(--ink);text-decoration:none;}
+.challenge-card:active{background:var(--raise)}
+.challenge-thumb{width:82px;height:82px;flex:none;object-fit:cover;background:var(--raise);border-radius:8px}
+.challenge-copy{display:grid;gap:5px;min-width:0;flex:1}
+.challenge-top{display:flex;align-items:center;gap:7px;min-width:0}
+.challenge-top b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px}
+.challenge-meta{font-size:12.5px;color:var(--muted)}
+.p-level{font-size:11px;font-weight:700;text-transform:capitalize}
+.level-easy{color:var(--keep)}.level-medium{color:var(--hint)}.level-hard{color:#ff8a82}
+.p-tag{display:inline-flex;flex:none;border-radius:999px;background:rgba(65,209,138,.15);color:var(--keep);padding:4px 8px;font-size:11px;font-weight:700;white-space:nowrap}
+.p-chips{display:flex;flex-wrap:wrap;gap:4px;max-height:42px;overflow:hidden}
+.p-chip{display:inline-block;border:1px solid var(--line);background:var(--raise);color:var(--muted);padding:3px 7px;border-radius:999px;font-size:10.5px;line-height:1.2}
+.p-note{color:var(--muted);font-size:13px;padding:8px 2px}
+.p-error{padding:8px 10px;border-radius:9px;background:rgba(255,93,82,.12);color:#ffaaa4;font-size:13px;margin:2px 0 8px}
+.practice-detail{max-width:680px;margin:0 auto;display:grid;gap:12px;}
+.p-list-back{justify-self:start;color:var(--accent);font-weight:600;text-decoration:none;padding:3px 1px}
+.p-photo-open{width:100%;max-height:min(62vh,620px);display:grid;place-items:center;overflow:hidden;border:0;border-radius:12px;background:#000;padding:0;cursor:zoom-in}
+.p-detail-photo{display:block;width:100%;max-height:min(62vh,620px);object-fit:contain;}
+.p-titleline{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.p-titleline h2{font:800 24px/1.1 var(--display);margin:0 0 6px}
+.p-meta{color:var(--muted);font-size:13px;margin:2px 0}
+.p-brief{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 15px;}
+.p-brief h3{font-size:13px;margin:12px 0 4px;color:var(--muted)}
+.p-brief h3:first-child{font-size:16px;color:var(--ink);margin:0 0 8px}
+.p-brief p{font-size:14px;line-height:1.45;margin:3px 0 8px;white-space:pre-wrap}
+.p-tools{margin:4px 0 10px;padding-left:20px;line-height:1.65}
+.p-hints{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.p-hints summary{color:var(--accent);font-weight:600;cursor:pointer}
+.p-hints ul{margin:8px 0 0;padding-left:20px;color:var(--muted);line-height:1.5}
+.p-download{display:flex;align-items:center;justify-content:center;min-height:56px;border-radius:13px;background:var(--accent);color:var(--on-accent);font-weight:800;font-size:16px;text-align:center;text-decoration:none;padding:10px 14px;}
+.p-download:active,.p-button:active{filter:brightness(.9)}
+.p-howto{display:grid;gap:9px;margin:0;padding:4px 2px 4px 25px;color:var(--muted);font-size:13px;line-height:1.45}
+.p-howto b{color:var(--ink)}
+.p-note-label{font-weight:700;font-size:13px;margin:3px 0 -8px}
+#practice-note{width:100%;min-height:88px;resize:vertical;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--ink);font:400 16px/1.4 var(--body);padding:10px 12px;}
+#practice-note:focus{outline:2px solid var(--accent);outline-offset:1px}
+.p-actions,.p-done{display:flex;gap:9px;align-items:center}
+.p-done b{flex:1;color:var(--keep)}
+.p-button{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:10px 15px;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--ink);font:600 14px var(--body);text-decoration:none;cursor:pointer}
+.p-actions .p-button{flex:1}
+.p-button.p-primary{background:var(--keep);border-color:var(--keep);color:#062014;font-weight:800}
+.practice-preview{position:fixed;inset:0;z-index:30;display:grid;place-items:center;background:#000;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);}
+.practice-preview img{display:block;width:100%;height:100%;object-fit:contain;touch-action:pinch-zoom;}
+.preview-close{position:absolute;right:12px;top:calc(env(safe-area-inset-top) + 10px);z-index:1;width:42px;height:42px;border:0;border-radius:50%;background:rgba(39,42,46,.86);color:#fff;font-size:30px;line-height:1;}
+@media(min-width:700px){
+  #practice{padding-top:20px}
+  .challenge-list{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .challenge-thumb{width:96px;height:96px}
+  .practice-detail{grid-template-columns:minmax(0,1.3fr) minmax(260px,.9fr);align-items:start;max-width:960px;gap:14px 20px}
+  .p-list-back,.p-photo-open,.p-titleline{grid-column:1}
+  .p-brief{grid-column:2;grid-row:1 / span 3}
+  .p-download,.p-howto,#practice-note,.p-note-label,.p-actions,.p-done,.practice-detail>.p-error{grid-column:1 / -1}
+  .p-photo-open{max-height:68vh}
+  .p-detail-photo{max-height:68vh}
+}

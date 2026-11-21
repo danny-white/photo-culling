@@ -56,7 +56,7 @@ html.wide .pk-th .dot{background:var(--muted);bottom:0}
 html.wide #view[data-screen="days"]{padding:12px 24px 0}
 html.wide .day-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:8px 20px}
 html.wide .day-grid .day{margin:0}
-html.wide .monitor-link{position:absolute;right:110px;top:16px;color:var(--muted);text-decoration:none}
+html.wide .monitor-link{position:absolute;right:190px;top:16px;color:var(--muted);text-decoration:none}
 html.wide .sec,html.wide h2{text-transform:none;letter-spacing:normal}
 html.wide .gv-grid,html.wide .sm-grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
 html.wide #view[data-screen="summary"] .scroll,html.wide #view[data-screen="grid"] .scroll{padding:12px 24px 24px}

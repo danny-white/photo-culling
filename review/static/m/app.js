@@ -551,7 +551,7 @@ function vDays() {
   const years = [];
   for (const d of S.days) { const y = yearOf(d); if (!years.includes(y)) years.push(y); }
   return '<div class="head"><h1>Days</h1><span>mycloud · Pictures · ' + S.days.length + ' days</span>' +
-    (wide() ? '<a class="monitor-link" href="/">Monitor</a>' : '') + '<a class="glink" href="/m/gallery.html">Gallery ›</a></div>' +
+    (wide() ? '<a class="monitor-link" href="/">Monitor</a>' : '') + '<a class="plink" href="/m/practice.html">Practice ›</a><a class="glink" href="/m/gallery.html">Gallery ›</a></div>' +
     '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>' +
     '<div class="dtools"><label class="sbox"><input class="search" id="day-search" type="search" placeholder="Search what, where, when" value="' + esc(S.daySearch) + '" autocomplete="off" enterkeyhint="search" aria-label="Search days">' +
     '<button class="sx" id="search-x" data-act="q-clear" aria-label="Clear the search"' + (S.daySearch || S.like ? '' : ' hidden') + '>×</button></label>' +
