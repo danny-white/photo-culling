@@ -3,7 +3,9 @@ import Foundation
 
 /// Launch arguments for looking at a screen in the simulator, where nothing can tap:
 /// `-CBStartTab cull` starts on the Cull tab, and `-CBOpenDay 2026/2026-10-01` also opens that
-/// day. They only choose what to show. Opening a day reads it and sends nothing.
+/// day. `-CBStartTab practice` starts on the Practice tab, and `-CBOpenChallenge xmas-cat-2024-12-24`
+/// also opens that challenge once the list has loaded. They only choose what to show. Opening a
+/// day or a challenge reads it and sends nothing.
 ///
 /// Further into a day, all of them looking and none of them acting:
 /// - `-CBOpenStack 3` puts the card on the fourth stack (without saving the position);
@@ -17,6 +19,15 @@ import Foundation
 enum LaunchOptions {
     static var startsOnCull: Bool {
         UserDefaults.standard.string(forKey: "CBStartTab") == "cull"
+    }
+
+    static var startsOnPractice: Bool {
+        UserDefaults.standard.string(forKey: "CBStartTab") == "practice"
+    }
+
+    /// A challenge id such as `xmas-cat-2024-12-24`.
+    static var openChallenge: String? {
+        UserDefaults.standard.string(forKey: "CBOpenChallenge").flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// A day id such as `2026/2026-10-01`.

@@ -26,15 +26,19 @@ public final class ExportModel {
     @ObservationIgnored private let service: any PhotoExportService
     @ObservationIgnored private let client: CullingBayClient
     @ObservationIgnored private let perf: PerfReporter
+    @ObservationIgnored private let presetChoice: RawChoice?
 
+    /// `rawChoice` settles JPEG or RAW in advance, so the sheet does not ask (the Practice tab
+    /// always saves the RAW); `run(choice:)` then uses it whatever it is given.
     public init(photos: [Photo], action: Action, client: CullingBayClient,
-                perf: PerfReporter, service: any PhotoExportService) {
+                perf: PerfReporter, service: any PhotoExportService, rawChoice: RawChoice? = nil) {
         self.photos = action == .share ? Array(photos.prefix(1)) : photos
         self.action = action
         self.client = client
         self.perf = perf
         self.service = service
-        needsChoice = SavePlan.needsRawChoice(self.photos)
+        presetChoice = rawChoice
+        needsChoice = rawChoice == nil && SavePlan.needsRawChoice(self.photos)
         progress = SaveProgress(total: self.photos.count)
     }
 
@@ -50,7 +54,7 @@ public final class ExportModel {
             return
         }
         let start = ContinuousClock.now
-        let items = SavePlan.items(for: photos, rawChoice: choice, client: client)
+        let items = SavePlan.items(for: photos, rawChoice: presetChoice ?? choice, client: client)
         var marked = false
         for item in items {
             if Task.isCancelled { message = "Cancelled."; return }

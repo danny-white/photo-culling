@@ -43,10 +43,13 @@ struct ExportModelTests {
     ]
 
     private func make(
-        _ photos: [Photo], _ action: ExportModel.Action, service: FakeExportService
+        _ photos: [Photo], _ action: ExportModel.Action, service: FakeExportService,
+        rawChoice: RawChoice? = nil
     ) -> (ExportModel, PerfReporter) {
         let perf = PerfReporter(client: testBaseURL, transport: perfTransport)
-        return (ExportModel(photos: photos, action: action, client: client, perf: perf, service: service), perf)
+        return (ExportModel(
+            photos: photos, action: action, client: client, perf: perf, service: service,
+            rawChoice: rawChoice), perf)
     }
 
     @Test func aRawAsksForAChoiceFirst() {
@@ -134,5 +137,49 @@ struct ExportModelTests {
         let (model, _) = make(photos, .share, service: service)
         await model.run(choice: .raw)
         #expect(model.shareFile?.lastPathComponent == "cb-1-DSC00001.ARW")
+    }
+
+    // MARK: Preset choice
+
+    @Test func aPresetRawChoiceSkipsTheQuestion() {
+        let (model, _) = make([photos[0]], .save, service: FakeExportService(), rawChoice: .raw)
+        #expect(!model.needsChoice && !model.hasStarted)
+        let (jpeg, _) = make([photos[0]], .save, service: FakeExportService(), rawChoice: .jpeg)
+        #expect(!jpeg.needsChoice)
+    }
+
+    @Test func aPresetRawChoicePlansTheRaw() async {
+        let service = FakeExportService()
+        let (model, _) = make([photos[0]], .save, service: service, rawChoice: .raw)
+        await model.run()                                       // the sheet runs it without a choice
+        #expect(service.downloads.map(\.kind) == [.raw])
+        #expect(service.added == ["DSC00001.ARW"])
+        #expect(model.progress.done == 1 && model.message == "Saved 1 photo")
+    }
+
+    @Test func aPresetBeatsTheChoiceGivenToRun() async {
+        let service = FakeExportService()
+        let (model, _) = make([photos[0]], .save, service: service, rawChoice: .raw)
+        await model.run(choice: .jpeg)
+        #expect(service.downloads.map(\.kind) == [.raw])
+    }
+
+    @Test func aPresetRawSharesTheOriginalAndLeavesAJpegAlone() async {
+        let service = FakeExportService()
+        let (share, _) = make(photos, .share, service: service, rawChoice: .raw)
+        #expect(!share.needsChoice)
+        await share.run()
+        #expect(share.shareFile?.lastPathComponent == "cb-1-DSC00001.ARW")
+        let (save, _) = make([photos[1]], .save, service: FakeExportService(), rawChoice: .raw)
+        await save.run()
+        #expect(save.progress.done == 1)
+    }
+
+    @Test func withoutAPresetTheChoiceStillRules() async {
+        let service = FakeExportService()
+        let (model, _) = make([photos[0]], .save, service: service, rawChoice: nil)
+        #expect(model.needsChoice)
+        await model.run(choice: .jpeg)
+        #expect(service.downloads.map(\.kind) == [.picture])
     }
 }

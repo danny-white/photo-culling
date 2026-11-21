@@ -4,9 +4,9 @@ import Foundation
 import Observation
 
 /// The app's one client, image loader and perf reporter, plus the Home model that rides on them,
-/// and the Cull tab's write queue and days list. Views read it from the environment. Changing the
-/// server builds all of them again and bumps `generation`, which the root view uses to start the
-/// Gallery and the Cull tab over.
+/// the Cull tab's write queue and days list, and the Practice tab's challenges. Views read it from
+/// the environment. Changing the server builds all of them again and bumps `generation`, which the
+/// root view uses to start the Gallery, the Cull tab and the Practice tab over.
 @MainActor
 @Observable
 final class AppServices {
@@ -20,6 +20,7 @@ final class AppServices {
     /// Every tap on a Cull card goes through this one queue, which keeps what is unsent on disk.
     private(set) var cullQueue: CullWriteQueue
     private(set) var cullDays: CullDaysModel
+    private(set) var practice: PracticeModel
     /// Every full-resolution crop of the focus check goes through this, a couple at a time, so
     /// the writes of a decision always have a connection to the server free.
     let cropGate = CropLoadGate(limit: 2)
@@ -38,6 +39,7 @@ final class AppServices {
         self.home = connection.home
         self.cullQueue = connection.cullQueue
         self.cullDays = connection.cullDays
+        self.practice = connection.practice
     }
 
     /// Points the app at another server. Does nothing if it is the one already in use.
@@ -52,6 +54,7 @@ final class AppServices {
         home = connection.home
         cullQueue = connection.cullQueue
         cullDays = connection.cullDays
+        practice = connection.practice
         // This server may still have taps waiting from an earlier visit.
         cullQueue.start()
         generation += 1
@@ -62,10 +65,14 @@ final class AppServices {
         CullSessionModel(day: day, client: client, queue: cullQueue, match: match)
     }
 
-    /// A Save or Share for these photos, to show in an `ExportSheet`.
-    func makeExport(_ photos: [Photo], action: ExportModel.Action) -> ExportLaunch {
+    /// A Save or Share for these photos, to show in an `ExportSheet`. `rawChoice` settles JPEG or
+    /// RAW in advance, so the sheet does not ask.
+    func makeExport(
+        _ photos: [Photo], action: ExportModel.Action, rawChoice: RawChoice? = nil
+    ) -> ExportLaunch {
         ExportLaunch(model: ExportModel(
-            photos: photos, action: action, client: client, perf: perf, service: exporter))
+            photos: photos, action: action, client: client, perf: perf, service: exporter,
+            rawChoice: rawChoice))
     }
 
     private struct Connection {
@@ -75,6 +82,7 @@ final class AppServices {
         let home: HomeModel
         let cullQueue: CullWriteQueue
         let cullDays: CullDaysModel
+        let practice: PracticeModel
     }
 
     private static func connect(to url: URL, settings: any GallerySettings) -> Connection {
@@ -94,7 +102,8 @@ final class AppServices {
         return Connection(
             client: client, loader: loader, perf: perf,
             home: HomeModel(client: client, settings: settings),
-            cullQueue: queue, cullDays: CullDaysModel(client: client))
+            cullQueue: queue, cullDays: CullDaysModel(client: client),
+            practice: PracticeModel(client: client))
     }
 
     /// Where the Cull queue keeps its unsent taps: one folder per server, so changing the server

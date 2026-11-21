@@ -148,6 +148,8 @@ public actor CullingBayClient {
         case day(String)
         /// `GET /m/api/day/<day>` for every day (a write that doesn't say which day it touched).
         case allDays
+        /// No cached read (a write whose reader revalidates by the ETag of its body).
+        case nothing
     }
 
     /// Sends a JSON write (`POST` or `PUT`) with the `X-Culling-Bay` header the server requires.
@@ -207,6 +209,8 @@ public actor CullingBayClient {
         case .allDays:
             let prefix = URLBuilding.url(base: baseURL, path: "/m/api/day").absoluteString + "/"
             keys = cache.keys.filter { $0.hasPrefix(prefix) }
+        case .nothing:
+            keys = []
         }
         for key in keys {
             cache[key] = nil
