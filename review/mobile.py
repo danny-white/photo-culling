@@ -270,7 +270,20 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                             values = item.get(key, [])
                             if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
                                 raise ValueError(f"challenge {key} must be a list of strings")
+                        for key, kind in (("needs_desktop", bool), ("desktop_reason", str), ("companion_of", str)):
+                            if key in item and not isinstance(item[key], kind):
+                                raise ValueError(f"challenge {key} must be a {kind.__name__}")
                         items.append(dict(item))
+                    # A companion names a Needs Desktop challenge in this file, which is not itself a companion.
+                    by_id = {i["id"]: i for i in items}
+                    for item in items:
+                        if "companion_of" not in item:
+                            continue
+                        parent = by_id.get(item["companion_of"])
+                        if parent is None or parent.get("needs_desktop") is not True or "companion_of" in parent:
+                            raise ValueError("companion_of must name a Needs Desktop challenge")
+                        if item.get("needs_desktop") is True:
+                            raise ValueError("a companion cannot need the desktop")
                 except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, AttributeError) as e:
                     # Do not include file content or paths in this message.
                     error = "practice.json is malformed" if not isinstance(e, OSError) else "practice.json could not be read"
@@ -1313,6 +1326,15 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                          "downloaded_at": state.get("downloaded_at"),
                          "done_at": state.get("done_at")})
             out.append(item)
+        # A companion whose parent is missing from this answer stands alone, so null the link.
+        present = {item["id"] for item in out}
+        for item in out:
+            item["needs_desktop"] = item.get("needs_desktop", False)
+            item["desktop_reason"] = item.get("desktop_reason")
+            if item.get("companion_of") not in present:
+                item["companion_of"] = None
+        for item in out:
+            item["companions"] = [o["id"] for o in out if o["companion_of"] == item["id"]]
         return jsonify(challenges=out, missing=missing)
 
     @bp.post("/api/practice/<path:cid>")

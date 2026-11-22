@@ -27,6 +27,16 @@ a{color:var(--accent)}
 .p-level{font-size:11px;font-weight:700;text-transform:capitalize}
 .level-easy{color:var(--keep)}.level-medium{color:var(--hint)}.level-hard{color:#ff8a82}
 .p-tag{display:inline-flex;flex:none;border-radius:999px;background:rgba(65,209,138,.15);color:var(--keep);padding:4px 8px;font-size:11px;font-weight:700;white-space:nowrap}
+.p-tag-desktop{background:rgba(147,180,255,.16);color:var(--accent)}
+.p-tag-muted{background:var(--raise);color:var(--muted)}
+.challenge-tags{display:flex;flex-wrap:wrap;gap:6px}
+/* a Needs Desktop challenge and its on-the-go companions share one card; companions line up under the text, with no thumbnail */
+.challenge-group{--ind:103px;background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden}
+.challenge-group .challenge-card{background:none;border:0;border-radius:0}
+.challenge-group .challenge-card:active,.companion-row:active{background:var(--raise)}
+.companion-row{display:grid;gap:5px;padding:9px 12px 10px var(--ind);border-top:1px solid var(--line);color:var(--ink);text-decoration:none}
+.companion-top{display:flex;align-items:center;gap:7px}
+.companion-top b{font-size:13px;color:var(--accent)}
 .p-chips{display:flex;flex-wrap:wrap;gap:4px;max-height:42px;overflow:hidden}
 .p-chip{display:inline-block;border:1px solid var(--line);background:var(--raise);color:var(--muted);padding:3px 7px;border-radius:999px;font-size:10.5px;line-height:1.2}
 .p-note{color:var(--muted);font-size:13px;padding:8px 2px}
@@ -38,6 +48,11 @@ a{color:var(--accent)}
 .p-titleline{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
 .p-titleline h2{font:800 24px/1.1 var(--display);margin:0 0 6px}
 .p-meta{color:var(--muted);font-size:13px;margin:2px 0}
+.p-kind{display:grid;gap:6px;justify-items:start;margin-top:9px}
+.p-kind p{margin:0;color:var(--muted);font-size:13px;line-height:1.4}
+.p-pair-link{display:inline-flex;align-items:center;gap:8px;color:var(--accent);font-weight:600;font-size:14px;text-decoration:none}
+.p-desktop-box{padding:13px 15px;border:1px solid rgba(147,180,255,.45);background:rgba(147,180,255,.1);border-radius:13px;font-size:14px;line-height:1.5}
+.p-companion-link{justify-self:start;min-height:46px;padding:10px 14px;border:1px solid var(--line);border-radius:11px;background:var(--panel)}
 .p-brief{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 15px;}
 .p-brief h3{font-size:13px;margin:12px 0 4px;color:var(--muted)}
 .p-brief h3:first-child{font-size:16px;color:var(--ink);margin:0 0 8px}
@@ -63,12 +78,13 @@ a{color:var(--accent)}
 .preview-close{position:absolute;right:12px;top:calc(env(safe-area-inset-top) + 10px);z-index:1;width:42px;height:42px;border:0;border-radius:50%;background:rgba(39,42,46,.86);color:#fff;font-size:30px;line-height:1;}
 @media(min-width:700px){
   #practice{padding-top:20px}
-  .challenge-list{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .challenge-list{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
   .challenge-thumb{width:96px;height:96px}
+  .challenge-group{--ind:117px}
   .practice-detail{grid-template-columns:minmax(0,1.3fr) minmax(260px,.9fr);align-items:start;max-width:960px;gap:14px 20px}
   .p-list-back,.p-photo-open,.p-titleline{grid-column:1}
   .p-brief{grid-column:2;grid-row:1 / span 3}
-  .p-download,.p-howto,#practice-note,.p-note-label,.p-actions,.p-done,.practice-detail>.p-error{grid-column:1 / -1}
+  .p-download,.p-howto,.p-desktop-box,.p-companion-link,#practice-note,.p-note-label,.p-actions,.p-done,.practice-detail>.p-error{grid-column:1 / -1}
   .p-photo-open{max-height:68vh}
   .p-detail-photo{max-height:68vh}
 }

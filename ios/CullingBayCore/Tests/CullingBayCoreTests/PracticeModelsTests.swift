@@ -50,6 +50,40 @@ struct PracticeModelsTests {
         #expect(none.hints.isEmpty)
     }
 
+    @Test func anOlderServerLeavesOutTheNeedsDesktopFields() throws {
+        let c = try decode(PracticeChallenge.self, practiceSampleJSON)
+        #expect(!c.needsDesktop)
+        #expect(c.desktopReason == nil && c.companionOf == nil && c.companions.isEmpty)
+        let list = try decode(PracticeList.self, practiceListJSON([practiceJSON("a"), practiceJSON("b")]))
+        #expect(list.challenges.allSatisfy { !$0.needsDesktop && $0.companions.isEmpty })
+    }
+
+    @Test func decodesANeedsDesktopChallengeAndItsCompanion() throws {
+        let parent = try decode(
+            PracticeChallenge.self,
+            practiceJSON(
+                "aurora", needsDesktop: true, reason: "Uses Enhance › Denoise.", companions: ["aurora-phone"]))
+        #expect(parent.needsDesktop)
+        #expect(parent.desktopReason == "Uses Enhance › Denoise.")
+        #expect(parent.companionOf == nil)
+        #expect(parent.companions == ["aurora-phone"])
+        let companion = try decode(
+            PracticeChallenge.self,
+            practiceJSON("aurora-phone", needsDesktop: false, companionOf: "aurora", companions: []))
+        #expect(!companion.needsDesktop && companion.desktopReason == nil)
+        #expect(companion.companionOf == "aurora" && companion.companions.isEmpty)
+    }
+
+    @Test func nullNeedsDesktopFieldsDecodeAsAbsent() throws {
+        // The new server always sends the four fields, null where it has nothing.
+        let json = practiceSampleJSON.replacingOccurrences(
+            of: "\"picked_by\"",
+            with: "\"needs_desktop\":false,\"desktop_reason\":null,\"companion_of\":null,\"companions\":[],\"picked_by\"")
+        let c = try decode(PracticeChallenge.self, json)
+        #expect(!c.needsDesktop && c.desktopReason == nil && c.companionOf == nil && c.companions.isEmpty)
+        #expect(c.id == "xmas-cat-2024-12-24" && c.status == .todo)
+    }
+
     @Test func anUnknownStatusOrLevelDoesNotFailTheList() throws {
         let list = try decode(
             PracticeList.self,
@@ -221,5 +255,39 @@ struct PracticeModelsTests {
         #expect(PracticeFormat.doneLine(challenge(doneAt: "2026-11-21T10:00:00")) == "Done · Sat, Nov 21 2026")
         #expect(PracticeFormat.doneLine(challenge()) == "Done")
         #expect(PracticeFormat.doneLine(challenge(doneAt: "")) == "Done")
+    }
+
+    // MARK: Needs Desktop strings
+
+    @Test func theNeedsDesktopWordsAreTheContractsOwn() {
+        #expect(PracticeFormat.needsDesktopTag == "Needs Desktop")
+        #expect(PracticeFormat.onTheGoLabel == "On the go")
+        #expect(PracticeFormat.onTheGoLink == "On the go version ›")
+        #expect(PracticeFormat.desktopLink == "Full desktop version ›")
+        #expect(PracticeFormat.companionNote == "On the go version of a Needs Desktop challenge.")
+    }
+
+    @Test func theCatalogLineNamesTheDayFolderAndTheFile() {
+        let photo = Photo(
+            id: 9, day: "2024/2024-05-10", date: "2024-05-10", file: "DSC00576.ARW", stars: 0,
+            picked: false, rejected: false, raw: true)
+        #expect(PracticeFormat.catalogLine(photo) == "It's already in your catalog: 2024/2024-05-10 › DSC00576.ARW.")
+        #expect(PracticeFormat.desktopBox(photo)
+            == "Do this one on the Mac in Lightroom Classic. It's already in your catalog: 2024/2024-05-10 › DSC00576.ARW.")
+    }
+
+    @Test func aCompanionsRowReadsLevelTimeAndIPhone() {
+        #expect(PracticeFormat.companionMinutesText(challenge(minutes: 12)) == "~12 min · iPhone")
+    }
+
+    @Test func theStatusTagsNameWhereAChallengeStands() {
+        func tags(_ status: PracticeStatus) -> [String?] {
+            let c = PracticeChallenge(id: "a", title: "A", photo: galleryPhoto(1), status: status)
+            return [PracticeFormat.statusTag(c), PracticeFormat.finishedTag(c)]
+        }
+        #expect(tags(.todo) == [nil, nil])
+        #expect(tags(.downloaded) == ["Downloaded", nil])
+        #expect(tags(.done) == ["Done", "Done"])
+        #expect(tags(.skipped) == ["Skipped", "Skipped"])
     }
 }

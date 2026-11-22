@@ -30,6 +30,55 @@ public enum PracticeFormat {
         return day.isEmpty ? "Done" : "Done · \(day)"
     }
 
+    // MARK: Needs Desktop
+
+    /// The tag on a challenge whose full version needs Lightroom Classic.
+    public static let needsDesktopTag = "Needs Desktop"
+
+    /// The label of a companion's row.
+    public static let onTheGoLabel = "On the go"
+
+    /// The link from a Needs Desktop challenge to its companion.
+    public static let onTheGoLink = "On the go version ›"
+
+    /// The link from a companion to its Needs Desktop challenge.
+    public static let desktopLink = "Full desktop version ›"
+
+    /// Under a companion's title.
+    public static let companionNote = "On the go version of a Needs Desktop challenge."
+
+    /// `"Do this one on the Mac in Lightroom Classic. It's already in your catalog: 2024/2024-05-10 ›
+    /// DSC00576.ARW."`, the box that stands in for the download buttons.
+    public static func desktopBox(_ photo: Photo) -> String {
+        "Do this one on the Mac in Lightroom Classic. \(catalogLine(photo))"
+    }
+
+    /// `"It's already in your catalog: 2024/2024-05-10 › DSC00576.ARW."`: the day folder and the file.
+    public static func catalogLine(_ photo: Photo) -> String {
+        "It's already in your catalog: \(photo.day) › \(photo.file)."
+    }
+
+    /// `"~12 min · iPhone"`, after the level on a companion's row.
+    public static func companionMinutesText(_ challenge: PracticeChallenge) -> String {
+        "\(minutesText(challenge)) · iPhone"
+    }
+
+    /// `"Done"` or `"Skipped"` once a challenge is finished with; nil while it is waiting.
+    public static func finishedTag(_ challenge: PracticeChallenge) -> String? {
+        switch challenge.status {
+        case .done: "Done"
+        case .skipped: "Skipped"
+        case .todo, .downloaded: nil
+        }
+    }
+
+    /// A companion's status tag, and the status beside a link to the other half of a pair: `"Done"`,
+    /// `"Skipped"` or `"Downloaded"`; nil for a challenge nothing has happened to.
+    public static func statusTag(_ challenge: PracticeChallenge) -> String? {
+        if let finished = finishedTag(challenge) { return finished }
+        return challenge.status == .downloaded ? "Downloaded" : nil
+    }
+
     private static func withSize(_ title: String, _ photo: Photo) -> String {
         let size = GalleryFormat.megabytes(photo.bytes)
         return size.isEmpty ? title : "\(title) · \(size)"

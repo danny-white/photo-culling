@@ -2,8 +2,9 @@ import CullingBayCore
 import SwiftUI
 
 /// One challenge pushed on the Practice tab's navigation stack. The detail looks the challenge
-/// up by id, so it shows the list as it is after a save or a reload.
-private struct PracticeRoute: Hashable {
+/// up by id, so it shows the list as it is after a save or a reload. The detail pushes its pair's
+/// other half with the same route.
+struct PracticeRoute: Hashable {
     let id: String
 }
 
@@ -83,9 +84,9 @@ struct PracticeTab: View {
                 .frame(maxWidth: .infinity)
                 .padding(.top, 60)
         } else {
-            section("Waiting", model.waiting)
-            section("Done", model.done)
-            section("Skipped", model.skipped)
+            section("Waiting", model.waitingGroups)
+            section("Done", model.doneGroups)
+            section("Skipped", model.skippedGroups)
         }
     }
 
@@ -95,16 +96,14 @@ struct PracticeTab: View {
         return "\(subject) no longer in the library."
     }
 
+    /// The count is the challenges listed, so a pair counts two.
     @ViewBuilder
-    private func section(_ title: String, _ items: [PracticeChallenge]) -> some View {
-        if !items.isEmpty {
-            sectionLabel("\(title) · \(items.count)")
-            ForEach(items) { challenge in
-                NavigationLink(value: PracticeRoute(id: challenge.id)) {
-                    PracticeRowView(challenge: challenge)
-                }
-                .buttonStyle(.plain)
-                .padding(.bottom, 8)
+    private func section(_ title: String, _ groups: [PracticeGroup]) -> some View {
+        if !groups.isEmpty {
+            sectionLabel("\(title) · \(groups.reduce(0) { $0 + $1.count })")
+            ForEach(groups) { group in
+                PracticeGroupView(group: group)
+                    .padding(.bottom, 8)
             }
         }
     }
@@ -124,11 +123,36 @@ struct PracticeTab: View {
 
 // MARK: Row
 
+/// A challenge and the on-the-go versions joined under it, in one card. Tapping a row opens that
+/// challenge. A challenge with no companion is a card of one row.
+private struct PracticeGroupView: View {
+    let group: PracticeGroup
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            NavigationLink(value: PracticeRoute(id: group.parent.id)) {
+                PracticeRowView(challenge: group.parent, inPair: !group.companions.isEmpty)
+            }
+            .buttonStyle(.plain)
+            ForEach(group.companions) { companion in
+                Divider().padding(.leading, 94)
+                NavigationLink(value: PracticeRoute(id: companion.id)) {
+                    PracticeCompanionRowView(challenge: companion)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
 /// One challenge in the list (`challengeCard` in `practice.js`): a square thumbnail, the title,
-/// the level and time, and the tools as chips.
+/// the level and time, and the tools as chips. A Needs Desktop one says so. In a pair it also
+/// shows Done or Skipped, since the two rows can differ.
 private struct PracticeRowView: View {
     @Environment(AppServices.self) private var services
     let challenge: PracticeChallenge
+    let inPair: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -141,15 +165,23 @@ private struct PracticeRowView: View {
                     Text(challenge.title)
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    if inPair, let finished = PracticeFormat.finishedTag(challenge) {
+                        PracticeTag(text: finished)
+                    }
                     if challenge.wasDownloaded {
                         PracticeTag(text: "Downloaded")
                     }
                 }
-                HStack(spacing: 0) {
-                    Text(challenge.level.title).foregroundStyle(challenge.level.color)
-                    Text(" · " + PracticeFormat.minutesText(challenge)).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    HStack(spacing: 0) {
+                        Text(challenge.level.title).foregroundStyle(challenge.level.color)
+                        Text(" · " + PracticeFormat.minutesText(challenge)).foregroundStyle(.secondary)
+                    }
+                    .font(.caption.weight(.semibold))
+                    if challenge.needsDesktop {
+                        PracticeTag(text: PracticeFormat.needsDesktopTag, accent: true)
+                    }
                 }
-                .font(.caption.weight(.semibold))
                 if !challenge.tools.isEmpty {
                     PracticeFlowLayout(spacing: 4) {
                         ForEach(Array(challenge.tools.enumerated()), id: \.offset) { _, tool in
@@ -161,8 +193,44 @@ private struct PracticeRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
-        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A challenge's on-the-go version under its parent: no thumbnail, since it is the same photo.
+/// It has its own status, so it shows Done, Skipped or Downloaded.
+private struct PracticeCompanionRowView: View {
+    let challenge: PracticeChallenge
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(PracticeFormat.onTheGoLabel)
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let status = PracticeFormat.statusTag(challenge) {
+                    PracticeTag(text: status)
+                }
+            }
+            HStack(spacing: 0) {
+                Text(challenge.level.title).foregroundStyle(challenge.level.color)
+                Text(" · " + PracticeFormat.companionMinutesText(challenge)).foregroundStyle(.secondary)
+            }
+            .font(.caption.weight(.semibold))
+            if !challenge.tools.isEmpty {
+                PracticeFlowLayout(spacing: 4) {
+                    ForEach(Array(challenge.tools.enumerated()), id: \.offset) { _, tool in
+                        PracticeChip(text: tool)
+                    }
+                }
+            }
+        }
+        .padding(.leading, 94)
+        .padding(.trailing, 10)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
 }
@@ -194,18 +262,20 @@ private struct PracticeChip: View {
     }
 }
 
-/// `Downloaded`, on a row and on the detail.
+/// `Downloaded`, `Done` and the like, on a row and on the detail. `Needs Desktop` is the accent
+/// one, in blue.
 struct PracticeTag: View {
     let text: String
+    var accent = false
 
     var body: some View {
         Text(text)
             .font(.caption2.weight(.bold))
             .lineLimit(1)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(accent ? Color.blue : Color.secondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(Color(.tertiarySystemFill), in: Capsule())
+            .background(accent ? Color.blue.opacity(0.15) : Color(.tertiarySystemFill), in: Capsule())
     }
 }
 

@@ -60,6 +60,17 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
     public internal(set) var downloadedAt: String?
     /// When it was marked done; nil unless `status` is `.done`.
     public internal(set) var doneAt: String?
+    /// The full challenge needs Lightroom Classic (Calibration, Enhance), so it is done on the Mac.
+    /// False when the server does not send it.
+    public let needsDesktop: Bool
+    /// Which tool needs the desktop, in a line; nil when none is given.
+    public let desktopReason: String?
+    /// The id of the Needs Desktop challenge this is the on-the-go version of. nil for any other,
+    /// and for a companion whose parent is not in the answer, which then stands alone.
+    public let companionOf: String?
+    /// The ids of the challenges that are this one's on-the-go versions, in the file's order.
+    /// Empty when the server does not send it.
+    public let companions: [String]
 
     /// The RAW has been fetched at some point.
     public var wasDownloaded: Bool { !(downloadedAt ?? "").isEmpty }
@@ -69,7 +80,8 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         minutes: Int = 10, tools: [String] = [], aim: String = "", why: String = "",
         hints: [String] = [], pickedBy: String = "Claude", added: String = "", photo: Photo,
         status: PracticeStatus = .todo, note: String = "", updatedAt: String? = nil,
-        downloadedAt: String? = nil, doneAt: String? = nil
+        downloadedAt: String? = nil, doneAt: String? = nil, needsDesktop: Bool = false,
+        desktopReason: String? = nil, companionOf: String? = nil, companions: [String] = []
     ) {
         self.id = id
         self.title = title
@@ -88,6 +100,10 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         self.updatedAt = updatedAt
         self.downloadedAt = downloadedAt
         self.doneAt = doneAt
+        self.needsDesktop = needsDesktop
+        self.desktopReason = desktopReason
+        self.companionOf = companionOf
+        self.companions = companions
     }
 
     enum CodingKeys: String, CodingKey {
@@ -97,6 +113,10 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         case updatedAt = "updated_at"
         case downloadedAt = "downloaded_at"
         case doneAt = "done_at"
+        case needsDesktop = "needs_desktop"
+        case desktopReason = "desktop_reason"
+        case companionOf = "companion_of"
+        case companions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -118,6 +138,10 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         updatedAt = try values.decodeIfPresent(String.self, forKey: .updatedAt)
         downloadedAt = try values.decodeIfPresent(String.self, forKey: .downloadedAt)
         doneAt = try values.decodeIfPresent(String.self, forKey: .doneAt)
+        needsDesktop = try values.decodeIfPresent(Bool.self, forKey: .needsDesktop) ?? false
+        desktopReason = try values.decodeIfPresent(String.self, forKey: .desktopReason)
+        companionOf = try values.decodeIfPresent(String.self, forKey: .companionOf)
+        companions = try values.decodeIfPresent([String].self, forKey: .companions) ?? []
     }
 
     /// Takes the server's answer to a write.
@@ -127,6 +151,58 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         updatedAt = state.updatedAt
         downloadedAt = state.downloadedAt
         doneAt = state.doneAt
+    }
+}
+
+/// Which section of the tab a group is listed in.
+public enum PracticeSection: String, Sendable, Hashable, CaseIterable {
+    case waiting, done, skipped
+}
+
+/// A challenge without `companion_of` and its on-the-go versions, in the file's order. They are the
+/// same photo, so the tab lists them together; a challenge with no companion is a group of one.
+public struct PracticeGroup: Sendable, Hashable, Identifiable {
+    public let parent: PracticeChallenge
+    public let companions: [PracticeChallenge]
+
+    public var id: String { parent.id }
+
+    /// The parent, then its companions.
+    public var members: [PracticeChallenge] { [parent] + companions }
+
+    /// How many challenges (rows) it shows.
+    public var count: Int { 1 + companions.count }
+
+    /// Waiting if any member is todo or downloaded, else Done if any is done, else Skipped. A pair
+    /// stays together while one of them is still waiting.
+    public var section: PracticeSection {
+        let all = members
+        if all.contains(where: { $0.status == .todo || $0.status == .downloaded }) { return .waiting }
+        if all.contains(where: { $0.status == .done }) { return .done }
+        return .skipped
+    }
+
+    public init(parent: PracticeChallenge, companions: [PracticeChallenge] = []) {
+        self.parent = parent
+        self.companions = companions
+    }
+
+    /// The groups of a list, in the order of their parents. A challenge is a companion when its
+    /// `companionOf` names another challenge in the list that is not itself a companion; any other
+    /// challenge, a companion whose parent is missing included, is a parent.
+    public static func groups(of challenges: [PracticeChallenge]) -> [PracticeGroup] {
+        let parents = Set(challenges.filter { $0.companionOf == nil }.map(\.id))
+        func parentID(of challenge: PracticeChallenge) -> String? {
+            challenge.companionOf.flatMap { parents.contains($0) ? $0 : nil }
+        }
+        var byParent: [String: [PracticeChallenge]] = [:]
+        for challenge in challenges {
+            if let parent = parentID(of: challenge) { byParent[parent, default: []].append(challenge) }
+        }
+        return challenges.compactMap { challenge in
+            parentID(of: challenge) == nil
+                ? PracticeGroup(parent: challenge, companions: byParent[challenge.id] ?? []) : nil
+        }
     }
 }
 

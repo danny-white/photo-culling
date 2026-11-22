@@ -41,8 +41,33 @@ public final class PracticeModel {
     public var done: [PracticeChallenge] { challenges.filter { $0.status == .done } }
     public var skipped: [PracticeChallenge] { challenges.filter { $0.status == .skipped } }
 
+    /// Every challenge with its on-the-go versions, in the order of the parents in the file.
+    public var groups: [PracticeGroup] { PracticeGroup.groups(of: challenges) }
+
+    /// The groups with a member that is todo or downloaded.
+    public var waitingGroups: [PracticeGroup] { groups.filter { $0.section == .waiting } }
+    /// The groups with none waiting and a member that is done.
+    public var doneGroups: [PracticeGroup] { groups.filter { $0.section == .done } }
+    /// The groups with every member skipped.
+    public var skippedGroups: [PracticeGroup] { groups.filter { $0.section == .skipped } }
+
     public func challenge(id: String) -> PracticeChallenge? {
         challenges.first { $0.id == id }
+    }
+
+    /// The Needs Desktop challenge this one is the on-the-go version of; nil for any other, and
+    /// when the parent is not in the list.
+    public func parent(of id: String) -> PracticeChallenge? {
+        guard let parentID = challenge(id: id)?.companionOf,
+              let parent = challenge(id: parentID), parent.companionOf == nil
+        else { return nil }
+        return parent
+    }
+
+    /// This challenge's on-the-go versions, in the file's order; empty for most.
+    public func companions(of id: String) -> [PracticeChallenge] {
+        guard challenge(id: id)?.companionOf == nil else { return [] }
+        return challenges.filter { $0.companionOf == id }
     }
 
     /// A write for this challenge is running, so its buttons should wait.

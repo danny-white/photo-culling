@@ -323,6 +323,92 @@ class MobileApi(unittest.TestCase):
         self.assertNotIn("path", body["challenges"][0])
         self.assertEqual(body["challenges"][0]["photo"]["file"], "DSC05040.ARW")
 
+    def desktop_pair(self, parent_path=None, companion_path=None):
+        parent = self.practice_challenge("aurora", path=parent_path)
+        parent.update(mode="mac", needs_desktop=True, desktop_reason="Uses Enhance › Denoise.")
+        companion = self.practice_challenge("aurora-phone", path=companion_path or parent["path"])
+        companion["companion_of"] = "aurora"
+        return parent, companion
+
+    def test_practice_desktop_fields_default_when_absent(self):
+        self.write_practice([self.practice_challenge()])
+        self.addCleanup(self.clear_practice)
+        c = self.client.get("/m/api/practice").get_json()["challenges"][0]
+        self.assertIs(c["needs_desktop"], False)
+        self.assertIsNone(c["desktop_reason"])
+        self.assertIsNone(c["companion_of"])
+        self.assertEqual(c["companions"], [])
+
+    def test_practice_desktop_pair(self):
+        parent, companion = self.desktop_pair()
+        self.write_practice([parent, companion, self.practice_challenge("plain", path=parent["path"])])
+        self.addCleanup(self.clear_practice)
+        body = self.client.get("/m/api/practice").get_json()
+        got = {c["id"]: c for c in body["challenges"]}
+        self.assertEqual([c["id"] for c in body["challenges"]], ["aurora", "aurora-phone", "plain"])
+        self.assertIs(got["aurora"]["needs_desktop"], True)
+        self.assertEqual(got["aurora"]["desktop_reason"], "Uses Enhance › Denoise.")
+        self.assertIsNone(got["aurora"]["companion_of"])
+        self.assertEqual(got["aurora"]["companions"], ["aurora-phone"])
+        self.assertIs(got["aurora-phone"]["needs_desktop"], False)
+        self.assertIsNone(got["aurora-phone"]["desktop_reason"])
+        self.assertEqual(got["aurora-phone"]["companion_of"], "aurora")
+        self.assertEqual(got["aurora-phone"]["companions"], [])
+        self.assertEqual(got["plain"]["companions"], [])
+        # each member keeps its own status and note
+        url = "/m/api/practice/aurora-phone"
+        self.client.post(url, json={"status": "done", "note": "Phone pass."}, headers=self.H)
+        got = {c["id"]: c for c in self.client.get("/m/api/practice").get_json()["challenges"]}
+        self.assertEqual((got["aurora-phone"]["status"], got["aurora-phone"]["note"]), ("done", "Phone pass."))
+        self.assertEqual((got["aurora"]["status"], got["aurora"]["note"]), ("todo", ""))
+
+    def test_practice_companion_link_nulled_when_a_photo_is_missing(self):
+        gone = "/path/not/in/the/library.ARW"
+        # the parent's photo is missing: the companion stands alone
+        parent, companion = self.desktop_pair(parent_path=gone, companion_path=self.practice_challenge()["path"])
+        self.write_practice([parent, companion])
+        self.addCleanup(self.clear_practice)
+        body = self.client.get("/m/api/practice").get_json()
+        self.assertEqual(body["missing"], 1)
+        self.assertEqual([c["id"] for c in body["challenges"]], ["aurora-phone"])
+        self.assertIsNone(body["challenges"][0]["companion_of"])
+        self.assertEqual(body["challenges"][0]["companions"], [])
+        # the companion's photo is missing: the parent lists no companions
+        parent, companion = self.desktop_pair(companion_path=gone)
+        companion["title"] = "Second file, a different size"   # practice.json is re-read when its mtime or size changes
+        self.write_practice([parent, companion])
+        body = self.client.get("/m/api/practice").get_json()
+        self.assertEqual(body["missing"], 1)
+        self.assertEqual([c["id"] for c in body["challenges"]], ["aurora"])
+        self.assertEqual(body["challenges"][0]["companions"], [])
+        self.assertIs(body["challenges"][0]["needs_desktop"], True)
+
+    def test_practice_desktop_file_rules(self):
+        self.addCleanup(self.clear_practice)
+
+        def case(name, mutate):
+            parent, companion = self.desktop_pair()
+            others = mutate(parent, companion)
+            self.write_practice([parent, companion] + (others if isinstance(others, list) else []))
+            body = self.client.get("/m/api/practice").get_json()
+            with self.subTest(name):
+                self.assertEqual(body["challenges"], [])
+                self.assertEqual(body["error"], "practice.json is malformed")
+                self.assertNotIn("missing", body)
+
+        case("needs_desktop not a bool", lambda p, c: p.update(needs_desktop="yes"))
+        case("needs_desktop null", lambda p, c: p.update(needs_desktop=None))
+        case("desktop_reason not a string", lambda p, c: p.update(desktop_reason=5))
+        case("companion_of not a string", lambda p, c: c.update(companion_of=["aurora"]))
+        case("companion_of unknown id", lambda p, c: c.update(companion_of="nope"))
+        case("companion_of itself", lambda p, c: c.update(companion_of="aurora-phone"))
+        case("parent not needs_desktop", lambda p, c: p.update(needs_desktop=False))
+        case("parent without needs_desktop", lambda p, c: p.pop("needs_desktop"))
+        case("parent is itself a companion", lambda p, c: p.update(companion_of="aurora-phone"))
+        case("companion needs desktop", lambda p, c: c.update(needs_desktop=True))
+        case("companion of a companion",
+             lambda p, c: [dict(self.practice_challenge("second", path=p["path"]), companion_of="aurora-phone")])
+
     def test_practice_table_created_in_fresh_annotations_db(self):
         import mobile
         import photo_cull as pc
@@ -441,7 +527,9 @@ class MobileApi(unittest.TestCase):
         self.assert_shape(challenge, {"id": str, "title": str, "mode": str, "minutes": int, "tools": list,
                                      "aim": str, "why": str, "hints": list, "level": str, "picked_by": str,
                                      "added": str, "photo": dict, "status": str, "note": str,
-                                     "updated_at": (str, None), "downloaded_at": (str, None), "done_at": (str, None)},
+                                     "updated_at": (str, None), "downloaded_at": (str, None), "done_at": (str, None),
+                                     "needs_desktop": bool, "desktop_reason": (str, None),
+                                     "companion_of": (str, None), "companions": list},
                           "PracticeChallenge")
         self.assert_shape(challenge["photo"], self.PHOTO, "PracticePhoto")
         self.assertNotIn("path", challenge)

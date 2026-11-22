@@ -99,6 +99,20 @@ PracticeChallenge contains the challenge file's fields other than `path`, plus:
 | `note` | string | Danny's note, up to 2000 characters |
 | `updated_at` | string? | Last state update time |
 | `downloaded_at`, `done_at` | string? | First download and completion times |
+| `needs_desktop` | bool | Always present, `false` when the file omits it. The full challenge needs Lightroom Classic (Calibration, Enhance, ...), which Lightroom on the phone lacks. Show a **Needs Desktop** tag |
+| `desktop_reason` | string? | One line saying which tool needs the desktop; `null` when absent |
+| `companion_of` | string? | Id of the Needs Desktop challenge this is the on-the-go version of. `null` when the file has none **or the parent is not in this answer** (its photo is missing), so it then stands alone |
+| `companions` | [string] | Ids, in file order, of the challenges in this answer whose `companion_of` is this id; usually empty |
+
+A Needs Desktop challenge and its companions are the same photo, each with its own status and note.
+A *group* is a challenge without `companion_of` plus its companions, in file order. Place a group in
+Waiting if any member is `todo` or `downloaded`, else in Done if any is `done`, else in Skipped, so a
+pair stays together. `mode` stays informational (`mac` for the desktop version, `phone` for the companion).
+
+The three new fields are optional in `practice.json`. A violation makes the whole file malformed:
+`needs_desktop` must be a bool and `desktop_reason` a string when present (`null` is not accepted);
+`companion_of` must name another challenge in the file that has `needs_desktop: true` and no
+`companion_of` of its own; a challenge with `companion_of` must not have `needs_desktop: true`.
 
 POST accepts `status` and/or `note`. Setting `downloaded` records the first download time. It does
 not move a `done` challenge back; moving off `done` clears `done_at`. Setting `done` preserves its

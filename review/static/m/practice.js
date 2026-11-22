@@ -47,30 +47,68 @@ async function load() {
 function errorHTML() {
   return S.error ? '<p class="p-error" role="status">' + esc(S.error) + '</p>' : '';
 }
-function challengeCard(c) {
+const STATUS_LABEL = {todo:'To do', downloaded:'Downloaded', done:'Done', skipped:'Skipped'};
+function tag(text, cls) { return '<span class="p-tag' + (cls ? ' ' + cls : '') + '">' + esc(text) + '</span>'; }
+const desktopTag = () => tag('Needs Desktop', 'p-tag-desktop');
+function statusTag(c) {
+  if (c.status === 'done') return tag('Done');
+  if (c.status === 'skipped') return tag('Skipped', 'p-tag-muted');
+  return c.downloaded_at ? tag('Downloaded') : '';
+}
+function linkStatus(c) {
+  return tag(STATUS_LABEL[c.status] || c.status, c.status === 'done' || c.status === 'downloaded' ? '' : 'p-tag-muted');
+}
+const companionsOf = c => (c.companions || []).map(byId).filter(Boolean);
+const linkTo = id => '#' + esc(encodeURIComponent(id));
+const metaLine = c => '<span class="p-level level-' + esc(c.level) + '">' + esc(c.level) + '</span> · ~' +
+  esc(c.minutes) + ' min · ' + (c.mode === 'phone' ? 'iPhone' : 'Mac');
+const chips = c => '<span class="p-chips">' + (c.tools || []).map(t => '<span class="p-chip">' + esc(t) + '</span>').join('') + '</span>';
+
+function challengeCard(c, paired = false) {
   const p = c.photo;
-  const downloaded = c.downloaded_at ? '<span class="p-tag">Downloaded</span>' : '';
-  return '<a class="challenge-card" href="#' + esc(encodeURIComponent(c.id)) + '">' +
+  const downloaded = c.downloaded_at ? tag('Downloaded') : '';
+  // In a pair the rows can differ, so a parent that isn't waiting says so itself.
+  const marks = (c.needs_desktop ? desktopTag() : '') +
+    (paired && (c.status === 'done' || c.status === 'skipped') ? statusTag(c) : '');
+  return '<a class="challenge-card' + (paired ? ' has-companion' : '') + '" href="' + linkTo(c.id) + '">' +
     '<img class="challenge-thumb" src="' + esc(img(p.id, 'thumb')) + '" loading="lazy" alt="">' +
     '<span class="challenge-copy"><span class="challenge-top"><b>' + esc(c.title) + '</b>' + downloaded + '</span>' +
-    '<span class="challenge-meta"><span class="p-level level-' + esc(c.level) + '">' + esc(c.level) + '</span> · ~' +
-    esc(c.minutes) + ' min · ' + (c.mode === 'phone' ? 'iPhone' : 'Mac') + '</span>' +
-    '<span class="p-chips">' + (c.tools || []).map(t => '<span class="p-chip">' + esc(t) + '</span>').join('') + '</span></span></a>';
+    (marks ? '<span class="challenge-tags">' + marks + '</span>' : '') +
+    '<span class="challenge-meta">' + metaLine(c) + '</span>' + chips(c) + '</span></a>';
+}
+function companionRow(c) {
+  return '<a class="companion-row" href="' + linkTo(c.id) + '">' +
+    '<span class="companion-top"><b>On the go</b>' + statusTag(c) + '</span>' +
+    '<span class="challenge-meta">' + metaLine(c) + '</span>' + chips(c) + '</a>';
+}
+// A group is a challenge without a (shown) parent plus its companions, in file order.
+function groups() {
+  return S.challenges.filter(c => !(c.companion_of && byId(c.companion_of))).map(c => [c, ...companionsOf(c)]);
+}
+function groupHTML(g) {
+  if (g.length === 1) return challengeCard(g[0]);
+  return '<div class="challenge-group">' + challengeCard(g[0], true) + g.slice(1).map(companionRow).join('') + '</div>';
+}
+function groupSection(g) {
+  if (g.some(c => c.status === 'todo' || c.status === 'downloaded')) return 'waiting';
+  return g.some(c => c.status === 'done') ? 'done' : 'skipped';
 }
 function section(title, items, kind, collapsedWhenLong = false) {
   if (!items.length) return '';
-  const cards = items.map(challengeCard).join('');
+  const count = items.reduce((n, g) => n + g.length, 0);
+  const cards = items.map(groupHTML).join('');
   if (collapsedWhenLong) {
-    const open = items.length <= 3 ? ' open' : '';
-    return '<details class="challenge-section"' + open + '><summary>' + esc(title) + ' <span>' + items.length + '</span></summary>' +
+    const open = count <= 3 ? ' open' : '';
+    return '<details class="challenge-section"' + open + '><summary>' + esc(title) + ' <span>' + count + '</span></summary>' +
       '<div class="challenge-list">' + cards + '</div></details>';
   }
-  return '<section class="challenge-section"><h2>' + esc(title) + ' <span>' + items.length + '</span></h2><div class="challenge-list">' + cards + '</div></section>';
+  return '<section class="challenge-section"><h2>' + esc(title) + ' <span>' + count + '</span></h2><div class="challenge-list">' + cards + '</div></section>';
 }
 function listView() {
-  const waiting = S.challenges.filter(c => c.status === 'todo' || c.status === 'downloaded');
-  const done = S.challenges.filter(c => c.status === 'done');
-  const skipped = S.challenges.filter(c => c.status === 'skipped');
+  const all = groups();
+  const waiting = all.filter(g => groupSection(g) === 'waiting');
+  const done = all.filter(g => groupSection(g) === 'done');
+  const skipped = all.filter(g => groupSection(g) === 'skipped');
   return '<div class="practice-list">' + errorHTML() +
     (S.missing ? '<p class="p-note">' + S.missing + ' challenge photo' + (S.missing === 1 ? ' is' : 's are') + ' no longer in the library.</p>' : '') +
     section('Waiting', waiting, 'waiting') + section('Done', done, 'done', true) + section('Skipped', skipped, 'skipped', true) +
@@ -78,7 +116,7 @@ function listView() {
 }
 function detailView(c) {
   const p = c.photo;
-  const downloaded = c.downloaded_at ? '<span class="p-tag">Downloaded</span>' : '';
+  const downloaded = c.downloaded_at ? tag('Downloaded') : '';
   const notes = Object.prototype.hasOwnProperty.call(S.drafts, c.id) ? S.drafts[c.id] : c.note;
   const hintList = (c.hints || []).length ? '<details class="p-hints"><summary>Show hints</summary><ul>' +
     c.hints.map(h => '<li>' + esc(h) + '</li>').join('') + '</ul></details>' : '';
@@ -92,17 +130,31 @@ function detailView(c) {
       '</div>';
   }
   const downloadText = (p.raw ? 'Download RAW' : 'Download original') + (sizeLabel(p.bytes) ? ' · ' + sizeLabel(p.bytes) : '');
+  const parent = c.companion_of ? byId(c.companion_of) : null;
+  const first = companionsOf(c)[0];
+  let kind = '';
+  if (c.needs_desktop) {
+    kind = '<div class="p-kind">' + desktopTag() + (c.desktop_reason ? '<p>' + esc(c.desktop_reason) + '</p>' : '') + '</div>';
+  } else if (parent) {
+    kind = '<div class="p-kind"><p>On the go version of a Needs Desktop challenge.</p>' +
+      '<a class="p-pair-link" href="' + linkTo(parent.id) + '">Full desktop version › ' + linkStatus(parent) + '</a></div>';
+  }
+  const photoSteps = c.needs_desktop
+    ? '<div class="p-desktop-box">Do this one on the Mac in Lightroom Classic. It\'s already in your catalog: <b>' +
+      esc(p.day || '') + '</b> › <b>' + esc(p.file || '') + '</b>.</div>' +
+      (first ? '<a class="p-pair-link p-companion-link" href="' + linkTo(first.id) + '">On the go version › ' + linkStatus(first) + '</a>' : '')
+    : '<a class="p-download" href="' + esc(exportUrl(p.id)) + '" download data-action="download">' + esc(downloadText) + '</a>' +
+      '<ol class="p-howto"><li>Safari asks to download: tap <b>Download</b>. It goes to Files › Downloads.</li>' +
+      '<li>In Lightroom, tap the add-photos button, choose Files, and pick the file.</li>' +
+      '<li>Edit with only the tools above, then come back and mark it done.</li></ol>';
   return '<article class="practice-detail" data-cid="' + esc(c.id) + '">' + errorHTML() +
     '<a class="p-list-back" href="/m/practice.html">‹ Challenges</a>' +
     '<button class="p-photo-open" type="button" data-action="preview" aria-label="View photo full screen">' +
     '<img class="p-detail-photo" src="' + esc(img(p.id, 'view')) + '" alt="Challenge photo"></button>' +
-    '<div class="p-titleline"><div><h2>' + esc(c.title) + '</h2><p class="p-meta">' + esc(whenPlace(p)) + '</p><p class="p-meta">' + esc(p.camera || 'Camera not recorded') + '</p></div>' + downloaded + '</div>' +
+    '<div class="p-titleline"><div><h2>' + esc(c.title) + '</h2><p class="p-meta">' + esc(whenPlace(p)) + '</p><p class="p-meta">' + esc(p.camera || 'Camera not recorded') + '</p>' + kind + '</div>' + downloaded + '</div>' +
     '<section class="p-brief"><h3>The challenge</h3><b>Only use:</b><ul class="p-tools">' + (c.tools || []).map(t => '<li>' + esc(t) + '</li>').join('') + '</ul>' +
     '<h3>Aim for:</h3><p>' + esc(c.aim) + '</p><h3>Why this photo:</h3><p>' + esc(c.why) + '</p>' + hintList + '</section>' +
-    '<a class="p-download" href="' + esc(exportUrl(p.id)) + '" download data-action="download">' + esc(downloadText) + '</a>' +
-    '<ol class="p-howto"><li>Safari asks to download: tap <b>Download</b>. It goes to Files › Downloads.</li>' +
-    '<li>In Lightroom, tap the add-photos button, choose Files, and pick the file.</li>' +
-    '<li>Edit with only the tools above, then come back and mark it done.</li></ol>' +
+    photoSteps +
     '<label class="p-note-label" for="practice-note">How did it go?</label><textarea id="practice-note" maxlength="2000" placeholder="Add a short note…">' + esc(notes) + '</textarea>' +
     actions + '</article>';
 }

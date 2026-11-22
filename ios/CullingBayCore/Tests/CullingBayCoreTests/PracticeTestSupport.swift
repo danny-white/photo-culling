@@ -18,16 +18,25 @@ private func quoted(_ text: String?) -> String {
     text.map { "\"\($0)\"" } ?? "null"
 }
 
-/// A challenge as the server returns it. `hints: nil` leaves the key out, as an old file can.
+/// A challenge as the server returns it. `hints: nil` leaves the key out, as an old file can; so does
+/// each of the Needs Desktop fields (`needsDesktop`, `reason`, `companionOf`, `companions`) when
+/// nil, as an older server leaves them out.
 func practiceJSON(
     _ id: String, status: String = "todo", level: String = "easy", note: String = "",
     downloadedAt: String? = nil, doneAt: String? = nil, hints: [String]? = ["Start with the light."],
-    photo: String = photoFullJSON
+    photo: String = photoFullJSON, needsDesktop: Bool? = nil, reason: String? = nil,
+    companionOf: String? = nil, companions: [String]? = nil
 ) -> String {
     let hintsPart = hints.map { "\"hints\":[\($0.map { "\"\($0)\"" }.joined(separator: ","))]," } ?? ""
+    let desktopPart = [
+        needsDesktop.map { "\"needs_desktop\":\($0)," },
+        reason.map { "\"desktop_reason\":\"\($0)\"," },
+        companionOf.map { "\"companion_of\":\"\($0)\"," },
+        companions.map { "\"companions\":[\($0.map { "\"\($0)\"" }.joined(separator: ","))]," },
+    ].compactMap { $0 }.joined()
     return """
     {"id":"\(id)","title":"Title of \(id)","mode":"phone","level":"\(level)","minutes":8,
-     "tools":["Color › Mix"],"aim":"An aim.","why":"A reason.",\(hintsPart)"picked_by":"Claude",
+     "tools":["Color › Mix"],"aim":"An aim.","why":"A reason.",\(hintsPart)\(desktopPart)"picked_by":"Claude",
      "added":"2026-11-21","photo":\(photo),"status":"\(status)","note":"\(note)",
      "updated_at":null,"downloaded_at":\(quoted(downloadedAt)),"done_at":\(quoted(doneAt))}
     """

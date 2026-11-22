@@ -2,8 +2,9 @@ import CullingBayCore
 import SwiftUI
 
 /// One challenge (`detailView` in `practice.js`): the picture, what to do and why, saving the RAW
-/// to Photos to edit in Lightroom, and marking it done with a note. The state lives in
-/// `PracticeModel`; what is typed in the note box is kept there too, so a note that did not save
+/// to Photos to edit in Lightroom, and marking it done with a note. A Needs Desktop challenge has
+/// no save buttons: it says it is done on the Mac, and links to its on-the-go version, which is
+/// the same screen for the same photo. The state lives in `PracticeModel`; what is typed in the note box is kept there too, so a note that did not save
 /// is still here when the screen is opened again.
 @MainActor
 struct PracticeDetailView: View {
@@ -71,8 +72,12 @@ struct PracticeDetailView: View {
                 .accessibilityLabel("Challenge photo")
             header(challenge)
             brief(challenge)
-            downloads(challenge)
-            howTo(challenge)
+            if challenge.needsDesktop {
+                desktopOnly(challenge)
+            } else {
+                downloads(challenge)
+                howTo(challenge)
+            }
             noteBox
             actions(challenge)
         }
@@ -85,6 +90,7 @@ struct PracticeDetailView: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(challenge.title).font(.title2.weight(.bold))
+                pairing(challenge)
                 let when = PracticeFormat.whenAndPlace(challenge.photo)
                 if !when.isEmpty {
                     Text(when).font(.subheadline).foregroundStyle(.secondary)
@@ -99,6 +105,46 @@ struct PracticeDetailView: View {
                 PracticeTag(text: "Downloaded")
             }
         }
+    }
+
+    /// Under the title: for a Needs Desktop challenge its tag and the reason; for an on-the-go
+    /// version a line saying so and the way back to the full one.
+    @ViewBuilder
+    private func pairing(_ challenge: PracticeChallenge) -> some View {
+        if challenge.needsDesktop {
+            VStack(alignment: .leading, spacing: 4) {
+                PracticeTag(text: PracticeFormat.needsDesktopTag, accent: true)
+                if let reason = challenge.desktopReason, !reason.isEmpty {
+                    Text(reason).font(.subheadline)
+                }
+            }
+            .padding(.vertical, 3)
+        } else if let parent = model.parent(of: challenge.id) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(PracticeFormat.companionNote)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                pairLink(PracticeFormat.desktopLink, to: parent)
+            }
+            .padding(.vertical, 3)
+        }
+    }
+
+    /// A link to the other half of a pair, with where it stands.
+    private func pairLink(_ title: String, to other: PracticeChallenge) -> some View {
+        NavigationLink(value: PracticeRoute(id: other.id)) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                if let status = PracticeFormat.statusTag(other) {
+                    PracticeTag(text: status)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func brief(_ challenge: PracticeChallenge) -> some View {
@@ -142,6 +188,22 @@ struct PracticeDetailView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.subheadline.weight(.semibold))
             Text(text).font(.subheadline)
+        }
+    }
+
+    // MARK: Needs Desktop
+
+    /// Instead of the save buttons and the phone how-to: where to do it, and the on-the-go version.
+    private func desktopOnly(_ challenge: PracticeChallenge) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(PracticeFormat.desktopBox(challenge.photo))
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+            if let companion = model.companions(of: challenge.id).first {
+                pairLink(PracticeFormat.onTheGoLink, to: companion)
+            }
         }
     }
 

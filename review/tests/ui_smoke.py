@@ -37,11 +37,18 @@ def start_app(tmp: Path):
     with sqlite3.connect(f"file:{ROOT / 'trial_out' / 'trial.db'}?mode=ro", uri=True) as con:
         path = con.execute("SELECT path FROM images WHERE filename='DSC05036.ARW' AND path LIKE ? LIMIT 1",
                            (f"%/{DAY}/%",)).fetchone()[0]
-    (state_dir / "practice.json").write_text(json.dumps({"challenges": [{
-        "id": "smoke-lantern", "path": path, "title": "Smoke challenge", "mode": "phone", "minutes": 10,
-        "tools": ["Crop", "Color › Mix"], "aim": "Keep the light warm.", "why": "One clear light source.",
-        "hints": ["Start with the light."], "level": "easy", "picked_by": "Smoke test", "added": "2026-11-21"
-    }]}), encoding="utf-8")
+    base = {"path": path, "mode": "phone", "minutes": 10, "aim": "Keep the light warm.",
+            "why": "One clear light source.", "hints": ["Start with the light."], "level": "easy",
+            "picked_by": "Smoke test", "added": "2026-11-21"}
+    (state_dir / "practice.json").write_text(json.dumps({"challenges": [
+        dict(base, id="smoke-lantern", title="Smoke challenge", tools=["Crop", "Color › Mix"]),
+        # a Needs Desktop challenge and its on-the-go companion, on the same photo
+        dict(base, id="smoke-aurora", title="Smoke desktop", mode="mac", needs_desktop=True,
+             desktop_reason="Uses Enhance › Denoise, which Lightroom on the phone doesn't have.",
+             tools=["Enhance › Denoise", "Light"]),
+        dict(base, id="smoke-aurora-phone", title="Smoke desktop", companion_of="smoke-aurora",
+             tools=["White balance", "Light"]),
+    ]}), encoding="utf-8")
     # what the plugin would report from a Lightroom sync: two stacks you already picked by hand
     (tmp / "inbox" / "applied" / "19990101-000000-catalog.tsv").write_text(
         "#cull-catalog v1\n2026-10-01\tDSC05062.ARW\t1\t0\tyou\t\n2026-10-01\tDSC05066.ARW\t1\t3\tyou\tyou\n"
@@ -390,6 +397,28 @@ def main():
         with sqlite3.connect(tmp / "annotations.db") as con:
             saved = con.execute("SELECT status,note FROM practice_state WHERE id='smoke-lantern'").fetchone()
         check(saved == ("done", "Warm light worked."), "Practice saves completion and its note")
+        wd.go(app + "practice.html")
+        wd.wait("document.querySelector('.challenge-group .companion-row')")
+        check(wd.text(".challenge-group .p-tag-desktop") == "Needs Desktop"
+              and wd.js("return document.querySelectorAll('.challenge-card .p-tag-desktop').length") == 1,
+              "Practice list tags the Needs Desktop challenge")
+        check(wd.js("const g=document.querySelector('.challenge-group'); return g.querySelectorAll('.challenge-card').length==1 && "
+                    "g.querySelectorAll('.companion-row').length==1 && g.textContent.includes('On the go') && "
+                    "!g.querySelector('.companion-row .challenge-thumb') && g.closest('.challenge-section').querySelector('h2 span').textContent=='2'"),
+              "Practice companion row sits in the same group, counted in Waiting")
+        wd.click(".challenge-group .challenge-card")
+        wd.wait("document.querySelector('.p-desktop-box')")
+        check(wd.js("return !document.querySelector('.p-download') && !document.querySelector('.p-howto')")
+              and "Do this one on the Mac in Lightroom Classic" in wd.text(".p-desktop-box")
+              and "2026/2026-10-01" in wd.text(".p-desktop-box") and "DSC05036.ARW" in wd.text(".p-desktop-box")
+              and "Enhance › Denoise" in wd.text(".p-kind"),
+              "Practice Needs Desktop detail has no download button")
+        wd.click(".p-companion-link")
+        wd.wait("document.querySelector('.p-download')")
+        check(wd.js("const l=document.querySelector('.p-kind .p-pair-link'); return !!l && l.getAttribute('href')=='#smoke-aurora' && "
+                    "l.textContent.includes('Full desktop version')")
+              and "On the go version of a Needs Desktop challenge." in wd.text(".p-kind") and wd.js("return !!document.querySelector('.p-howto')"),
+              "Practice companion detail links back to the desktop version")
         wd.go(app)
         wd.wait("document.querySelectorAll('.year').length > 10")
         if a.desktop:
