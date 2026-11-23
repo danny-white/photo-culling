@@ -1114,7 +1114,9 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         top_ = int(min(max(cy - h / 2, 0), H - h))
         buf = io.BytesIO()
         with perf.stage("encode"):
-            im.crop((left, top_, left + w, top_ + h)).save(buf, "JPEG", quality=88)
+            # Quality 80: a third smaller than 88 (317 KB to 215 KB for a 1200 px tile), with no
+            # difference you can see at 1:1; the transfer to the phone is most of a zoom's wait.
+            im.crop((left, top_, left + w, top_ + h)).save(buf, "JPEG", quality=80)
         resp = Response(buf.getvalue(), mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "max-age=3600"
         resp.headers["X-Crop-Box"] = f"{left},{top_},{w},{h} of {W}x{H}"

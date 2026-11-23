@@ -37,6 +37,8 @@ struct ViewerPage: View {
     @State private var started = ContinuousClock.now
 
     private var plan: TilePlan { zoom.plan(screenScale: Double(displayScale)) }
+    /// Full-resolution tiles fetched at once when zoomed in.
+    private static let tilesAtOnce = 3
 
     init(
         photo: Photo, viewer: ViewerModel, viewport: CGSize, viewURL: URL, thumbURL: URL,
@@ -239,20 +241,25 @@ struct ViewerPage: View {
         let client = services.client
         let loader = services.loader
         let id = photo.id
+        // Nearest the middle of the screen first (TilePlanner's order), three at a time, so the
+        // spot you are looking at sharpens before the edges instead of every tile sharing the
+        // connection at once.
         let missing = wanted.filter { tiles[$0.id] == nil }
+        let fetch: @Sendable (Tile) async -> (String, LoadedImage?) = { tile in
+            let url = client.cropURL(
+                id: id, centerX: tile.centerX, centerY: tile.centerY,
+                width: Double(tile.width), height: Double(tile.height))
+            return (tile.id, await ImagePipeline.load(url, maxPixel: ImagePixels.tile, loader: loader))
+        }
         await withTaskGroup(of: (String, LoadedImage?).self) { group in
-            for tile in missing {
-                let url = client.cropURL(
-                    id: id, centerX: tile.centerX, centerY: tile.centerY,
-                    width: Double(tile.width), height: Double(tile.height))
-                let key = tile.id
-                group.addTask {
-                    let loaded = await ImagePipeline.load(url, maxPixel: ImagePixels.tile, loader: loader)
-                    return (key, loaded)
-                }
+            var queue = missing.makeIterator()
+            for _ in 0..<Self.tilesAtOnce {
+                guard let tile = queue.next() else { break }
+                group.addTask { await fetch(tile) }
             }
             for await (key, loaded) in group {
                 if let loaded { tiles[key] = loaded.image }
+                if let tile = queue.next() { group.addTask { await fetch(tile) } }
             }
         }
     }
