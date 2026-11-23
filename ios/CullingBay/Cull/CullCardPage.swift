@@ -7,7 +7,9 @@ import UIKit
 ///
 /// - Drag up past 80 pt keeps a single, with a KEEP stamp fading in; on a burst it chooses
 ///   (CHOOSE) and the card springs back while the picker opens. Drag down rejects.
-/// - Drag sideways 70 pt or more browses to the next (left) or previous (right) stack.
+/// - Drag sideways 70 pt or more browses to the next (left) or previous (right) stack: the card
+///   slides off that side first, so it is gone before the next one comes in (it used to spring
+///   back while the next faded in over it). On the first stack a swipe back springs back.
 /// - A shorter drag springs back. A single tap hides or shows the controls. A double tap opens
 ///   the 1:1 focus check, at the camera's AF point or where you tapped.
 ///
@@ -24,6 +26,8 @@ struct CullCardPage: View {
     let onToggleChrome: () -> Void
     let onDecide: (CullAction) -> Void
     let onBrowse: (Int) -> Void
+    /// There is a stack before this one, so a swipe back goes somewhere.
+    let canGoPrevious: Bool
     /// A double tap, as fractions of the photo.
     let onFocus: (Point) -> Void
 
@@ -39,11 +43,13 @@ struct CullCardPage: View {
     /// The card is leaving after a swipe, so no other gesture counts.
     @State private var flying: CullAction?
     @State private var flightFade = 1.0
+    /// The card is sliding off sideways after a browse swipe.
+    @State private var sliding = false
 
     init(
         card: CullCard, viewURL: URL, thumbURL: URL, chrome: Bool,
         onToggleChrome: @escaping () -> Void, onDecide: @escaping (CullAction) -> Void,
-        onBrowse: @escaping (Int) -> Void, onFocus: @escaping (Point) -> Void
+        onBrowse: @escaping (Int) -> Void, canGoPrevious: Bool = true, onFocus: @escaping (Point) -> Void
     ) {
         self.card = card
         self.viewURL = viewURL
@@ -52,6 +58,7 @@ struct CullCardPage: View {
         self.onToggleChrome = onToggleChrome
         self.onDecide = onDecide
         self.onBrowse = onBrowse
+        self.canGoPrevious = canGoPrevious
         self.onFocus = onFocus
         // What swiping to a card prefetched is on screen in the first frame.
         let full = DecodedImageCache.shared.image(for: viewURL, maxPixel: ImagePixels.view)
@@ -74,11 +81,11 @@ struct CullCardPage: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .gesture(taps(photo: photoRect(fit: fit, in: geometry.size, edge: edge)))
-            .gesture(drag(stageHeight: geometry.size.height))
+            .gesture(drag(stage: geometry.size))
         }
         .onChange(of: isTouching) { _, touching in
             // A drag the system cut short never calls `onEnded`; the card still has to come back.
-            if !touching && flying == nil { settle() }
+            if !touching && flying == nil && !sliding { settle() }
         }
         .task(id: viewURL) { await loadFullSize() }
         .task(id: thumbURL) { await loadThumb() }
@@ -215,11 +222,11 @@ struct CullCardPage: View {
 
     // MARK: Gestures
 
-    private func drag(stageHeight: CGFloat) -> some Gesture {
+    private func drag(stage: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .updating($isTouching) { _, state, _ in state = true }
             .onChanged { value in
-                guard flying == nil else { return }
+                guard flying == nil, !sliding else { return }
                 let dx = value.translation.width, dy = value.translation.height
                 if lockedAxis == nil {
                     lockedAxis = abs(dx) > abs(dy) ? .horizontal : .vertical
@@ -229,7 +236,7 @@ struct CullCardPage: View {
                     ? CGSize(width: 0, height: dy) : CGSize(width: dx * 0.7, height: 0)
             }
             .onEnded { value in
-                guard flying == nil else { return }
+                guard flying == nil, !sliding else { return }
                 let dx = value.translation.width, dy = value.translation.height
                 let axis = lockedAxis
                 lockedAxis = nil
@@ -239,12 +246,11 @@ struct CullCardPage: View {
                     settle()
                     onDecide(.choose)
                 case .vertical where dy <= -Self.decideDistance:
-                    fly(.keep, from: stageHeight)
+                    fly(.keep, from: stage.height)
                 case .vertical where dy >= Self.decideDistance:
-                    fly(.reject, from: stageHeight)
-                case .horizontal where abs(dx) >= Self.browseDistance:
-                    onBrowse(dx < 0 ? 1 : -1)
-                    settle()
+                    fly(.reject, from: stage.height)
+                case .horizontal where abs(dx) >= Self.browseDistance && (dx < 0 || canGoPrevious):
+                    slide(dx < 0 ? 1 : -1, across: stage.width)
                 default:
                     settle()
                 }
@@ -256,13 +262,13 @@ struct CullCardPage: View {
     private func taps(photo: CGRect) -> some Gesture {
         SpatialTapGesture(count: 2)
             .onEnded { value in
-                guard flying == nil else { return }
+                guard flying == nil, !sliding else { return }
                 let rect = Rect(
                     x: Double(photo.minX), y: Double(photo.minY), width: Double(photo.width), height: Double(photo.height))
                 onFocus(CullFocusModel.imagePoint(x: Double(value.location.x), y: Double(value.location.y), in: rect))
             }
             .exclusively(before: TapGesture().onEnded {
-                guard flying == nil else { return }
+                guard flying == nil, !sliding else { return }
                 if loadFailed { retry() } else { onToggleChrome() }
             })
     }
@@ -294,6 +300,30 @@ struct CullCardPage: View {
                 dragOffset = .zero
                 flightFade = 1
                 flying = nil
+            }
+        }
+    }
+
+    /// Slides the card off the side it was swiped towards (left for the next stack), then
+    /// browses. The new card is made with its own `.id`, so this one is gone by then; if the
+    /// browse went nowhere it comes straight back.
+    private func slide(_ delta: Int, across width: CGFloat) {
+        guard !reduceMotion else {
+            onBrowse(delta)
+            settle()
+            return
+        }
+        sliding = true
+        lockedAxis = nil
+        withAnimation(.easeIn(duration: 0.1), completionCriteria: .logicallyComplete) {
+            dragOffset = CGSize(width: -CGFloat(delta) * width * 1.05, height: 0)
+        } completion: {
+            onBrowse(delta)
+            var instant = Transaction()
+            instant.disablesAnimations = true
+            withTransaction(instant) {
+                dragOffset = .zero
+                sliding = false
             }
         }
     }

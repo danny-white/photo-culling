@@ -81,6 +81,7 @@ struct CullCardsView: View {
                     onToggleChrome: toggleChrome,
                     onDecide: { decide(card.stack.id, $0) },
                     onBrowse: browse,
+                    canGoPrevious: session.cursor > 0,
                     onFocus: { session.openFocus(tapped: $0) })
                     .id(card.frame.id)
                     .transition(transition)
