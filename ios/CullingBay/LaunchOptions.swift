@@ -21,6 +21,10 @@ enum LaunchOptions {
         UserDefaults.standard.string(forKey: "CBStartTab") == "cull"
     }
 
+    /// `-CBOpenSendAll 1` opens the Cull tab's Send all sheet once the days have loaded (it sends
+    /// nothing until tapped).
+    static var openSendAll: Bool { UserDefaults.standard.bool(forKey: "CBOpenSendAll") }
+
     static var startsOnPractice: Bool {
         UserDefaults.standard.string(forKey: "CBStartTab") == "practice"
     }

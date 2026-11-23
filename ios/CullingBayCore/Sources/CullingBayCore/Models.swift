@@ -26,6 +26,9 @@ public struct Day: Codable, Sendable, Hashable, Identifiable {
     public let lrDone: Int
     public let finished: Bool
     public let sentAt: String?
+    /// Decisions not yet sent to Lightroom (draft, or missing from the last sync); nil from a
+    /// server older than the Send all sheet.
+    public let unsent: Int?
 
     public var id: String { day }
 
@@ -36,7 +39,7 @@ public struct Day: Codable, Sendable, Hashable, Identifiable {
         day: String, folder: String, date: String? = nil, frames: Int, stacks: Int,
         thumbs: [Int], lastTs: Double, place: String? = nil, places: [String],
         gpsFrames: Int, summary: String? = nil, decided: Int, sent: Int, landed: Int,
-        conflicts: Int, lrDone: Int, finished: Bool, sentAt: String? = nil
+        conflicts: Int, lrDone: Int, finished: Bool, sentAt: String? = nil, unsent: Int? = nil
     ) {
         self.day = day
         self.folder = folder
@@ -56,6 +59,7 @@ public struct Day: Codable, Sendable, Hashable, Identifiable {
         self.lrDone = lrDone
         self.finished = finished
         self.sentAt = sentAt
+        self.unsent = unsent
     }
 
     enum CodingKeys: String, CodingKey {
@@ -67,6 +71,7 @@ public struct Day: Codable, Sendable, Hashable, Identifiable {
         case lrDone = "lr_done"
         case finished
         case sentAt = "sent_at"
+        case unsent
     }
 }
 

@@ -498,7 +498,7 @@ class MobileApi(unittest.TestCase):
     DAY = {"day": str, "folder": str, "date": (str, None), "frames": int, "stacks": int, "thumbs": list,
            "last_ts": (int, float), "place": (str, None), "places": list, "gps_frames": int,
            "summary": (str, None), "decided": int, "sent": int, "landed": int, "conflicts": int,
-           "lr_done": int, "finished": bool, "sent_at": (str, None)}
+           "lr_done": int, "finished": bool, "sent_at": (str, None), "unsent": int}
     PHOTO = {"id": int, "day": str, "date": (str, None), "ts": ((int, float), None), "file": str,
              "bytes": (int, None), "camera": (str, None), "lens": (str, None), "caption": (str, None),
              "place": (str, None), "stars": int, "picked": bool, "rejected": bool, "raw": bool}
@@ -712,6 +712,40 @@ class MobileApi(unittest.TestCase):
         self.assertIsNone(day["progress"])
         self.assertFalse((self.inbox / "cull-decisions.tsv").exists())
         self.assertEqual(post(f"/m/api/day/{DAY}/reset", {}).get_json(), {"ok": True, "cleared": 0, "withdrawn": 0})
+
+    def test_send_several_days_at_once(self):
+        self.addCleanup(self.wipe)
+        self.wipe()
+        other = "2026/2026-08-09"
+        con = self.anno()
+        try:
+            for day in (DAY, other):
+                path = self.db_ro().execute(
+                    "SELECT path FROM images WHERE path LIKE ? AND lower(filename) LIKE '%.arw' ORDER BY rowid LIMIT 1",
+                    (f"%/{day}/%",)).fetchone()[0]
+                con.execute("INSERT INTO cull_decisions(path, day, flag, stars, note, via, decided_at, state) "
+                            "VALUES (?,?,?,?,?,?,?,?)", (path, day, "pick", None, "", "test", "2026-11-23T00:00:00", "draft"))
+            con.commit()
+        finally:
+            con.close()
+        listed = {d["day"]: d for d in self.client.get("/m/api/days").get_json()["days"]}
+        self.assertEqual((listed[DAY]["unsent"], listed[other]["unsent"]), (1, 1))
+        r = self.client.post("/m/api/send", json={"days": [DAY, other, DAY]}, headers=self.H)
+        body = r.get_json()
+        self.assertEqual((r.status_code, body["ok"], body["queued"]), (200, True, 2))
+        self.assertEqual(body["days"], [{"day": DAY, "queued": 1}, {"day": other, "queued": 1}])
+        listed = {d["day"]: d for d in self.client.get("/m/api/days").get_json()["days"]}
+        self.assertEqual((listed[DAY]["unsent"], listed[other]["unsent"]), (0, 0))
+        self.assertTrue(listed[DAY]["sent_at"] and listed[other]["sent_at"])
+        rows = (self.inbox / "cull-decisions.tsv").read_text()
+        self.assertIn("2026-10-01\t", rows)
+        self.assertIn("2026-08-09\t", rows)
+        # bad bodies, an unknown day, and the header
+        for bad in ({}, {"days": []}, {"days": "x"}, {"days": [1]}):
+            self.assertEqual(self.client.post("/m/api/send", json=bad, headers=self.H).status_code, 400)
+        r = self.client.post("/m/api/send", json={"days": [DAY, "1999/1999-01-01"]}, headers=self.H)
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self.client.post("/m/api/send", json={"days": [DAY]}).status_code, 403)
 
     def test_contract_cull_send_before_any_progress_leaves_progress_null(self):
         self.addCleanup(self.wipe)

@@ -281,6 +281,9 @@ public final class CullDaysModel {
 
     // MARK: Rows
 
+    /// The days with decisions not yet sent to Lightroom, newest first: Send all's list.
+    public var unsentDays: [Day] { days.filter { CullSendAllModel.unsent($0) > 0 } }
+
     private func row(_ day: Day, hit: DayMatch? = nil, query: String = "") -> CullDayRow {
         let percent = day.frames > 0
             ? Int((Double(day.decided) / Double(day.frames) * 100).rounded()) : 0

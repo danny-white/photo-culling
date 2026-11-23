@@ -9,6 +9,8 @@ struct CullDaysView: View {
     @Environment(\.openURL) private var openURL
 
     private var model: CullDaysModel { services.cullDays }
+    @State private var sendAll: CullSendAllLaunch?
+    @State private var openingSendAll = false
 
     var body: some View {
         @Bindable var days = services.cullDays
@@ -37,7 +39,59 @@ struct CullDaysView: View {
                 }
             }
         }
-        .task { await days.load() }
+        .task {
+            await days.load()
+            if LaunchOptions.openSendAll && sendAll == nil { openSendAll() }
+        }
+        .sheet(item: $sendAll) { launch in
+            CullSendAllView(model: launch.model, onSent: { await services.cullDays.refresh() })
+        }
+    }
+
+    // MARK: Send all
+
+    /// Send to Lightroom for every day with decisions not yet sent; shown when there are some.
+    @ViewBuilder
+    private var sendAllRow: some View {
+        let waiting = model.unsentDays
+        if !waiting.isEmpty {
+            Button { openSendAll() } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Send to Lightroom").font(.subheadline.weight(.semibold))
+                        Text("\(waiting.count) day" + (waiting.count == 1 ? "" : "s") + " with decisions not sent yet")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if openingSendAll {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(12)
+                .background(CullStyle.panel, in: RoundedRectangle(cornerRadius: 12))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(openingSendAll)
+            .padding(.top, 8)
+        }
+    }
+
+    /// Fresh counts first, so the sheet lists what is really waiting.
+    private func openSendAll() {
+        openingSendAll = true
+        Task {
+            await services.cullDays.refresh()
+            sendAll = CullSendAllLaunch(model: CullSendAllModel(
+                days: services.cullDays.unsentDays, client: services.client, queue: services.cullQueue))
+            openingSendAll = false
+        }
     }
 
     // MARK: Phases
@@ -74,6 +128,7 @@ struct CullDaysView: View {
                 .foregroundStyle(.secondary)
                 .padding(.vertical, 6)
         }
+        sendAllRow
         if !model.inProgress.isEmpty {
             sectionLabel("In progress")
             rows(model.inProgress)

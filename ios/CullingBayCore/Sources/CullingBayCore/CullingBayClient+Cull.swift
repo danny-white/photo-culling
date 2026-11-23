@@ -78,6 +78,12 @@ extension CullingBayClient {
 
     /// Queues the day's unsent decisions for the next Lightroom sync. Throws `.unavailable` when
     /// the inbox share isn't mounted on the PC.
+    /// `POST /m/api/send`: Send to Lightroom for these days in one write to the inbox.
+    public func sendDays(_ days: [String]) async throws -> SendAllResult {
+        struct Body: Encodable, Sendable { let days: [String] }
+        return try await writeJSON(method: "POST", path: "/m/api/send", body: Body(days: days), staling: .allDays)
+    }
+
     public func send(day: String) async throws -> SendResult {
         try await writeJSON(
             method: "POST", path: "/m/api/day/\(day)/send", body: EmptyBody(), staling: .day(day))

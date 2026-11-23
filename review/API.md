@@ -36,6 +36,7 @@ facts as `cache;desc="hit"`). The app can report its own measurements to `POST /
 | `summary` | string? | One-line summary of the day |
 | `decided`, `sent`, `landed`, `conflicts`, `lr_done` | int | Cull progress (Cull tab) |
 | `finished` | bool | Day finished in the cull |
+| `unsent` | int | Decisions not yet sent to Lightroom: draft, or missing from the last sync |
 | `sent_at` | string? | When the day was last sent to Lightroom |
 
 ## Gallery
@@ -261,6 +262,11 @@ decisions for the next Lightroom sync (they become `queued`). `queued` is the nu
 rows written to the inbox file, which counts pair partners too. Both are 0 when nothing was new, and that
 is still `ok`. Also stamps `sent_at` on the day. `503 {error}` when the inbox share is not mounted; nothing is
 sent. The web app waits for its own queued writes to land first, so the day is sent whole.
+
+**`POST /m/api/send`**: body `{days: [day, ...]}` → `{ok: true, queued, file_rows, days: [{day, queued}]}`.
+Send for several days at once (the Cull tab's Send all): the same as `day/<day>/send` for each, in one write to
+the inbox file, each day stamped `sent_at`. `400 {error}` unless `days` is a non-empty list of strings; `404
+{error}` naming an unknown day (nothing is sent); `503 {error}` when the inbox share is not mounted.
 
 **`POST /m/api/day/<day>/reset`**: body `{}` → `{ok: true, cleared, withdrawn}`. Clears all the day's decisions,
 progress and finished flag, and takes `queued` rows back out of the inbox file (`withdrawn` counts file rows).

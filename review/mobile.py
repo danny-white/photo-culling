@@ -782,9 +782,10 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         refresh_days()
         con = anno_db()
         try:
-            decided = {r["day"]: (r["n"], r["sent"], r["landed"], r["conflicts"]) for r in con.execute(
+            decided = {r["day"]: (r["n"], r["sent"], r["landed"], r["conflicts"], r["unsent"]) for r in con.execute(
                 "SELECT day, COUNT(*) n, SUM(state!='draft') sent, SUM(state='landed') landed, "
-                "SUM(state='conflict') conflicts FROM cull_decisions GROUP BY day")}
+                "SUM(state='conflict') conflicts, SUM(state IN ('draft','missing')) unsent "
+                "FROM cull_decisions GROUP BY day")}
             days_state = {r["day"]: dict(r) for r in con.execute("SELECT * FROM cull_days")}
             # what you did in Lightroom: a reject flag rejects; a pick flag or any star rating
             # (without a reject) means you have already been through the photo
@@ -797,13 +798,13 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             con.close()
         out = []
         for d in cache["days"]:
-            n, sent, landed, conflicts = decided.get(d["day"], (0, 0, 0, 0))
+            n, sent, landed, conflicts, unsent = decided.get(d["day"], (0, 0, 0, 0, 0))
             ds = days_state.get(d["day"], {})
             # a stack is culled in Lightroom when you picked a frame there, or rejected all of them
             lr_done = sum(1 for paths in cache["stack_paths"].get(d["day"], [])
                           if any(lr.get(p) == 1 for p in paths) or all(lr.get(p) == -1 for p in paths)) if lr else 0
             out.append(dict(d, decided=n, sent=sent, landed=landed, conflicts=conflicts, lr_done=lr_done,
-                            finished=bool(ds.get("finished_at")), sent_at=ds.get("sent_at")))
+                            finished=bool(ds.get("finished_at")), sent_at=ds.get("sent_at"), unsent=unsent))
         return jsonify({"days": out})
 
     @bp.route("/api/search")
@@ -1046,15 +1047,54 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                     return jsonify({"error": "no such day"}), 404
                 if problem:
                     return jsonify({"error": problem + "; nothing was sent"}), 503
-                todo = [dict(r) for r in con.execute(
-                    "SELECT * FROM cull_decisions WHERE day=? AND state IN ('draft','missing')", (day,))]
-                rows = queue_decisions(con, todo) if todo else 0
-                con.execute("""INSERT INTO cull_days(day, sent_at) VALUES (?,?)
-                               ON CONFLICT(day) DO UPDATE SET sent_at=excluded.sent_at""", (day, now_iso()))
+                queued, rows, _ = send_days(con, [day])
                 con.commit()
             finally:
                 con.close()
-        return jsonify({"ok": True, "queued": len(todo), "file_rows": rows})
+        return jsonify({"ok": True, "queued": queued, "file_rows": rows})
+
+    def send_days(con, days: list[str]) -> tuple[int, int, dict[str, int]]:
+        """Queue these days' unsent decisions (draft, or missing from the last sync) in one write
+        to the inbox file, and stamp each day sent. Returns (decisions, file rows, per day)."""
+        per_day, todo = {}, []
+        for day in days:
+            rows = [dict(r) for r in con.execute(
+                "SELECT * FROM cull_decisions WHERE day=? AND state IN ('draft','missing')", (day,))]
+            per_day[day] = len(rows)
+            todo += rows
+        file_rows = queue_decisions(con, todo) if todo else 0
+        at = now_iso()
+        con.executemany("""INSERT INTO cull_days(day, sent_at) VALUES (?,?)
+                           ON CONFLICT(day) DO UPDATE SET sent_at=excluded.sent_at""", [(d, at) for d in days])
+        return len(todo), file_rows, per_day
+
+    @bp.route("/api/send", methods=["POST"])
+    @guarded
+    def api_send_days():
+        """Send to Lightroom for several days at once (the Cull tab's Send all): one write to
+        the inbox file for every day listed."""
+        body = request.get_json(silent=True) or {}
+        days = body.get("days")
+        if not isinstance(days, list) or not days or len(days) > 1000 or not all(isinstance(d, str) for d in days):
+            return jsonify({"error": "days must be a non-empty list of day ids"}), 400
+        days = list(dict.fromkeys(days))
+        problem = inbox_problem()
+        if not problem:
+            ingest_receipts()
+        with lock:
+            con = anno_db()
+            try:
+                unknown = [d for d in days if not known_day(con, d)]
+                if unknown:
+                    return jsonify({"error": "no such day: " + ", ".join(unknown[:5])}), 404
+                if problem:
+                    return jsonify({"error": problem + "; nothing was sent"}), 503
+                queued, rows, per_day = send_days(con, days)
+                con.commit()
+            finally:
+                con.close()
+        return jsonify({"ok": True, "queued": queued, "file_rows": rows,
+                        "days": [{"day": d, "queued": per_day[d]} for d in days]})
 
     @bp.route("/api/day/<path:day>/reset", methods=["POST"])
     @guarded

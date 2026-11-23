@@ -468,6 +468,26 @@ public struct CullAck: Codable, Sendable, Hashable {
 }
 
 /// The answer to `send`.
+/// `POST /m/api/send`: Send to Lightroom for several days at once.
+public struct SendAllResult: Codable, Sendable, Hashable {
+    public struct DayResult: Codable, Sendable, Hashable {
+        public let day: String
+        public let queued: Int
+    }
+
+    public let ok: Bool
+    /// Decisions queued, all days together; 0 when nothing was new.
+    public let queued: Int
+    /// Rows written to the inbox file, counting pair partners.
+    public let fileRows: Int
+    public let days: [DayResult]
+
+    enum CodingKeys: String, CodingKey {
+        case ok, queued, days
+        case fileRows = "file_rows"
+    }
+}
+
 public struct SendResult: Codable, Sendable, Hashable {
     public let ok: Bool
     /// Decisions queued for the next Lightroom sync; 0 when nothing was new.
