@@ -5,6 +5,10 @@ import UIKit
 /// One photo in the viewer: the thumbnail at once, then the 1616 px picture, then the 3000 px
 /// picture once zoomed past that, then full-resolution tiles from `/m/api/crop` (decision N14).
 /// The gesture maths is `ViewerZoomModel`; this draws it.
+///
+/// A sideways swipe moves the viewer's whole strip (`stripOffset`, shared with the neighbouring
+/// photos `ViewerView` draws either side), so the next photo comes in with the finger. The page
+/// starts from the pictures already decoded, so it takes over from its neighbour without a gap.
 @MainActor
 struct ViewerPage: View {
     @Environment(AppServices.self) private var services
@@ -12,22 +16,53 @@ struct ViewerPage: View {
     let photo: Photo
     let viewer: ViewerModel
     @Binding var loadingHD: Bool
+    /// The strip's sideways offset while dragging; the viewer animates it on a page turn.
+    @Binding var stripOffset: CGFloat
+    /// There is a photo that way (1 is the next one).
+    let canPage: (Int) -> Bool
     /// Asks the viewer to move by one photo (1 is the next one).
     let onPage: (Int) -> Void
     let onClose: () -> Void
     let onTap: () -> Void
 
-    @State private var zoom = ViewerZoomModel()
+    @State private var zoom: ViewerZoomModel
     @State private var thumb: UIImage?
     @State private var sharp: UIImage?
     @State private var large: UIImage?
     @State private var tiles: [String: UIImage] = [:]
-    @State private var pageOffset = CGSize.zero
+    /// A drag down to close: the page follows the finger and fades.
+    @State private var closeOffset: CGFloat = 0
     @State private var isDragging = false
     @State private var isPinching = false
     @State private var started = ContinuousClock.now
 
     private var plan: TilePlan { zoom.plan(screenScale: Double(displayScale)) }
+
+    init(
+        photo: Photo, viewer: ViewerModel, viewport: CGSize, viewURL: URL, thumbURL: URL,
+        loadingHD: Binding<Bool>, stripOffset: Binding<CGFloat>, canPage: @escaping (Int) -> Bool,
+        onPage: @escaping (Int) -> Void, onClose: @escaping () -> Void, onTap: @escaping () -> Void
+    ) {
+        self.photo = photo
+        self.viewer = viewer
+        _loadingHD = loadingHD
+        _stripOffset = stripOffset
+        self.canPage = canPage
+        self.onPage = onPage
+        self.onClose = onClose
+        self.onTap = onTap
+        // What the strip already showed of this photo is on screen in the first frame.
+        let sharp = DecodedImageCache.shared.image(for: viewURL, maxPixel: ImagePixels.view)
+        let thumb = sharp == nil ? DecodedImageCache.shared.image(for: thumbURL, maxPixel: ImagePixels.thumb) : nil
+        let zoom = ViewerZoomModel()
+        zoom.resize(Size(width: Double(viewport.width), height: Double(viewport.height)))
+        if let image = sharp ?? thumb {
+            zoom.setImageSize(Size(width: Double(image.size.width), height: Double(image.size.height)))
+        }
+        _zoom = State(initialValue: zoom)
+        _sharp = State(initialValue: sharp)
+        _thumb = State(initialValue: thumb)
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -38,8 +73,8 @@ struct ViewerPage: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .contentShape(Rectangle())
-            .offset(pageOffset)
-            .opacity(1 - min(max(pageOffset.height, 0) / 500, 0.7))
+            .offset(x: stripOffset, y: closeOffset)
+            .opacity(1 - min(max(closeOffset, 0) / 500, 0.7))
             .gesture(taps)
             .gesture(drag.simultaneously(with: magnify))
             .onAppear { zoom.resize(Size(width: geometry.size.width, height: geometry.size.height)) }
@@ -105,20 +140,27 @@ struct ViewerPage: View {
                 }
                 zoom.pan(Point(x: value.translation.width, y: value.translation.height))
                 guard !zoom.isZoomed, !isPinching else { return }
-                if abs(value.translation.width) >= abs(value.translation.height) {
-                    pageOffset = CGSize(width: value.translation.width, height: 0)
+                let dx = value.translation.width
+                if abs(dx) >= abs(value.translation.height) {
+                    // Past the first or last photo the strip only gives a little.
+                    stripOffset = canPage(dx < 0 ? 1 : -1) ? dx : dx * 0.3
+                    closeOffset = 0
                 } else {
-                    pageOffset = CGSize(width: 0, height: max(0, value.translation.height))
+                    stripOffset = 0
+                    closeOffset = max(0, value.translation.height)
                 }
             }
             .onEnded { value in
                 isDragging = false
                 let wasZoomed = zoom.isZoomed
                 let delta = zoom.endPan(Point(x: value.translation.width, y: value.translation.height))
-                withAnimation(.spring(duration: 0.25)) { pageOffset = .zero }
-                if delta != 0 {
-                    onPage(delta)
-                } else if !wasZoomed, value.translation.height > 110,
+                withAnimation(.spring(duration: 0.25)) { closeOffset = 0 }
+                if delta != 0 && canPage(delta) {
+                    onPage(delta)       // the viewer slides the strip on and swaps the photo
+                    return
+                }
+                withAnimation(.spring(duration: 0.25)) { stripOffset = 0 }
+                if !wasZoomed, value.translation.height > 110,
                           value.translation.height > abs(value.translation.width) {
                     onClose()
                 }
@@ -152,6 +194,7 @@ struct ViewerPage: View {
 
     private func loadThumb() async {
         if let size = viewer.sourceSize(for: photo.id) { zoom.setSourceSize(size) }
+        guard thumb == nil, sharp == nil else { return }
         let url = services.client.imageURL(id: photo.id, size: .thumb)
         guard let loaded = await ImagePipeline.load(url, maxPixel: ImagePixels.thumb, loader: services.loader)
         else { return }

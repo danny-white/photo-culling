@@ -1,5 +1,6 @@
 import CullingBayCore
 import SwiftUI
+import UIKit
 
 /// Full-screen paging over a results screen's photos. State lives in `ViewerModel`; each photo is
 /// a `ViewerPage` that does the loading and zooming. Mirrors the viewer in `gallery.js`.
@@ -11,6 +12,12 @@ struct ViewerView: View {
     @State private var showsInfo = true
     @State private var loadingHD = false
     @State private var export: ExportLaunch?
+    /// The strip of photos (previous, current, next) is this far off centre while you swipe.
+    @State private var stripOffset: CGFloat = 0
+    /// A page turn is sliding the strip; the swap happens when it ends.
+    @State private var turning = false
+    /// Black between neighbouring photos while they slide, as in Photos.
+    private static let gap: CGFloat = 16
     /// Pushes a results screen (Similar, Whole day) once the viewer has closed.
     let onOpen: (FeedModel.Source) -> Void
 
@@ -25,13 +32,7 @@ struct ViewerView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if let photo = viewer.current {
-                ViewerPage(
-                    photo: photo, viewer: viewer, loadingHD: $loadingHD,
-                    onPage: page, onClose: { dismiss() }, onTap: toggleInfo)
-                    .id(photo.id)
-                    .transition(.opacity)
-            }
+            strip
             if showsInfo {
                 VStack(spacing: 0) {
                     topBar
@@ -47,6 +48,45 @@ struct ViewerView: View {
         .sheet(item: $export) { launch in
             ExportSheet(launch: launch)
         }
+    }
+
+    // MARK: Strip
+
+    /// The current photo with its neighbours either side, one screen width (plus the gap) apart,
+    /// all moved by `stripOffset`, so the next photo slides in with the finger.
+    private var strip: some View {
+        GeometryReader { geometry in
+            let pitch = geometry.size.width + Self.gap
+            ZStack {
+                ForEach([-1, 1], id: \.self) { side in
+                    if let photo = neighbour(at: viewer.index + side) {
+                        ViewerNeighbour(
+                            photo: photo,
+                            viewURL: services.client.imageURL(id: photo.id, size: .view),
+                            thumbURL: services.client.imageURL(id: photo.id, size: .thumb))
+                            .id(photo.id)
+                            .offset(x: CGFloat(side) * pitch + stripOffset)
+                    }
+                }
+                if let photo = viewer.current {
+                    ViewerPage(
+                        photo: photo, viewer: viewer, viewport: geometry.size,
+                        viewURL: services.client.imageURL(id: photo.id, size: .view),
+                        thumbURL: services.client.imageURL(id: photo.id, size: .thumb),
+                        loadingHD: $loadingHD, stripOffset: $stripOffset,
+                        canPage: { neighbour(at: viewer.index + $0) != nil },
+                        onPage: { turn($0, pitch: pitch) }, onClose: { dismiss() }, onTap: toggleInfo)
+                        .id(photo.id)
+                        .allowsHitTesting(!turning)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func neighbour(at index: Int) -> Photo? {
+        viewer.photos.indices.contains(index) ? viewer.photos[index] : nil
     }
 
     // MARK: Chrome
@@ -128,8 +168,25 @@ struct ViewerView: View {
         withAnimation(.easeInOut(duration: 0.2)) { showsInfo.toggle() }
     }
 
-    private func page(_ delta: Int) {
-        withAnimation(.easeOut(duration: 0.15)) { _ = viewer.step(delta) }
+    /// Slides the strip the rest of the way, then makes the neighbour the current photo with no
+    /// animation, so it takes over where it already is.
+    private func turn(_ delta: Int, pitch: CGFloat) {
+        guard !turning, neighbour(at: viewer.index + delta) != nil else {
+            withAnimation(.spring(duration: 0.25)) { stripOffset = 0 }
+            return
+        }
+        turning = true
+        withAnimation(.easeOut(duration: 0.18), completionCriteria: .logicallyComplete) {
+            stripOffset = -CGFloat(delta) * pitch
+        } completion: {
+            var instant = Transaction()
+            instant.disablesAnimations = true
+            withTransaction(instant) {
+                _ = viewer.step(delta)
+                stripOffset = 0
+            }
+            turning = false
+        }
     }
 
     private func open(_ source: FeedModel.Source) {
@@ -145,6 +202,50 @@ struct ViewerView: View {
         await withTaskGroup(of: Void.self) { group in
             for url in urls {
                 group.addTask { _ = try? await loader.data(for: url) }
+            }
+        }
+    }
+}
+
+/// A photo beside the current one in the strip: just the picture at fit size, the 1616 px one
+/// when it is decoded (the viewer prefetches it), else the thumbnail. It takes no touches.
+private struct ViewerNeighbour: View {
+    @Environment(AppServices.self) private var services
+    let photo: Photo
+    let viewURL: URL
+    let thumbURL: URL
+    @State private var image: UIImage?
+    @State private var isSharp: Bool
+
+    init(photo: Photo, viewURL: URL, thumbURL: URL) {
+        self.photo = photo
+        self.viewURL = viewURL
+        self.thumbURL = thumbURL
+        let sharp = DecodedImageCache.shared.image(for: viewURL, maxPixel: ImagePixels.view)
+        _image = State(initialValue: sharp ?? DecodedImageCache.shared.image(for: thumbURL, maxPixel: ImagePixels.thumb))
+        _isSharp = State(initialValue: sharp != nil)
+    }
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .task(id: photo.id) {
+            guard !isSharp else { return }
+            if image == nil, let thumb = await ImagePipeline.load(
+                thumbURL, maxPixel: ImagePixels.thumb, loader: services.loader) {
+                if !isSharp { image = thumb.image }
+            }
+            if let sharp = await ImagePipeline.load(viewURL, maxPixel: ImagePixels.view, loader: services.loader) {
+                image = sharp.image
+                isSharp = true
             }
         }
     }
