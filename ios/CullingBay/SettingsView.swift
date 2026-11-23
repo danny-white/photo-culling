@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(AppServices.self) private var services
     @Environment(\.dismiss) private var dismiss
     @State private var model: ServerSettingsModel
+    @AppStorage(CullPreferences.showAFPoint) private var showAF = false
 
     init(url: URL) {
         _model = State(initialValue: ServerSettingsModel(url: url))
@@ -26,6 +27,13 @@ struct SettingsView: View {
                     Text("Server address")
                 } footer: {
                     Text("The photo server on your PC, reached over Tailscale. The PC must be on and in Ubuntu.")
+                }
+                Section {
+                    Toggle("Show the AF point", isOn: $showAF)
+                } header: {
+                    Text("Cull")
+                } footer: {
+                    Text("A yellow box where the camera focused, on the card, in the burst picker and in the 1:1 check. Changes at once; Save isn't needed.")
                 }
                 Section {
                     Button("Check connection") { Task { await model.check() } }

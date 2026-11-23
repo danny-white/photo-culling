@@ -1,7 +1,7 @@
 /* Culling Bay Mobile service worker: keeps the app shell available offline. Photos and API
    calls always go to the server (the app's own queue handles saving while offline). Browsers
    only run service workers over HTTPS, so this does nothing on plain http. */
-const SHELL = 'cbm-shell-v4';
+const SHELL = 'cbm-shell-v5';
 const FILES = ['/m/', '/m/app.css', '/m/app.js', '/m/wide.js', '/m/desktop.css', '/m/perf-client.js', '/m/manifest.webmanifest', '/m/icon-192.png', '/m/apple-touch-icon.png', '/m/practice.html', '/m/practice.css', '/m/practice.js'];
 
 self.addEventListener('install', e => {

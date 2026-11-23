@@ -151,6 +151,7 @@ private struct CullFocusPage: View {
     @Binding var placed: Bool
     let onStep: (Int) -> Void
     let onClose: () -> Void
+    @AppStorage(CullPreferences.showAFPoint) private var showAF = false
 
     private let viewURL: URL
     private let thumbURL: URL
@@ -236,7 +237,7 @@ private struct CullFocusPage: View {
     /// it sits outside the scaled picture.
     @ViewBuilder
     private var afBox: some View {
-        if let af = frame.afPoint, haveImage {
+        if showAF, let af = frame.afPoint, haveImage {
             let fit = zoom.fitSize
             let width = fit.width * zoom.scale, height = fit.height * zoom.scale
             let box = width * CullFocusModel.afBoxWidth

@@ -157,14 +157,28 @@ enum CullAction {
     var tint: Color { self == .reject ? .red : .green }
 }
 
+/// Settings the Cull tab keeps on the phone.
+enum CullPreferences {
+    /// Whether to draw the camera's AF point as a box on the photo. Off unless turned on in
+    /// Settings (Danny found the yellow box distracting). The 1:1 focus check still opens at the
+    /// AF point either way.
+    static let showAFPoint = "cullShowAFPoint"
+}
+
 /// The camera's autofocus point: a small yellow box, 9% of the photo's width and three to two
 /// (`.af` in `app.css`), centred on the point. Sized by the photo it sits over, so put it in an
-/// overlay of the photo itself, not of a box with bars around it.
+/// overlay of the photo itself, not of a box with bars around it. Draws nothing while
+/// `CullPreferences.showAFPoint` is off.
 struct CullAFBoxView: View {
     /// Fractions of the photo.
     let point: Point
+    @AppStorage(CullPreferences.showAFPoint) private var showAF = false
 
     var body: some View {
+        if showAF { box }
+    }
+
+    private var box: some View {
         GeometryReader { geometry in
             let width = geometry.size.width * CullFocusModel.afBoxWidth
             Rectangle()

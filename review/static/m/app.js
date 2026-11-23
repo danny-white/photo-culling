@@ -395,6 +395,9 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} };
 const recall = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (_) { return d; } };
 S.dayView = recall('cbm-dayview', 'date');
+// The camera's AF point as a box on the photo: off unless you turn it on (the AF button on a card).
+S.showAF = recall('cbm-show-af', false);
+document.documentElement.classList.toggle('hide-af', !S.showAF);
 S.daySearch = '';
 S.yearsOpen = null;   // set of open years; the newest starts open
 const yearOf = d => d.day.slice(0, 4);
@@ -605,7 +608,7 @@ function vCull() {
   const band = wide() || ar >= 1 ? '<div class="band" id="band"><img alt="" draggable="false"><span class="bd">1:1 at ' +
     (f.af ? 'the AF point' : 'the centre') + '</span><span class="band-load">Decoding the RAW…</span></div>' : '';
   return top(backBtn('days', 'Days'), dayTitle(S.day), S.matches ? '' : togo,
-      '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>',
+      '<div class="tools"><button class="ico af-tgl" data-act="toggle-af" aria-pressed="' + S.showAF + '" aria-label="Show the camera’s AF point">AF</button><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button><button class="ico" data-act="info" aria-label="Photo details">' + IC.info + '</button></div>',
       S.matches ? '<button class="mchip" data-act="matches">' + S.matches.n + ' match' + (S.matches.n === 1 ? '' : 'es') + ' first</button> · ' + left + ' to go' : '') +
     '<div class="prog"><i style="width:' + (doneCount() / n * 100).toFixed(1) + '%"></i></div>' + budgetBar() +
     '<div class="stage' + (band ? ' has-band' : '') + '" id="stage"><div class="' + cls + '"' + (ar < 1 ? '' : ' style="aspect-ratio:' + ar.toFixed(4) + '"') + '>' +
@@ -1509,6 +1512,11 @@ document.addEventListener('click', e => {
     case 'keep-all': return flyOut('all');
     case 'undo': return undo();
     case 'info': return openSheet();
+    case 'toggle-af':
+      S.showAF = !S.showAF; store('cbm-show-af', S.showAF);
+      document.documentElement.classList.toggle('hide-af', !S.showAF);
+      document.querySelectorAll('.af-tgl').forEach(x => x.setAttribute('aria-pressed', S.showAF));
+      return toast(S.showAF ? 'Showing the camera’s AF point' : 'AF point hidden');
     case 'close-sheet': return closeSheet();
     case 'close-focus': return closeFocus();
     case 'grid':                       // the toggle: into the grid, and back to where you were

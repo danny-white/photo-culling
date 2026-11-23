@@ -63,6 +63,9 @@ button{font:inherit;color:inherit}
 /* where the camera focused, and the RAW at 1:1 there in the space under a landscape photo */
 .af{position:absolute;width:9%;aspect-ratio:3/2;transform:translate(-50%,-50%);border:2px solid var(--hint);border-radius:2px;box-shadow:0 0 0 1px rgba(0,0,0,.45);pointer-events:none;transition:opacity .2s}
 #view.no-chrome .af{opacity:0}
+html.hide-af .af{display:none}
+.af-tgl{font:700 11px/1 var(--body);color:var(--muted);letter-spacing:.02em}
+.af-tgl[aria-pressed="true"]{color:var(--hint)}
 .stage.has-band{justify-content:flex-start;gap:6px}
 .stage.has-band .fname{display:none}
 .stage.has-band .card.is-stack{margin-top:14px}
