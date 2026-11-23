@@ -165,6 +165,25 @@ enum CullPreferences {
     static let showAFPoint = "cullShowAFPoint"
 }
 
+/// The AF button at the top right of a card, as on the web: shows or hides the AF box. Yellow
+/// when on. The same setting as the switch in Settings.
+struct CullAFToggle: View {
+    @AppStorage(CullPreferences.showAFPoint) private var showAF = false
+
+    var body: some View {
+        Button { showAF.toggle() } label: {
+            Text("AF")
+                .font(.caption.weight(.bold))
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .foregroundStyle(showAF ? Color.yellow : Color.secondary)
+        .accessibilityLabel("Show the camera’s AF point")
+        .accessibilityValue(showAF ? "On" : "Off")
+        .sensoryFeedback(.selection, trigger: showAF)
+    }
+}
+
 /// The camera's autofocus point: a small yellow box, 9% of the photo's width and three to two
 /// (`.af` in `app.css`), centred on the point. Sized by the photo it sits over, so put it in an
 /// overlay of the photo itself, not of a box with bars around it. Draws nothing while

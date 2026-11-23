@@ -59,6 +59,7 @@ struct CullCardsView: View {
                     Text(session.toGoText)
                 }
             }
+            .overlay(alignment: .trailing) { CullAFToggle().padding(.trailing, 8) }
             CullProgressBar(fraction: session.progressFraction)
             if let bar = session.budgetBar {
                 CullBudgetBarView(bar: bar)
