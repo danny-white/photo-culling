@@ -6,11 +6,14 @@ review server already owns. Stack rules live in stacks.py.
 """
 from __future__ import annotations
 
+import collections
+import contextlib
 import fcntl
 import functools
 import hashlib
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,6 +34,8 @@ import previews
 import search
 import stacks
 
+log = logging.getLogger(__name__)
+
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 LIBRARY_ROOT = "/mnt/passport/Pictures"
@@ -46,8 +51,10 @@ IMG_EDGE = {"thumb": 320, "view": 1616}   # 1616 = the embedded preview's full w
 DAYS_TTL_S = 30
 AS_IS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".heic": "image/heic", ".heif": "image/heif"}
 CROP_MAX = 2400          # longest side of a crop, in source pixels
-FULL_CACHE_FRAMES = 4    # full decodes kept in memory (~130 MB each for 42 MP)
-DECODES_AT_ONCE = 2
+FULL_CACHE_FRAMES = 8    # full decodes kept in memory (~130 MB each for 42 MP)
+DECODES_AT_ONCE = 2      # decodes someone is waiting for (a 1:1 check, an HD zoom, a save)
+WARM_WORKERS = 2         # decode-ahead: RAWs decoded in the background once their picture is asked for
+WARM_QUEUE = 4           # decode-ahead requests waiting; swiping fast drops the oldest
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cull_decisions(
@@ -153,11 +160,13 @@ def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
 
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
-                   ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None) -> Blueprint:
+                   ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
+                   raw_decoder=None) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
-    the narrow AICullInbox mount (tests turn it off and pass a temp dir)."""
+    the narrow AICullInbox mount (tests turn it off and pass a temp dir). raw_decoder(path) ->
+    PIL image replaces the rawpy decode (tests pass a fast fake)."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
     ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -170,6 +179,17 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     full_cache: dict[str, Image.Image] = {}          # path -> full-resolution decode, oldest first
     full_lock = threading.Lock()
     decode_slots = threading.Semaphore(DECODES_AT_ONCE)
+    decoding: dict[str, threading.Event] = {}         # path -> set when its decode has finished
+    ahead: set[str] = set()                           # decoded in the background, not yet used
+    warm_pending: collections.deque[str] = collections.deque(maxlen=WARM_QUEUE)
+    warm_cond = threading.Condition()
+
+    def decode_raw(path: Path) -> Image.Image:
+        if raw_decoder is not None:
+            return raw_decoder(path)
+        import rawpy
+        with rawpy.imread(str(path)) as raw:
+            return Image.fromarray(raw.postprocess(use_camera_wb=True))
     finder = search.Search(db_ro=db_ro, pc=pc, day_of=day_of, day_date=day_date, ollama_url=ollama_url,
                            library_root=LIBRARY_ROOT)
 
@@ -180,34 +200,89 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             pass
     threading.Thread(target=warm, daemon=True).start()
 
-    def full_decode(path: str) -> Image.Image:
+    def full_decode(path: str, background: bool = False) -> Image.Image:
         """The whole frame at full resolution, upright. RAWs go through a full rawpy decode
-        (about 1.2 s for a 42 MP ARW); anything else is opened directly."""
-        with full_lock:
-            im = full_cache.pop(path, None)
-            if im is not None:
-                full_cache[path] = im                 # most recently used goes last
-                perf.note(decode_cache="hit")
-                return im
-        perf.note(decode_cache="miss", ext=Path(path).suffix.lower())
-        with perf.stage("decode_wait"):          # queued behind other full decodes
-            decode_slots.acquire()
+        (about 2.5 s for a 42 MP ARW); anything else is opened directly. One decode per photo
+        at a time: a request for a photo already being decoded (often decode-ahead's) waits for
+        that decode instead of starting another. background: a decode-ahead, which neither
+        records timings nor uses the slots kept for decodes someone is waiting for."""
+        waited = False
+        while True:
+            with full_lock:
+                im = full_cache.pop(path, None)
+                if im is not None:
+                    full_cache[path] = im             # most recently used goes last
+                    if not background:
+                        # hit: decoded for an earlier request; ahead: decode-ahead had it ready;
+                        # ahead-wait: decode-ahead was still running and this waited for it.
+                        first_use = path in ahead
+                        ahead.discard(path)
+                        perf.note(decode_cache=("ahead-wait" if waited else "ahead") if first_use else "hit")
+                    return im
+                running = decoding.get(path)
+                if running is None:
+                    decoding[path] = done = threading.Event()
+                    break
+            if background:
+                return None                           # someone else is decoding it already
+            with perf.stage("decode_wait"):           # decode-ahead (or another request) is on it
+                running.wait(timeout=60)
+            waited = True                             # then take it from the cache, or decode it
         try:
-            src = Path(path)
-            with perf.stage("full_decode"):
-                if src.suffix.lower() in stacks.RAW_EXTENSIONS:
-                    import rawpy
-                    with rawpy.imread(str(src)) as raw:
-                        im = Image.fromarray(raw.postprocess(use_camera_wb=True))
-                else:
-                    im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
+            if not background:
+                perf.note(decode_cache="miss", ext=Path(path).suffix.lower())
+                with perf.stage("decode_wait"):       # queued behind other full decodes
+                    decode_slots.acquire()
+            try:
+                src = Path(path)
+                with (perf.stage("full_decode") if not background else contextlib.nullcontext()):
+                    if src.suffix.lower() in stacks.RAW_EXTENSIONS:
+                        im = decode_raw(src)
+                    else:
+                        im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
+            finally:
+                if not background:
+                    decode_slots.release()
+            with full_lock:
+                full_cache[path] = im
+                if background:
+                    ahead.add(path)
+                while len(full_cache) > FULL_CACHE_FRAMES:
+                    ahead.discard(full_cache.pop(next(iter(full_cache))))
+            return im
         finally:
-            decode_slots.release()
+            with full_lock:
+                decoding.pop(path, None)
+            done.set()
+
+    def warm(path: str) -> None:
+        """Decode-ahead: a RAW's picture was just asked for (a card shown or pre-fetched, a
+        photo in the viewer), so its 1:1 check or HD zoom is likely next. Queue a background
+        decode unless it is cached, running or queued already."""
+        if Path(path).suffix.lower() not in stacks.RAW_EXTENSIONS:
+            return
         with full_lock:
-            full_cache[path] = im
-            while len(full_cache) > FULL_CACHE_FRAMES:
-                full_cache.pop(next(iter(full_cache)))
-        return im
+            if path in full_cache or path in decoding:
+                return
+        with warm_cond:
+            if path in warm_pending:
+                return
+            warm_pending.append(path)                 # a full queue drops its oldest request
+            warm_cond.notify()
+
+    def warm_worker() -> None:
+        while True:
+            with warm_cond:
+                while not warm_pending:
+                    warm_cond.wait()
+                path = warm_pending.popleft()
+            try:
+                full_decode(path, background=True)
+            except Exception as e:  # noqa: BLE001 - a failed decode-ahead is retried when asked for
+                log.info("decode-ahead failed for %s: %s", Path(path).name, pc._exc_text(e)[:120])
+
+    for _ in range(WARM_WORKERS):
+        threading.Thread(target=warm_worker, daemon=True, name="decode-ahead").start()
 
     def anno_db() -> sqlite3.Connection:
         con = anno()
@@ -1499,6 +1574,8 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             con.close()
         if not r:
             return jsonify({"error": "not found"}), 404
+        if edge == IMG_EDGE["view"]:
+            warm(r["path"])                           # its 1:1 check or HD zoom is likely next
         cached = previews.preview_path(cache_dir, r["path"], edge)
         perf.note(cache="hit" if cached.exists() else "miss", size=request.args.get("s", "view"),
                   ext=Path(r["path"]).suffix.lower())

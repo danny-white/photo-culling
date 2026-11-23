@@ -83,6 +83,14 @@ def main():
     by_route = defaultdict(list)
     for x in server:
         by_route[f'{x["method"]} {x["route"]}'].append(x)
+    def cache_cell(caches):
+        """Share served without decoding on the spot: hit, plus decode-ahead's share in brackets."""
+        if not caches:
+            return "-"
+        ready = caches.count("hit") + caches.count("ahead")
+        ahead = caches.count("ahead") + caches.count("ahead-wait")
+        return f"{100 * ready / len(caches):.0f}%" + (f" ({100 * ahead / len(caches):.0f}% ahead)" if ahead else "")
+
     rows = []
     for route, xs in sorted(by_route.items(), key=lambda kv: -sum(x["ms"] for x in kv[1])):
         ms = [x["ms"] for x in xs]
@@ -97,7 +105,7 @@ def main():
                       sorted(stages.items(), key=lambda kv: -sum(kv[1]))[:4])
         errors = sum(1 for x in xs if x["status"] >= 500)
         rows.append([route, len(xs), fmt(pct(ms, .5)), fmt(pct(ms, .95)), fmt(max(ms)), fmt(pct(sent, .5)),
-                     f"{100 * caches.count('hit') / len(caches):.0f}%" if caches else "-", errors or "", st])
+                     cache_cell(caches), errors or "", st])
     if rows:
         print("SERVER (sorted by total time spent)")
         print(table(rows, ["route", "n", "p50", "p95", "max", "sent p50", "cache hit", "5xx", "stages (median × count)"]))

@@ -7,6 +7,8 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from contextlib import closing
@@ -1082,3 +1084,93 @@ if __name__ == "__main__":
         self.assertIsNone(d["model"]["installed"])
         self.assertGreater(d["index"]["ok"], 40000)
 
+
+
+@unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
+class DecodeAhead(unittest.TestCase):
+    """A card's picture being asked for starts its full RAW decode in the background, so its
+    1:1 check (and the viewer's HD zoom) is ready by the time you ask. A fake decoder stands in
+    for rawpy, counting its calls."""
+
+    def setUp(self):
+        from flask import Flask
+        from PIL import Image
+        import mobile
+        import photo_cull as pc
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        self.calls = []
+        self.lock = threading.Lock()
+
+        def fake_decode(path):
+            with self.lock:
+                self.calls.append(Path(path).name)
+            time.sleep(0.4)
+            return Image.new("RGB", (600, 400), "grey")
+
+        def db_ro():
+            con = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            return con
+
+        def anno():
+            con = sqlite3.connect(tmp / "annotations.db")
+            con.row_factory = sqlite3.Row
+            return con
+
+        (tmp / "static").mkdir()
+        (tmp / "inbox").mkdir()
+        app = Flask(__name__)
+        app.register_blueprint(mobile.make_blueprint(
+            db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state",
+            inbox=tmp / "inbox", check_mount=False, ingest_log=tmp / "ingest.log",
+            ollama_url="http://127.0.0.1:9", raw_decoder=fake_decode))
+        self.client = app.test_client()
+        con = db_ro()
+        try:
+            self.raws = [r[0] for r in con.execute(
+                "SELECT rowid FROM images WHERE path LIKE ? AND lower(filename) LIKE '%.arw' ORDER BY rowid LIMIT 3",
+                (f"%/{DAY}/%",))]
+        finally:
+            con.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def wait_for_calls(self, n, seconds=5.0):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            with self.lock:
+                if len(self.calls) >= n:
+                    return True
+            time.sleep(0.02)
+        return False
+
+    def test_a_cards_picture_starts_its_decode_and_the_crop_uses_it(self):
+        rid = self.raws[0]
+        self.assertEqual(self.client.get(f"/m/api/img/{rid}?s=view").status_code, 200)
+        self.assertTrue(self.wait_for_calls(1), "the view request should start a background decode")
+        time.sleep(0.6)                                   # let it finish
+        r = self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(self.calls), 1)              # the crop came from the decode-ahead
+
+    def test_a_crop_during_the_decode_waits_for_it_rather_than_decoding_again(self):
+        rid = self.raws[1]
+        self.client.get(f"/m/api/img/{rid}?s=view")
+        self.assertTrue(self.wait_for_calls(1))
+        r = self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200")   # still decoding
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_thumbnails_do_not_start_a_decode(self):
+        self.client.get(f"/m/api/img/{self.raws[2]}?s=thumb")
+        time.sleep(0.5)
+        self.assertEqual(self.calls, [])
+
+    def test_a_decoded_photo_is_not_decoded_again(self):
+        rid = self.raws[0]
+        self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200")      # decoded on request
+        self.client.get(f"/m/api/img/{rid}?s=view")                       # already in memory
+        time.sleep(0.5)
+        self.assertEqual(len(self.calls), 1)
