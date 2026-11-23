@@ -51,7 +51,7 @@ IMG_EDGE = {"thumb": 320, "view": 1616}   # 1616 = the embedded preview's full w
 DAYS_TTL_S = 30
 AS_IS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".heic": "image/heic", ".heif": "image/heif"}
 CROP_MAX = 2400          # longest side of a crop, in source pixels
-FULL_CACHE_FRAMES = 8    # full decodes kept in memory (~130 MB each for 42 MP)
+FULL_CACHE_FRAMES = 16   # full decodes kept in memory (~127 MB each for 42 MP, ~2 GB in all)
 DECODES_AT_ONCE = 2      # decodes someone is waiting for (a 1:1 check, an HD zoom, a save)
 WARM_WORKERS = 2         # decode-ahead: RAWs decoded in the background once their picture is asked for
 WARM_QUEUE = 4           # decode-ahead requests waiting; swiping fast drops the oldest
