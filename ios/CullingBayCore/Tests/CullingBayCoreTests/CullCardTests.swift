@@ -244,6 +244,25 @@ struct CullCardTests {
         #expect(await open(cullDay([cullStack(0, .single, [cullFrame(1)])])).summary.wonNote == nil)
     }
 
+    @Test func keptStacksListTheFrameKeptWithALabel() async {
+        let summary = await open(reviewDay()).summary
+        // 0 single keep, 1 hero, 2 a burst with 111 of 2 kept, 4 picked in Lightroom; 6 lost to
+        // your Lightroom reject, so it is not kept.
+        #expect(summary.keptStacks.map(\.stackIndex) == [0, 1, 2, 4])
+        #expect(summary.keptStacks.map(\.frame.id) == [100, 101, 111, 130])
+        #expect(summary.keptStacks.map(\.label) == [nil, "Hero", "1 of 2", "Lightroom"])
+    }
+
+    @Test func aReviewThumbnailOpensItsStacksCard() async {
+        let session = await open(reviewDay())
+        #expect(session.stackIndex(of: 111) == 2)
+        #expect(session.stackIndex(of: 999) == nil)
+        session.open(stackAt: 4)
+        #expect(session.screen == .cards && session.cursor == 4)
+        session.open(stackAt: 99)                                   // out of range: stays put
+        #expect(session.cursor == 4)
+    }
+
     @Test func rejectsAreSplitByWhetherABurstKeepLeftANote() async {
         let summary = await open(reviewDay()).summary
         #expect(summary.rejectsFromBursts.map(\.id) == [110])

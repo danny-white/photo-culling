@@ -130,6 +130,21 @@ public struct CullSummary: Sendable, Hashable {
     /// when `won` is empty.
     public let wonNote: String?
 
+    /// A kept stack, for the review's small cards: tap one to go back to its card.
+    public struct Kept: Sendable, Hashable, Identifiable {
+        /// Its position in the day, what `CullSessionModel.open(stackAt:)` takes.
+        public let stackIndex: Int
+        /// The frame to show: the first one kept, or the lead when Lightroom decided it.
+        public let frame: Frame
+        /// `Hero`, `2 of 6` for a burst, `Lightroom` when you culled it there; nil for a single.
+        public let label: String?
+
+        public var id: Int { stackIndex }
+    }
+
+    /// The kept stacks (Lightroom's included, as the budget counts them), in the day's order.
+    public let keptStacks: [Kept]
+
     /// Rejected frames (not those Lightroom overruled) that were rejected with a burst note:
     /// "From bursts · similar frame kept".
     public let rejectsFromBursts: [Frame]

@@ -409,6 +409,28 @@ public final class CullSessionModel {
         }
 
         let burstNote: (Frame) -> Bool = { !(self.board.decisions[$0.id]?.note ?? "").isEmpty }
+        let keptList: [CullSummary.Kept] = board.stacks.enumerated().compactMap { index, stack in
+            let st = board.status(stack)
+            guard st.isDone, st.verdict != .reject, let first = stack.frames.first else { return nil }
+            // A keep that lost to your own Lightroom flag is listed under "Your Lightroom flag won".
+            let picks = stack.frames.filter { frame in
+                guard let d = board.decisions[frame.id] else { return false }
+                return d.flag != .reject && d.flag != .clear && d.state != .conflict
+            }
+            guard !picks.isEmpty || st.source == .lightroom else { return nil }
+            let shown = picks.first ?? stack.frames.first { $0.id == stack.lead } ?? first
+            let label: String?
+            if st.source == .lightroom {
+                label = "Lightroom"
+            } else if picks.contains(where: { board.decisions[$0.id]?.stars == 5 }) {
+                label = "Hero"
+            } else if stack.frames.count > 1 {
+                label = "\(picks.count) of \(stack.frames.count)"
+            } else {
+                label = nil
+            }
+            return CullSummary.Kept(stackIndex: index, frame: shown, label: label)
+        }
         return CullSummary(
             kept: kept, hero: hero, rejected: rejected, unflagged: none,
             subtitle: board.firstOpen() == nil ? "Day finished" : "Rejects so far",
@@ -419,6 +441,7 @@ public final class CullSessionModel {
             wonNote: won.isEmpty ? nil
                 : "The phone said otherwise, but you had flagged " + (won.count > 1 ? "these" : "this")
                 + " in Lightroom yourself, so Lightroom kept your flag. Change it there if the phone was right.",
+            keptStacks: keptList,
             rejectsFromBursts: rejects.filter(burstNote),
             rejectsOutright: rejects.filter { !burstNote($0) },
             overBudget: max(0, over), budgetHeading: heading, budgetNote: note, budgetDropHint: dropHint,
@@ -440,6 +463,19 @@ public final class CullSessionModel {
         }
         cursor = max(0, min(n - 1, cursor + delta))
         saveProgress()
+    }
+
+    /// From the review, the cards at one stack (a kept one, or the one a reject is in), to look
+    /// again or change it. Nothing is decided or saved; browsing on from there saves as usual.
+    public func open(stackAt index: Int) {
+        guard board.stacks.indices.contains(index) else { return }
+        cursor = index
+        screen = .cards
+    }
+
+    /// The position of the stack a frame is in, for a review thumbnail of a reject.
+    public func stackIndex(of frameID: Int) -> Int? {
+        board.stacks.firstIndex { $0.frames.contains { $0.id == frameID } }
     }
 
     /// `back-cull`: from the review back to the cards, on the first stack still open.

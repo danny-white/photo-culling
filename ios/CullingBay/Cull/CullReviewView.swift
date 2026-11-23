@@ -2,8 +2,9 @@ import CullingBayCore
 import SwiftUI
 
 /// The end-of-day review: the counts, the budget, where the decisions have got to in Lightroom,
-/// the rejects, and Send. Mirrors `vSummary` in `app.js`. The big view and rescue for the
-/// rejects, dropping a stack over budget, and Start over come in phase 4, so the lists only show.
+/// the kept stacks and the rejects, and Send. Mirrors `vSummary` in `app.js`. Tapping any small
+/// card goes back to that stack's card, to look again or change it there. Dropping a stack over
+/// budget and Start over come in phase 4.
 struct CullReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -60,6 +61,18 @@ struct CullReviewView: View {
         counts(summary)
         if let heading = summary.budgetHeading {
             sectionLabel(heading)
+        } else if !summary.keptStacks.isEmpty {
+            sectionLabel("Kept")
+        }
+        if !summary.keptStacks.isEmpty {
+            grid {
+                ForEach(summary.keptStacks) { kept in
+                    Button { session.open(stackAt: kept.stackIndex) } label: {
+                        CullReviewThumb(frame: kept.frame, label: kept.label, style: .kept)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
         if let note = summary.budgetNote {
             noteText(note)
@@ -74,7 +87,10 @@ struct CullReviewView: View {
             sectionLabel("Your Lightroom flag won")
             grid {
                 ForEach(summary.won) { won in
-                    CullReviewThumb(frame: won.frame, label: won.label, style: .won)
+                    Button { openCard(of: won.frame) } label: {
+                        CullReviewThumb(frame: won.frame, label: won.label, style: .won)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             if let note = summary.wonNote {
@@ -108,9 +124,17 @@ struct CullReviewView: View {
     private func rejectGrid(_ frames: [Frame]) -> some View {
         grid {
             ForEach(frames) { frame in
-                CullReviewThumb(frame: frame, label: nil, style: .rejected)
+                Button { openCard(of: frame) } label: {
+                    CullReviewThumb(frame: frame, label: nil, style: .rejected)
+                }
+                .buttonStyle(.plain)
             }
         }
+    }
+
+    /// Back to the card of the stack this frame is in.
+    private func openCard(of frame: Frame) {
+        if let index = session.stackIndex(of: frame.id) { session.open(stackAt: index) }
     }
 
     private func grid<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -192,7 +216,7 @@ private struct CullCountTile: View {
 /// won shows what that flag was.
 private struct CullReviewThumb: View {
     enum Style {
-        case rejected, won
+        case kept, rejected, won
     }
 
     @Environment(AppServices.self) private var services
@@ -205,10 +229,17 @@ private struct CullReviewThumb: View {
             .aspectRatio(3 / 2, contentMode: .fit)
             .overlay {
                 RemoteImage(url: services.client.imageURL(id: frame.id, size: .thumb))
-                    .opacity(style == .rejected ? 0.55 : 0.8)
+                    .opacity(style == .rejected ? 0.55 : style == .kept ? 1 : 0.8)
             }
             .overlay(alignment: .topTrailing) {
-                if style == .rejected {
+                if style == .kept {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(Color.black)
+                        .frame(width: 17, height: 17)
+                        .background(Color.green, in: Circle())
+                        .padding(3)
+                } else if style == .rejected {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .heavy))
                         .foregroundStyle(Color.white)
@@ -234,10 +265,13 @@ private struct CullReviewThumb: View {
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityText)
+            .accessibilityHint("Opens its card")
+            .accessibilityAddTraits(.isButton)
     }
 
     private var accessibilityText: String {
         switch style {
+        case .kept: "\(frame.file), kept" + (label.map { ", \($0)" } ?? "")
         case .rejected: "\(frame.file), rejected"
         case .won: "\(frame.file), \(label ?? "your Lightroom flag won")"
         }
