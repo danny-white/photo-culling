@@ -17,11 +17,22 @@ struct CullDaysView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 CullOfflineBanner(queue: services.cullQueue)
+                if model.isServedOffline && model.phase == .loaded {
+                    Text("Offline · saved days open from this phone")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.yellow)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 3)
+                        .accessibilityAddTraits(.isStaticText)
+                }
                 content
             }
             .padding(.horizontal, 12)
         }
-        .refreshable { await days.refresh() }
+        .refreshable {
+            await days.refresh()
+            services.offline.sync()
+        }
         .navigationTitle("Days")
         .searchable(
             text: $days.searchText, placement: .navigationBarDrawer(displayMode: .always),
@@ -44,7 +55,11 @@ struct CullDaysView: View {
             if LaunchOptions.openSendAll && sendAll == nil { openSendAll() }
         }
         .sheet(item: $sendAll) { launch in
-            CullSendAllView(model: launch.model, onSent: { await services.cullDays.refresh() })
+            CullSendAllView(model: launch.model, onSent: {
+                await services.cullDays.refresh()
+                // What was sent no longer needs keeping, which may make room for other days.
+                services.offline.sync()
+            })
         }
     }
 
@@ -215,9 +230,11 @@ struct CullDaysView: View {
     }
 
     private func rows(_ rows: [CullDayRow]) -> some View {
-        ForEach(rows) { row in
+        // Decisions only on the phone so far, by day: the row says so until the PC has them.
+        let pending = services.cullQueue.pendingByDay
+        return ForEach(rows) { row in
             Button { router.open(row.day.day, match: row.match, services: services) } label: {
-                CullDayRowView(row: row)
+                CullDayRowView(row: row, pendingTaps: pending[row.day.day] ?? 0)
             }
             .buttonStyle(.plain)
             .padding(.bottom, 8)

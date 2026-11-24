@@ -88,6 +88,7 @@ public final class CullSessionModel {
     @ObservationIgnored private let client: CullingBayClient
     @ObservationIgnored private let match: CullMatch?
     @ObservationIgnored private let sleep: CullSleep
+    @ObservationIgnored private let keepsDaysOffline: @MainActor () -> Bool
     @ObservationIgnored private let newActionID: @Sendable () -> String
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var edits = 0
@@ -106,11 +107,14 @@ public final class CullSessionModel {
         let pass: Int
     }
 
-    /// `match` is the search hit the day was opened from: its stacks go first. `newActionID`
-    /// makes the ids of `decide`; tests pin it.
+    /// `match` is the search hit the day was opened from: its stacks go first. `keepsDaysOffline`
+    /// says whether the app keeps days on the phone: if so, a day that cannot be loaded because
+    /// the PC cannot be reached is a day that was not saved. `newActionID` makes the ids of
+    /// `decide`; tests pin it.
     public init(
         day: String, client: CullingBayClient, queue: CullWriteQueue, match: CullMatch? = nil,
         sleep: @escaping CullSleep = CullClock.system,
+        keepsDaysOffline: @escaping @MainActor () -> Bool = { false },
         newActionID: @escaping @Sendable () -> String = { CullingBayClient.newActionID() }
     ) {
         self.dayID = day
@@ -118,6 +122,7 @@ public final class CullSessionModel {
         self.queue = queue
         self.match = match
         self.sleep = sleep
+        self.keepsDaysOffline = keepsDaysOffline
         self.newActionID = newActionID
         queue.observeDrops(self) { [weak self] drop in self?.queueDropped(drop) }
     }
@@ -143,11 +148,16 @@ public final class CullSessionModel {
             guard mine == generation else { return }
             if error is CancellationError || Task.isCancelled {
                 phase = day == nil ? .idle : .loaded
+            } else if case CullingBayError.transport = error, keepsDaysOffline() {
+                phase = .failed(Self.notSavedMessage)
             } else {
                 phase = .failed(GalleryMessages.failure(error, loading: "this day"))
             }
         }
     }
+
+    /// What a day says when the PC cannot be reached and the phone has no copy of it.
+    public static let notSavedMessage = "This day isn't saved on the phone."
 
     /// Loads the day again for the receipts (`landed`, `conflict`, ...) and keeps the cursor on
     /// the same stack. First waits up to `waiting` for the queue to empty, so no tap is lost, and
@@ -204,7 +214,9 @@ public final class CullSessionModel {
     private func open(_ body: CullDay) {
         let arranged = arrange(body)
         day = body
-        board = CullBoard(stacks: arranged.stacks, decisions: arranged.decisions, budget: body.budget.stacks)
+        var decisions = arranged.decisions
+        let queuedPosition = layQueued(over: &decisions, day: body.day)
+        board = CullBoard(stacks: arranged.stacks, decisions: decisions, budget: body.budget.stacks)
         matches = arranged.matches
         history = []
         undone = [:]
@@ -214,6 +226,12 @@ public final class CullSessionModel {
         var start = 0
         if matches == nil, let saved = body.progress?.cursor {
             start = max(0, board.stacks.firstIndex { $0.id == saved } ?? 0)
+        }
+        // A position still in the queue is newer than the one the copy has.
+        if matches == nil, let queued = queuedPosition,
+           let i = queued.lead.flatMap({ lead in board.stacks.firstIndex { $0.lead == lead } })
+            ?? board.stacks.firstIndex(where: { $0.id == queued.cursor }) {
+            start = i
         }
         cursor = start
         if board.stacks.isEmpty {
@@ -226,6 +244,34 @@ public final class CullSessionModel {
         }
         refreshError = nil
         phase = .loaded
+    }
+
+    /// Taps for this day still in the queue (made offline, or not saved yet): the copy just
+    /// loaded, from the PC or from the phone's offline store, doesn't have them, so they are laid
+    /// over it in order, an undo taking back its decide, as `apply` and `undo` did at the time.
+    /// Returns the newest position still queued for the day.
+    private func layQueued(over decisions: inout [Int: Decision], day: String) -> (cursor: Int, lead: Int?)? {
+        var before: [String: [(Int, Decision?)]] = [:]
+        var position: (cursor: Int, lead: Int?)?
+        for write in queue.queuedWrites {
+            switch write {
+            case .decide(let actionID, let writeDay, _, let changes) where writeDay == day || writeDay == dayID:
+                before[actionID] = changes.map { ($0.id, decisions[$0.id]) }
+                for c in changes {
+                    let stars = c.flag == .pick ? c.stars.flatMap { $0 > 0 ? $0 : nil } : nil
+                    decisions[c.id] = Decision(flag: c.flag, stars: stars, note: c.note ?? "", state: .draft, outcome: nil)
+                }
+            case .undo(let actionID):
+                if let taken = before.removeValue(forKey: actionID) {
+                    for (id, decision) in taken { decisions[id] = decision }
+                }
+            case .progress(let writeDay, _, let cursor, _, let lead) where writeDay == day || writeDay == dayID:
+                position = (cursor, lead)
+            default:
+                break
+            }
+        }
+        return position
     }
 
     private func reload(_ body: CullDay) {

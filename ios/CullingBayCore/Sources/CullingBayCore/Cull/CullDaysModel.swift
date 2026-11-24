@@ -110,6 +110,8 @@ public final class CullDaysModel {
     public private(set) var openYears: Set<String>
     /// Why the last `refresh()` failed while an earlier result is still on screen; nil otherwise.
     public private(set) var refreshError: String?
+    /// The list on screen is the copy saved on the phone, because the PC could not be reached.
+    public private(set) var isServedOffline = false
     /// The search box. Setting it runs a search 280 ms after the last change.
     public var searchText: String {
         didSet { searchTextChanged() }
@@ -173,9 +175,10 @@ public final class CullDaysModel {
         generation += 1
         let mine = generation
         do {
-            let days = try await client.days()
+            let fetched = try await client.fetchDays()
             guard mine == generation else { return }
-            apply(days)
+            isServedOffline = fetched.servedOffline
+            apply(fetched.value)
         } catch {
             guard mine == generation else { return }
             if error is CancellationError || Task.isCancelled {

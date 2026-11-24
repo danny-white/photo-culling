@@ -26,11 +26,18 @@ public struct Fetched<Value: Sendable>: Sendable {
     public let serverTiming: ServerTiming?
     /// The server answered 304 and `value` was decoded from the cached body.
     public let notModified: Bool
+    /// The PC could not be reached and `value` is the copy saved on the phone
+    /// (`OfflineTransport` marks it with `X-Culling-Bay-Offline: 1`).
+    public let servedOffline: Bool
 
-    public init(value: Value, serverTiming: ServerTiming? = nil, notModified: Bool = false) {
+    public init(
+        value: Value, serverTiming: ServerTiming? = nil, notModified: Bool = false,
+        servedOffline: Bool = false
+    ) {
         self.value = value
         self.serverTiming = serverTiming
         self.notModified = notModified
+        self.servedOffline = servedOffline
     }
 }
 
@@ -56,8 +63,16 @@ public actor CullingBayClient {
     // MARK: JSON routes
 
     public func days() async throws -> [Day] {
+        try await fetchDays().value
+    }
+
+    /// `days()` with what came on the wire, which says whether the list is the copy saved on the
+    /// phone because the PC could not be reached.
+    public func fetchDays() async throws -> Fetched<[Day]> {
         let fetched: Fetched<DaysResponse> = try await fetch(path: "/m/api/days")
-        return fetched.value.days
+        return Fetched(
+            value: fetched.value.days, serverTiming: fetched.serverTiming,
+            notModified: fetched.notModified, servedOffline: fetched.servedOffline)
     }
 
     public func search(_ q: String, best: Bool = false, bursts: Bool = true) async throws -> PhotoList {
@@ -118,6 +133,7 @@ public actor CullingBayClient {
         }
 
         let timing = ServerTiming.parse(response.value(forHTTPHeaderField: "Server-Timing"))
+        let offline = response.value(forHTTPHeaderField: "X-Culling-Bay-Offline") == "1"
 
         switch response.statusCode {
         case 304:
@@ -134,7 +150,7 @@ public actor CullingBayClient {
                 cache[key] = nil
                 cacheOrder.removeAll { $0 == key }
             }
-            return Fetched(value: value, serverTiming: timing, notModified: false)
+            return Fetched(value: value, serverTiming: timing, notModified: false, servedOffline: offline)
         default:
             throw CullingBayError.http(status: response.statusCode, message: Self.errorMessage(in: data))
         }

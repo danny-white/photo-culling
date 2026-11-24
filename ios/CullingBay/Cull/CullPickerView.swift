@@ -90,6 +90,8 @@ private struct CullStripPicker: View {
     private func thumbnail(_ item: CullPickerFrame) -> some View {
         let isCurrent = item.index == picker.viewIndex
         let ticked = picker.isTicked(item.id)
+        // A decision on this frame that the PC does not have yet.
+        let onlyOnPhone = session.queue.isPending(frameID: item.id)
         return Button { picker.show(item.index) } label: {
             RemoteImage(url: services.client.imageURL(id: item.id, size: .thumb), fit: true)
                 .frame(width: 62, height: 42)
@@ -115,10 +117,22 @@ private struct CullStripPicker: View {
                         Circle().fill(Color.yellow).frame(width: 5, height: 5).offset(y: 10)
                     }
                 }
+                .overlay(alignment: .topLeading) {
+                    if onlyOnPhone {
+                        Image(systemName: "iphone")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Color.orange)
+                            .shadow(color: .black, radius: 1)
+                            .padding(5)
+                            .accessibilityHidden(true)
+                    }
+                }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(item.frame.file + (item.isSharpest ? ", the sharpest" : ""))
-        .accessibilityValue(ticked ? "Kept" : "")
+        .accessibilityValue(
+            [ticked ? "Kept" : nil, onlyOnPhone ? "on this phone, not saved to the PC yet" : nil]
+                .compactMap { $0 }.joined(separator: ", "))
         .accessibilityAddTraits(isCurrent ? .isSelected : [])
     }
 

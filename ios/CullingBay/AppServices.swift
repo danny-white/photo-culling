@@ -21,6 +21,8 @@ final class AppServices {
     private(set) var cullQueue: CullWriteQueue
     private(set) var cullDays: CullDaysModel
     private(set) var practice: PracticeModel
+    /// Days kept on the phone, so they open with no connection (Settings > Offline).
+    private(set) var offline: OfflineManager
     /// Every full-resolution crop of the focus check goes through this, a couple at a time, so
     /// the writes of a decision always have a connection to the server free.
     let cropGate = CropLoadGate(limit: 2)
@@ -40,6 +42,7 @@ final class AppServices {
         self.cullQueue = connection.cullQueue
         self.cullDays = connection.cullDays
         self.practice = connection.practice
+        self.offline = connection.offline
     }
 
     /// Points the app at another server. Does nothing if it is the one already in use.
@@ -47,6 +50,7 @@ final class AppServices {
         guard url != serverURL else { return }
         settings.serverURL = url
         serverURL = url
+        offline.cancel()
         let connection = Self.connect(to: url, settings: settings)
         client = connection.client
         loader = connection.loader
@@ -55,14 +59,18 @@ final class AppServices {
         cullQueue = connection.cullQueue
         cullDays = connection.cullDays
         practice = connection.practice
+        offline = connection.offline
         // This server may still have taps waiting from an earlier visit.
         cullQueue.start()
+        offline.sync()
         generation += 1
     }
 
     /// A session for one day of the Cull tab. `match` is the search hit it was opened from.
     func makeCullSession(day: String, match: CullMatch? = nil) -> CullSessionModel {
-        CullSessionModel(day: day, client: client, queue: cullQueue, match: match)
+        CullSessionModel(
+            day: day, client: client, queue: cullQueue, match: match,
+            keepsDaysOffline: { OfflinePreferences.isEnabled })
     }
 
     /// A Save or Share for these photos, to show in an `ExportSheet`. `rawChoice` settles JPEG or
@@ -83,11 +91,17 @@ final class AppServices {
         let cullQueue: CullWriteQueue
         let cullDays: CullDaysModel
         let practice: PracticeModel
+        let offline: OfflineManager
     }
 
     private static func connect(to url: URL, settings: any GallerySettings) -> Connection {
         // `-CBReadOnly`: a simulator run that looks at the real server and cannot write to it.
-        let transport: any HTTPTransport = LaunchOptions.readOnly ? ReadOnlyTransport() : URLSessionTransport()
+        let network: any HTTPTransport = LaunchOptions.readOnly ? ReadOnlyTransport() : URLSessionTransport()
+        // Days kept on the phone answer for the PC when it cannot be reached; the client and the
+        // image loader both go through this, so pictures come from the phone automatically.
+        let offlineStore = OfflineStore(root: offlineStoreDirectory(for: url))
+        let transport: any HTTPTransport = OfflineTransport(
+            base: network, store: offlineStore, isEnabled: { OfflinePreferences.isEnabled })
         let perf = PerfReporter(client: url, transport: transport)
         // Thumbnails are many and each is small news, and the queue holds only 400 marks, so
         // only the larger pictures are reported as fetches.
@@ -99,21 +113,35 @@ final class AppServices {
         let client = CullingBayClient(baseURL: url, transport: transport)
         let queue = CullWriteQueue(
             client: client, store: FileCullWriteStore(directory: cullStoreDirectory(for: url)))
+        // The downloader fetches with the real network, not through the saved days.
+        let offline = OfflineManager(
+            client: client, store: offlineStore,
+            downloader: OfflineDownloader(baseURL: url, transport: network, store: offlineStore))
         return Connection(
             client: client, loader: loader, perf: perf,
             home: HomeModel(client: client, settings: settings),
             cullQueue: queue, cullDays: CullDaysModel(client: client),
-            practice: PracticeModel(client: client))
+            practice: PracticeModel(client: client), offline: offline)
     }
 
     /// Where the Cull queue keeps its unsent taps: one folder per server, so changing the server
     /// can never send a tap meant for one photo library to another. The folder is named by a
     /// hash of the address, which is safe in a path and the same on every launch.
     private static func cullStoreDirectory(for url: URL) -> URL {
+        URL.applicationSupportDirectory.appending(
+            path: "CullWrites/\(serverFolderName(for: url))", directoryHint: .isDirectory)
+    }
+
+    /// Where the days kept on the phone live: one folder per server, named the same way.
+    private static func offlineStoreDirectory(for url: URL) -> URL {
+        URL.applicationSupportDirectory.appending(
+            path: "Offline/\(serverFolderName(for: url))", directoryHint: .isDirectory)
+    }
+
+    private static func serverFolderName(for url: URL) -> String {
         let address = url.absoluteString.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let digest = SHA256.hash(data: Data(address.utf8))
-        let name = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
-        return URL.applicationSupportDirectory.appending(path: "CullWrites/\(name)", directoryHint: .isDirectory)
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 }
 

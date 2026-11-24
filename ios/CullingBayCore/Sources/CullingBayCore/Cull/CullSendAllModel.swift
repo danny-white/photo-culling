@@ -51,7 +51,7 @@ public final class CullSendAllModel {
 
     /// Decisions a day has not sent yet. An older server without `unsent` gives decided minus
     /// sent, which misses decisions to send again after a sync could not find them.
-    public static func unsent(_ day: Day) -> Int { day.unsent ?? max(0, day.decided - day.sent) }
+    public nonisolated static func unsent(_ day: Day) -> Int { day.unsent ?? max(0, day.decided - day.sent) }
 
     public var isEmpty: Bool { finished.isEmpty && unfinished.isEmpty }
     public var all: [Item] { finished + unfinished }

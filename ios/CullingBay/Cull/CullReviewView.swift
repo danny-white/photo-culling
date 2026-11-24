@@ -6,6 +6,7 @@ import SwiftUI
 /// card goes back to that stack's card, to look again or change it there. Dropping a stack over
 /// budget and Start over come in phase 4.
 struct CullReviewView: View {
+    @Environment(AppServices.self) private var services
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
     let session: CullSessionModel
@@ -43,6 +44,16 @@ struct CullReviewView: View {
 
     @ViewBuilder
     private func content(_ summary: CullSummary) -> some View {
+        // Taps the PC does not have yet, which a Send could not include. It goes once they are saved.
+        let waiting = session.queue.pendingByDay[session.dayID] ?? 0
+        if waiting > 0 {
+            Text("\(waiting) tap" + (waiting == 1 ? "" : "s")
+                + " on this phone, not saved to the PC yet. They go when the PC can be reached.")
+                .font(.footnote)
+                .foregroundStyle(Color.orange)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 4)
+        }
         if let problem = session.refreshError {
             Text(problem)
                 .font(.footnote)
@@ -171,7 +182,13 @@ struct CullReviewView: View {
         return layout {
             Button("Back to days") { dismiss() }
                 .buttonStyle(CullFooterStyle(isPrimary: false))
-            Button { Task { await session.send() } } label: {
+            Button {
+                Task {
+                    await session.send()
+                    // A sent day may no longer need keeping on the phone.
+                    services.offline.sync()
+                }
+            } label: {
                 if session.isSending {
                     ProgressView().tint(.black)
                 } else {

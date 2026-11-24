@@ -70,6 +70,22 @@ struct CullChipView: View {
     }
 }
 
+/// `On this phone`: a decision on this stack that the PC does not have yet. It goes once the
+/// queue has saved it.
+struct CullPhonePill: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "iphone")
+            Text("On this phone")
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(Color.orange)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.black.opacity(0.62), in: Capsule())
+    }
+}
+
 /// The line along the bottom of a decided photo: `Kept all 3`, `Rejected · all 5 frames`.
 struct CullStatusLineView: View {
     let line: CullStatusLine

@@ -13,8 +13,13 @@ extension CullingBayClient {
 
 /// Kept separate from JSON decoding: crop dimensions are an HTTP response header.
 public enum CropProbe {
-    public static func load(url: URL, transport: any HTTPTransport = URLSessionTransport()) async throws -> CropBox {
-        let (_, response) = try await transport.send(URLRequest(url: url))
+    /// `timeout`: how long to wait for the PC; shorter when the phone has a saved 1:1 to fall back on.
+    public static func load(
+        url: URL, timeout: TimeInterval = 60, transport: any HTTPTransport = URLSessionTransport()
+    ) async throws -> CropBox {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        let (_, response) = try await transport.send(request)
         guard (200..<300).contains(response.statusCode) else {
             throw CullingBayError.http(status: response.statusCode, message: nil)
         }

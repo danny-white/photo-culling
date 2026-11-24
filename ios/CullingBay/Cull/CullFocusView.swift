@@ -160,6 +160,8 @@ private struct CullFocusPage: View {
     @State private var tiles: [String: UIImage] = [:]
     @State private var haveImage = false
     @State private var failure: String?
+    /// The 1:1 crop the phone saved at the AF point, shown when the PC cannot make one now.
+    @State private var savedCrop: UIImage?
     @State private var isDragging = false
 
     init(
@@ -195,8 +197,15 @@ private struct CullFocusPage: View {
             .contentShape(Rectangle())
             .gesture(TapGesture(count: 2).onEnded { onClose() })
             .gesture(drag.simultaneously(with: magnify))
+            // The saved crop has its own gestures; these would move a picture that is not shown.
+            .allowsHitTesting(savedCrop == nil)
             .onAppear { resize(geometry.size) }
             .onChange(of: geometry.size) { _, size in resize(size) }
+        }
+        .overlay {
+            if let savedCrop {
+                CullSavedCropView(image: savedCrop, onClose: onClose)
+            }
         }
         .task { await loadBase() }
         .task { await loadSourceSize() }
@@ -256,7 +265,9 @@ private struct CullFocusPage: View {
     /// `Decoding the RAW…` until the first tile is in, or why there will not be one.
     @ViewBuilder
     private var status: some View {
-        if let failure {
+        if savedCrop != nil {
+            EmptyView()
+        } else if let failure {
             Text(failure)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -358,15 +369,39 @@ private struct CullFocusPage: View {
             placeIfReady()
             return
         }
+        // With a saved 1:1 on the phone: straight to it when the phone already knows it is offline,
+        // and otherwise a short wait for the PC (over Tailscale a PC that has gone away may not
+        // refuse the connection, and the default wait is a minute).
+        let hasSaved = services.offline.hasSavedCrop(for: frame.id)
+        if hasSaved && services.cullQueue.isOffline {
+            await useSavedCropOrFail()
+            return
+        }
         let url = services.client.probeCropURL(id: frame.id, center: Point(x: 0.5, y: 0.5))
+        let timeout: TimeInterval = hasSaved ? 8 : 60
         do {
-            let box = try await services.cropGate.run(urgent: true) { try await CropProbe.load(url: url) }
+            let box = try await services.cropGate.run(urgent: true) { try await CropProbe.load(url: url, timeout: timeout) }
             focus.setSourceSize(box.sourceSize, for: frame.id)
             zoom.setSourceSize(box.sourceSize)
             placeIfReady()
         } catch {
-            if !Task.isCancelled { failure = "Could not decode this frame." }
+            if !Task.isCancelled { await useSavedCropOrFail() }
         }
+    }
+
+    /// The 1:1 cannot come from the PC (it cannot be reached, or will not decode this frame). If
+    /// the phone saved one at the AF point, that stands in for it; if not, the page says why.
+    private func useSavedCropOrFail() async {
+        if let data = await services.offline.savedCrop(for: frame.id) {
+            let decoded = await Task.detached(priority: .userInitiated) {
+                ImagePipeline.decode(data, maxPixel: ImagePixels.tile)
+            }.value
+            if let decoded, !Task.isCancelled {
+                savedCrop = decoded.image
+                return
+            }
+        }
+        if !Task.isCancelled { failure = "Could not decode this frame." }
     }
 
     /// Full-resolution tiles, nearest the middle first. Tiles that have left the screen are
@@ -397,7 +432,7 @@ private struct CullFocusPage: View {
             }
         }
         guard !Task.isCancelled else { return }
-        if tiles.isEmpty && !wanted.isEmpty { failure = "Could not decode this frame." }
+        if tiles.isEmpty && !wanted.isEmpty { await useSavedCropOrFail() }
         await warmNeighbours()
     }
 
@@ -417,5 +452,87 @@ private struct CullFocusPage: View {
             else { return }
             focus.setSourceSize(box.sourceSize, for: other)
         }
+    }
+}
+
+/// The 1:1 crop the phone saved at the frame's AF point, standing in for the full-resolution tiles
+/// while the PC cannot make them. It fits the page (1200 px across is about one source pixel to a
+/// device pixel on an iPhone), pinch zooms it, a drag pans it and a double tap goes back.
+@MainActor
+private struct CullSavedCropView: View {
+    private static let maxScale: CGFloat = 6
+
+    let image: UIImage
+    let onClose: () -> Void
+    @State private var scale: CGFloat = 1
+    @State private var settledScale: CGFloat = 1
+    @State private var offset = CGSize.zero
+    @State private var settledOffset = CGSize.zero
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .bottom) {
+                Color.black
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .scaleEffect(scale)
+                    .offset(offset)
+                Text("Saved 1:1 at the AF point")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.7), in: Capsule())
+                    .padding(.bottom, 8)
+                    .allowsHitTesting(false)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+            .contentShape(Rectangle())
+            .gesture(TapGesture(count: 2).onEnded { onClose() })
+            .gesture(drag(in: geometry.size).simultaneously(with: magnify(in: geometry.size)))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Saved 1:1 view at the AF point")
+        .accessibilityHint("Drag to look around, pinch to zoom, double-tap to go back")
+        .accessibilityAddTraits(.isImage)
+        .accessibilityAction(named: "Back") { onClose() }
+    }
+
+    private func drag(in area: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                offset = limited(
+                    CGSize(
+                        width: settledOffset.width + value.translation.width,
+                        height: settledOffset.height + value.translation.height),
+                    scale: scale, in: area)
+            }
+            .onEnded { _ in settledOffset = offset }
+    }
+
+    private func magnify(in area: CGSize) -> some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                scale = min(max(settledScale * value.magnification, 1), Self.maxScale)
+                offset = limited(offset, scale: scale, in: area)
+            }
+            .onEnded { _ in
+                settledScale = scale
+                settledOffset = offset
+            }
+    }
+
+    /// Keeps the picture from being dragged off the page: no further than its own edge.
+    private func limited(_ offset: CGSize, scale: CGFloat, in area: CGSize) -> CGSize {
+        let ratio = image.size.width / max(image.size.height, 1)
+        let width = min(area.width, area.height * ratio)
+        let height = width / max(ratio, 0.001)
+        let slackX = max(0, (width * scale - area.width) / 2)
+        let slackY = max(0, (height * scale - area.height) / 2)
+        return CGSize(
+            width: min(max(offset.width, -slackX), slackX), height: min(max(offset.height, -slackY), slackY))
     }
 }

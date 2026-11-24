@@ -33,6 +33,50 @@ public final class CullWriteQueue {
 
     /// Writes not yet saved, the one in flight included.
     public var pending: Int { writes.count }
+    /// Every frame with a decision still waiting to be saved: the `CullChange.id` of each queued
+    /// `decide`, the one in flight included. A frame leaves it when the server has the write.
+    public var pendingFrameIDs: Set<Int> {
+        var ids = Set<Int>()
+        for case .decide(_, _, _, let changes) in writes {
+            for change in changes { ids.insert(change.id) }
+        }
+        return ids
+    }
+
+    /// Per day, how many distinct frames have a decision waiting to be saved. A queued undo
+    /// counts towards the day of the queued `decide` it takes back, with that decide's frames, so
+    /// the day stays marked; an undo whose decide has already been saved says nothing about its
+    /// day and is left out.
+    public var pendingByDay: [String: Int] {
+        var frames: [String: Set<Int>] = [:]
+        var decided: [String: (day: String, ids: [Int])] = [:]
+        for write in writes {
+            switch write {
+            case .decide(let actionID, let day, _, let changes):
+                let ids = changes.map(\.id)
+                decided[actionID] = (day, ids)
+                frames[day, default: []].formUnion(ids)
+            case .undo(let actionID):
+                if let taken = decided[actionID] { frames[taken.day, default: []].formUnion(taken.ids) }
+            case .progress:
+                break
+            }
+        }
+        return frames.mapValues(\.count).filter { $0.value > 0 }
+    }
+
+    /// The writes waiting, oldest first, the one in flight included: what a day opened before
+    /// they are saved lays over the copy it loaded (`CullSessionModel`).
+    public var queuedWrites: [CullWrite] { writes }
+
+    /// Whether this frame has a decision waiting to be saved.
+    public func isPending(frameID: Int) -> Bool {
+        writes.contains { write in
+            guard case .decide(_, _, _, let changes) = write else { return false }
+            return changes.contains { $0.id == frameID }
+        }
+    }
+
     /// The last try failed to reach the server; the banner reads `Offline · N waiting to save`.
     public private(set) var isOffline = false
     /// The latest write the server refused; nil until one is.

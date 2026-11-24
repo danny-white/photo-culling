@@ -6,13 +6,23 @@ import SwiftUI
 struct CullDayRowView: View {
     @Environment(AppServices.self) private var services
     let row: CullDayRow
+    /// Frames of the day with a decision that only the phone has so far; 0 for none.
+    var pendingTaps = 0
 
     var body: some View {
         HStack(spacing: 12) {
             mosaic
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.title).font(.subheadline.weight(.semibold))
+                HStack(spacing: 5) {
+                    Text(row.title).font(.subheadline.weight(.semibold))
+                    if services.offline.savedDays.contains(row.day.day) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Saved on this phone")
+                    }
+                }
                 Text(row.meta).font(.caption).foregroundStyle(.secondary)
                 if let place = row.place {
                     Text(place).font(.caption).foregroundStyle(Color.accentColor)
@@ -30,7 +40,10 @@ struct CullDayRowView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if let tag = row.tag {
+            // Until the PC has the taps, that is the news, whatever else the row would say.
+            if pendingTaps > 0 {
+                CullPhoneTagView(count: pendingTaps)
+            } else if let tag = row.tag {
                 CullTagView(tag: tag)
             }
         }
@@ -94,5 +107,25 @@ struct CullTagView: View {
         case .quiet: Color(.tertiarySystemFill)
         case .normal: .accentColor
         }
+    }
+}
+
+/// `3 on this phone`: decisions the PC does not have yet. Orange, so it reads as not safe yet.
+struct CullPhoneTagView: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "iphone")
+            Text("\(count) on this phone")
+        }
+        .font(.caption2.weight(.bold))
+        .lineLimit(1)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .foregroundStyle(Color.black)
+        .background(Color.orange, in: Capsule())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(count) on this phone, not saved to the PC yet")
     }
 }

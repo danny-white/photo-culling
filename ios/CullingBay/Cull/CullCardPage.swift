@@ -91,7 +91,7 @@ struct CullCardPage: View {
         .task(id: thumbURL) { await loadThumb() }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(card.fileLine)
-        .accessibilityValue(card.statusLine?.text ?? "Not decided")
+        .accessibilityValue(statusValue)
         .accessibilityAddTraits(.isImage)
         .accessibilityHint("Swipe up or down with one finger to go to the next or previous photo")
         .accessibilityAdjustableAction { direction in
@@ -168,6 +168,11 @@ struct CullCardPage: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(8)
             }
+            if isOnlyOnPhone {
+                CullPhonePill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(8)
+            }
             if let af = card.frame.afPoint {
                 CullAFBoxView(point: af)
             }
@@ -183,6 +188,16 @@ struct CullCardPage: View {
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .opacity(chrome ? 1 : 0)
         .allowsHitTesting(false)
+    }
+
+    /// Some frame of this stack has a decision the PC does not have yet.
+    private var isOnlyOnPhone: Bool {
+        card.stack.frames.contains { services.cullQueue.isPending(frameID: $0.id) }
+    }
+
+    private var statusValue: String {
+        let status = card.statusLine?.text ?? "Not decided"
+        return isOnlyOnPhone ? status + ", on this phone, not saved to the PC yet" : status
     }
 
     /// The two edges peeking over the top of a burst.
