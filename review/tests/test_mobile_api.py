@@ -1208,3 +1208,17 @@ class DecodeAhead(unittest.TestCase):
         self.client.get(f"/m/api/img/{rid}?s=view")                       # already in memory
         time.sleep(0.5)
         self.assertEqual(len(self.calls), 1)
+
+    def test_offline_saving_neither_warms_nor_fills_the_cache(self):
+        rid = self.raws[1]
+        self.client.get(f"/m/api/img/{rid}?s=view&warm=0")                 # no decode-ahead
+        time.sleep(0.5)
+        self.assertEqual(self.calls, [])
+        for _ in range(2):                                                  # keep=0: decoded, not kept
+            r = self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200&keep=0")
+            self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(self.calls), 2)
+        self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200")        # an ordinary 1:1 decodes and keeps
+        self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200&keep=0") # which keep=0 then uses
+        self.assertEqual(len(self.calls), 3)
+

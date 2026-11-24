@@ -263,6 +263,10 @@ rows written to the inbox file, which counts pair partners too. Both are 0 when 
 is still `ok`. Also stamps `sent_at` on the day. `503 {error}` when the inbox share is not mounted; nothing is
 sent. The web app waits for its own queued writes to land first, so the day is sent whole.
 
+**Offline copies.** The app saving days for offline asks for pictures with `warm=0` (no decode-ahead) and
+for 1:1 crops with `keep=0`: decoded one at a time beside the decodes someone is waiting for, and not kept in
+the server's decode cache.
+
 **`POST /m/api/send`**: body `{days: [day, ...]}` → `{ok: true, queued, file_rows, days: [{day, queued}]}`.
 Send for several days at once (the Cull tab's Send all): the same as `day/<day>/send` for each, in one write to
 the inbox file, each day stamped `sent_at`. `400 {error}` unless `days` is a non-empty list of strings; `404
@@ -288,7 +292,7 @@ each other.
 | Route | Returns |
 |---|---|
 | `GET /m/api/img/<id>?s=thumb` | JPEG, longest side 320 |
-| `GET /m/api/img/<id>?s=view` | JPEG, longest side 1616 (a RAW's embedded preview) |
+| `GET /m/api/img/<id>?s=view` | JPEG, longest side 1616 (a RAW's embedded preview) ; asking for it starts the RAW's full decode in the background (decode-ahead) unless `&warm=0` |
 | `GET /m/api/export/<id>?s=large` | JPEG, longest side 3000, decoded from the original (about 1.5 s for a cold RAW) |
 | `GET /m/api/crop/<id>?x=&y=&w=&h=` | JPEG crop at full resolution: centre `x`,`y` as fractions of the upright frame, `w`,`h` in source pixels (64–2400). Header `X-Crop-Box: left,top,w,h of WxH` gives the box actually cut and the full size. |
 | `GET /m/api/export/<id>` | Full-size JPEG for saving: a RAW is decoded, with capture time and GPS in its EXIF; a JPEG or HEIC original is sent as it is. `?dl=1` makes it a download. |

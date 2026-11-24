@@ -179,6 +179,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     full_cache: dict[str, Image.Image] = {}          # path -> full-resolution decode, oldest first
     full_lock = threading.Lock()
     decode_slots = threading.Semaphore(DECODES_AT_ONCE)
+    offline_slots = threading.Semaphore(1)            # the phone saving days for offline: one at a time
     decoding: dict[str, threading.Event] = {}         # path -> set when its decode has finished
     ahead: set[str] = set()                           # decoded in the background, not yet used
     warm_pending: collections.deque[str] = collections.deque(maxlen=WARM_QUEUE)
@@ -199,6 +200,27 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         except Exception:  # noqa: BLE001 - a search will try again, and report what is wrong
             pass
     threading.Thread(target=warm, daemon=True).start()
+
+    def offline_decode(path: str) -> Image.Image:
+        """A full decode for the phone's offline copy of a day (`keep=0` on a crop): one at a
+        time beside the decodes someone is waiting for, and not kept, so saving a day doesn't
+        push your recent 1:1s out of the cache. A frame already in memory is used as it is."""
+        with full_lock:
+            im = full_cache.get(path)
+        if im is not None:
+            perf.note(decode_cache="hit")
+            return im
+        perf.note(decode_cache="offline", ext=Path(path).suffix.lower())
+        with perf.stage("decode_wait"):
+            offline_slots.acquire()
+        try:
+            src = Path(path)
+            with perf.stage("full_decode"):
+                if src.suffix.lower() in stacks.RAW_EXTENSIONS:
+                    return decode_raw(src)
+                return ImageOps.exif_transpose(Image.open(src)).convert("RGB")
+        finally:
+            offline_slots.release()
 
     def full_decode(path: str, background: bool = False) -> Image.Image:
         """The whole frame at full resolution, upright. RAWs go through a full rawpy decode
@@ -1143,7 +1165,8 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         if not r:
             return jsonify({"error": "not found"}), 404
         try:
-            im = full_decode(r["path"])
+            # keep=0: the phone saving a day for offline; decoded aside, not cached
+            im = offline_decode(r["path"]) if request.args.get("keep") == "0" else full_decode(r["path"])
         except Exception as e:
             return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
         W, H = im.size
@@ -1616,7 +1639,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             con.close()
         if not r:
             return jsonify({"error": "not found"}), 404
-        if edge == IMG_EDGE["view"]:
+        if edge == IMG_EDGE["view"] and request.args.get("warm") != "0":
             warm(r["path"])                           # its 1:1 check or HD zoom is likely next
         cached = previews.preview_path(cache_dir, r["path"], edge)
         perf.note(cache="hit" if cached.exists() else "miss", size=request.args.get("s", "view"),
