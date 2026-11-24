@@ -166,10 +166,14 @@ public final class OfflineStore: Sendable {
 
     /// Starts fetching a day: records it as not whole, with the photos it will use, so what is
     /// fetched is never mistaken for an orphan. Does not touch files already there.
-    public func begin(day: String, frames: Int, photos: [Int]) throws {
+    /// `keepingComplete`: a day already saved that is being topped up (its 1:1 crops, after its
+    /// pictures) stays saved meanwhile, so it keeps opening offline.
+    public func begin(day: String, frames: Int, photos: [Int], keepingComplete: Bool = false) throws {
         try state.withLock { state in
+            let stays = keepingComplete && (state.records[day]?.complete ?? false)
             state.records[day] = OfflineDayRecord(
-                day: day, frames: frames, bytes: 0, complete: false, savedAt: Date(), photos: photos)
+                day: day, frames: frames, bytes: stays ? state.records[day]?.bytes ?? 0 : 0, complete: stays,
+                savedAt: Date(), photos: photos)
             try Self.writeManifest(state.records, to: manifestURL)
         }
     }

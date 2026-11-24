@@ -197,7 +197,9 @@ final class OfflineManager {
             else { break }
             tried.insert(next.day.day)
             do {
-                try await download(next, includeCrops: settings.includeCrops)
+                // Pictures first, for every planned day: a day opens offline as soon as they are in.
+                // The 1:1 crops, slow on the PC (it reads each whole RAW from the NAS), come after.
+                try await download(next, includeCrops: false)
             } catch is CancellationError {
                 break
             } catch {
@@ -211,6 +213,30 @@ final class OfflineManager {
                 problem = Self.message(for: error)
             }
         }
+        // Second pass: the crops of the saved days, each day once per sync (a fetch of its data,
+        // then only the files it lacks). The day stays saved meanwhile.
+        if settings.includeCrops && !Task.isCancelled && problem == nil {
+            var topped = Set<String>()
+            while !Task.isCancelled {
+                refreshPlan()
+                guard let next = plan.kept.first(where: { store.isSaved($0.day.day) && !topped.contains($0.day.day) })
+                else { break }
+                topped.insert(next.day.day)
+                do {
+                    try await download(next, includeCrops: true, topUp: true)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    if Self.isOutOfReach(error) {
+                        syncingDay = nil
+                        setState(.offline)
+                        await measure()
+                        return
+                    }
+                    problem = Self.message(for: error)
+                }
+            }
+        }
         syncingDay = nil
         await measure()
         setState(problem.map(State.failed) ?? .idle)
@@ -222,12 +248,12 @@ final class OfflineManager {
         state = new
     }
 
-    private func download(_ entry: OfflinePlan.Entry, includeCrops: Bool) async throws {
+    private func download(_ entry: OfflinePlan.Entry, includeCrops: Bool, topUp: Bool = false) async throws {
         let day = entry.day.day
         let title = CullFormat.dayTitle(date: entry.day.date, folder: entry.day.folder)
         syncingDay = day
         setState(.syncing(dayTitle: title, done: 0, total: 0))
-        try await downloader.download(entry.day, includeCrops: includeCrops) { [weak self] done, total in
+        try await downloader.download(entry.day, includeCrops: includeCrops, topUp: topUp) { [weak self] done, total in
             Task { @MainActor in self?.progress(day: day, title: title, done: done, total: total) }
         }
         await measure()

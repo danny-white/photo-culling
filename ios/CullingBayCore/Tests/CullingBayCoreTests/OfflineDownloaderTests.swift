@@ -246,6 +246,27 @@ struct OfflineDownloaderTests {
         let written = (1...3).flatMap { id in OfflineImageKind.allCases.filter { store.hasImage($0, id: id) } }
         #expect(written.isEmpty)
     }
+
+    @Test func aTopUpAddsTheCropsAndTheDayStaysSavedMeanwhile() async throws {
+        let root = TempRoot()
+        let store = root.store()
+        let base = server()
+        try await downloader(base, store).download(listDay, includeCrops: false)   // pictures first
+        #expect(store.isSaved(dayID))
+        #expect(!store.hasImage(.af, id: 1))
+        let seen = Mutex<[Bool]>([])
+        let id = dayID
+        try await downloader(base, store).download(listDay, includeCrops: true, topUp: true) { _, _ in
+            seen.withLock { $0.append(store.isSaved(id)) }
+        }
+        for id in 1...3 { #expect(store.hasImage(.af, id: id)) }
+        #expect(store.isSaved(dayID))
+        #expect(seen.withLock { !$0.isEmpty && $0.allSatisfy { $0 } })            // never out of offline use
+        let crops = await base.requests.filter { $0.url?.path.hasPrefix("/m/api/crop/") ?? false }.count
+        #expect(crops == 3)
+        let pictures = await base.requests.filter { $0.url?.path.hasPrefix("/m/api/img/") ?? false }.count
+        #expect(pictures == 6)                                                      // not fetched again
+    }
 }
 
 /// How many requests are in flight, and the most there were.

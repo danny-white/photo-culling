@@ -49,7 +49,11 @@ public final class OfflineDownloader: Sendable {
 
     /// Fetches `day` (an entry of the days list, which also names the photos on its row).
     /// Throws `CancellationError` if the task is cancelled, `CullingBayError` for the rest.
-    public func download(_ day: Day, includeCrops: Bool, progress: Progress = { _, _ in }) async throws {
+    /// `topUp`: the day is saved already and this adds what it lacks (its 1:1 crops); it stays
+    /// saved meanwhile.
+    public func download(
+        _ day: Day, includeCrops: Bool, topUp: Bool = false, progress: Progress = { _, _ in }
+    ) async throws {
         let body = try await get(URLBuilding.url(base: baseURL, path: "/m/api/day/\(day.day)"))
         let cull: CullDay
         do {
@@ -74,7 +78,8 @@ public final class OfflineDownloader: Sendable {
             files.append(File(kind: .thumb, id: id, center: nil))
         }
 
-        try store.begin(day: day.day, frames: day.frames, photos: Array(framesSeen.sorted()) + rowOnly)
+        try store.begin(
+            day: day.day, frames: day.frames, photos: Array(framesSeen.sorted()) + rowOnly, keepingComplete: topUp)
         try store.writeDay(day.day, body)
 
         let missing = files.filter { !store.hasImage($0.kind, id: $0.id) }
