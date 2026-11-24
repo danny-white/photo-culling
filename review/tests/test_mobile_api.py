@@ -1142,6 +1142,13 @@ class DecodeAhead(unittest.TestCase):
             time.sleep(0.4)
             return Image.new("RGB", (600, 400), "grey")
 
+        self.regions = []
+
+        def fake_region(path, x, y, w, h):
+            with self.lock:
+                self.regions.append(Path(path).name)
+            return Image.new("RGB", (w, h), "grey"), (0, 0, w, h, 600, 400)
+
         def db_ro():
             con = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
             con.row_factory = sqlite3.Row
@@ -1158,7 +1165,7 @@ class DecodeAhead(unittest.TestCase):
         app.register_blueprint(mobile.make_blueprint(
             db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state",
             inbox=tmp / "inbox", check_mount=False, ingest_log=tmp / "ingest.log",
-            ollama_url="http://127.0.0.1:9", raw_decoder=fake_decode))
+            ollama_url="http://127.0.0.1:9", raw_decoder=fake_decode, region_decoder=fake_region))
         self.client = app.test_client()
         con = db_ro()
         try:
@@ -1214,11 +1221,11 @@ class DecodeAhead(unittest.TestCase):
         self.client.get(f"/m/api/img/{rid}?s=view&warm=0")                 # no decode-ahead
         time.sleep(0.5)
         self.assertEqual(self.calls, [])
-        for _ in range(2):                                                  # keep=0: decoded, not kept
+        for _ in range(2):                                                  # keep=0: the crop's area only
             r = self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200&keep=0")
             self.assertEqual(r.status_code, 200)
-        self.assertEqual(len(self.calls), 2)
+            self.assertEqual(r.headers["X-Crop-Box"], "0,0,200,200 of 600x400")
+        self.assertEqual((len(self.calls), len(self.regions)), (0, 2))      # no full decode, nothing kept
         self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200")        # an ordinary 1:1 decodes and keeps
         self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200&keep=0") # which keep=0 then uses
-        self.assertEqual(len(self.calls), 3)
-
+        self.assertEqual((len(self.calls), len(self.regions)), (1, 2))

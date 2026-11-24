@@ -264,8 +264,10 @@ is still `ok`. Also stamps `sent_at` on the day. `503 {error}` when the inbox sh
 sent. The web app waits for its own queued writes to land first, so the day is sent whole.
 
 **Offline copies.** The app saving days for offline asks for pictures with `warm=0` (no decode-ahead) and
-for 1:1 crops with `keep=0`: decoded one at a time beside the decodes someone is waiting for, and not kept in
-the server's decode cache.
+for 1:1 crops with `keep=0`. Such a crop of a RAW not already in memory is decoded for the crop's area only
+(`review/region_decode.py`, ~0.35 s against ~1.4 s for the whole frame; the same colour and brightness as the full
+decode), two at a time beside the decodes someone is waiting for, and nothing is kept in the server's decode
+cache. A RAW the region decode can't read (not a 2x2 Bayer sensor) is decoded whole instead.
 
 **`POST /m/api/send`**: body `{days: [day, ...]}` → `{ok: true, queued, file_rows, days: [{day, queued}]}`.
 Send for several days at once (the Cull tab's Send all): the same as `day/<day>/send` for each, in one write to

@@ -31,6 +31,7 @@ from PIL import Image, ImageOps
 
 import perf
 import previews
+import region_decode
 import search
 import stacks
 
@@ -161,12 +162,13 @@ def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
                    ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
-                   raw_decoder=None) -> Blueprint:
+                   raw_decoder=None, region_decoder=None) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
     the narrow AICullInbox mount (tests turn it off and pass a temp dir). raw_decoder(path) ->
-    PIL image replaces the rawpy decode (tests pass a fast fake)."""
+    PIL image replaces the rawpy decode (tests pass a fast fake); region_decoder(path, x, y, w, h)
+    -> (image, box) replaces region_decode.decode_region for the offline crops."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
     ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -179,7 +181,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     full_cache: dict[str, Image.Image] = {}          # path -> full-resolution decode, oldest first
     full_lock = threading.Lock()
     decode_slots = threading.Semaphore(DECODES_AT_ONCE)
-    offline_slots = threading.Semaphore(1)            # the phone saving days for offline: one at a time
+    offline_slots = threading.Semaphore(2)            # the phone saving days for offline: two at a time
     decoding: dict[str, threading.Event] = {}         # path -> set when its decode has finished
     ahead: set[str] = set()                           # decoded in the background, not yet used
     warm_pending: collections.deque[str] = collections.deque(maxlen=WARM_QUEUE)
@@ -1164,8 +1166,15 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             con.close()
         if not r:
             return jsonify({"error": "not found"}), 404
+        if request.args.get("keep") == "0":
+            # The phone saving a day for offline: a RAW not already in memory is decoded for the
+            # crop's area only (region_decode, ~0.35 s against ~1.4 s for the whole frame).
+            made = offline_region(r["path"], x, y, w, h)
+            if made is not None:
+                crop, (left, top_, w, h, W, H) = made
+                return crop_response(crop, left, top_, w, h, W, H)
         try:
-            # keep=0: the phone saving a day for offline; decoded aside, not cached
+            # keep=0 otherwise: the whole frame decoded aside, not cached
             im = offline_decode(r["path"]) if request.args.get("keep") == "0" else full_decode(r["path"])
         except Exception as e:
             return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
@@ -1175,15 +1184,40 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         cy = min(max(y, 0.0), 1.0) * H
         left = int(min(max(cx - w / 2, 0), W - w))
         top_ = int(min(max(cy - h / 2, 0), H - h))
+        return crop_response(im.crop((left, top_, left + w, top_ + h)), left, top_, w, h, W, H)
+
+    def crop_response(crop: Image.Image, left: int, top: int, w: int, h: int, W: int, H: int) -> Response:
         buf = io.BytesIO()
         with perf.stage("encode"):
             # Quality 80: a third smaller than 88 (317 KB to 215 KB for a 1200 px tile), with no
             # difference you can see at 1:1; the transfer to the phone is most of a zoom's wait.
-            im.crop((left, top_, left + w, top_ + h)).save(buf, "JPEG", quality=80)
+            crop.save(buf, "JPEG", quality=80)
         resp = Response(buf.getvalue(), mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "max-age=3600"
-        resp.headers["X-Crop-Box"] = f"{left},{top_},{w},{h} of {W}x{H}"
+        resp.headers["X-Crop-Box"] = f"{left},{top},{w},{h} of {W}x{H}"
         return resp
+
+    def offline_region(path: str, x: float, y: float, w: int, h: int):
+        """(crop, box) for an offline crop of a RAW not already in memory, or None to decode the
+        whole frame instead (in memory already, not a RAW, or a RAW region_decode can't read)."""
+        if Path(path).suffix.lower() not in stacks.RAW_EXTENSIONS:
+            return None
+        with full_lock:
+            if path in full_cache:
+                return None
+        decode = region_decoder or region_decode.decode_region
+        with perf.stage("decode_wait"):
+            offline_slots.acquire()
+        try:
+            with perf.stage("region_decode"):
+                made = decode(path, x, y, w, h)
+            perf.note(decode_cache="region", ext=Path(path).suffix.lower())
+            return made
+        except Exception as e:  # noqa: BLE001 - an unusual sensor layout: decode it whole instead
+            log.info("region decode fell back for %s: %s", Path(path).name, pc._exc_text(e)[:120])
+            return None
+        finally:
+            offline_slots.release()
 
     @bp.route("/api/gps-health")
     def api_gps_health():
