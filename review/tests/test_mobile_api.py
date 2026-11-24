@@ -1135,11 +1135,12 @@ class DecodeAhead(unittest.TestCase):
         tmp = Path(self.tmp.name)
         self.calls = []
         self.lock = threading.Lock()
+        self.decode_seconds = 0.4
 
         def fake_decode(path):
             with self.lock:
                 self.calls.append(Path(path).name)
-            time.sleep(0.4)
+            time.sleep(self.decode_seconds)
             return Image.new("RGB", (600, 400), "grey")
 
         self.regions = []
@@ -1172,6 +1173,9 @@ class DecodeAhead(unittest.TestCase):
             self.raws = [r[0] for r in con.execute(
                 "SELECT rowid FROM images WHERE path LIKE ? AND lower(filename) LIKE '%.arw' ORDER BY rowid LIMIT 3",
                 (f"%/{DAY}/%",))]
+            self.many_raws = [r[0] for r in con.execute(
+                "SELECT rowid FROM images WHERE lower(filename) LIKE '%.arw' ORDER BY rowid LIMIT ?",
+                (mobile.FULL_CACHE_FRAMES + 4,))]
         finally:
             con.close()
 
@@ -1186,6 +1190,19 @@ class DecodeAhead(unittest.TestCase):
                     return True
             time.sleep(0.02)
         return False
+
+    def test_crops_keep_working_once_the_decode_cache_is_full(self):
+        # the cache holds FULL_CACHE_FRAMES decodes; the ones after that evict the oldest
+        self.decode_seconds = 0
+        for rid in self.many_raws:
+            r = self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=64&h=64")
+            self.assertEqual(r.status_code, 200, f"crop of {rid}: {r.get_json()}")
+        # the oldest was evicted and decodes again; the newest is still cached
+        before = len(self.calls)
+        self.assertEqual(self.client.get(f"/m/api/crop/{self.many_raws[-1]}?x=0.5&y=0.5&w=64&h=64").status_code, 200)
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(self.client.get(f"/m/api/crop/{self.many_raws[0]}?x=0.5&y=0.5&w=64&h=64").status_code, 200)
+        self.assertEqual(len(self.calls), before + 1)
 
     def test_a_cards_picture_starts_its_decode_and_the_crop_uses_it(self):
         rid = self.raws[0]

@@ -272,7 +272,9 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 if background:
                     ahead.add(path)
                 while len(full_cache) > FULL_CACHE_FRAMES:
-                    ahead.discard(full_cache.pop(next(iter(full_cache))))
+                    oldest = next(iter(full_cache))
+                    del full_cache[oldest]
+                    ahead.discard(oldest)
             return im
         finally:
             with full_lock:
