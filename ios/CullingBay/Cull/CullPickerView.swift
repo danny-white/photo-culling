@@ -2,9 +2,10 @@ import CullingBayCore
 import SwiftUI
 import UIKit
 
-/// The burst picker (`vStrip` and `vKnock` in `app.js`): a burst of up to six frames as a
-/// filmstrip, a bigger one as a knock-out grid. The state is `CullPickerModel`; this draws it and
-/// maps gestures onto it. Keeping goes through the session, as any decision does.
+/// The burst picker (`vStrip` in `app.js`): any burst as a filmstrip, the big frame above and
+/// a strip below that scrolls through every frame and keeps the one on show in the middle. The
+/// state is `CullPickerModel`; this draws it and maps gestures onto it. Keeping goes through the
+/// session, as any decision does.
 struct CullPickerView: View {
     @Environment(AppServices.self) private var services
     let session: CullSessionModel
@@ -18,10 +19,7 @@ struct CullPickerView: View {
                     Text(picker.subtitle)
                 }
                 CullOfflineBanner(queue: session.queue)
-                switch picker.mode {
-                case .strip: CullStripPicker(session: session, picker: picker)
-                case .knockOut: CullKnockOutPicker(session: session, picker: picker)
-                }
+                CullStripPicker(session: session, picker: picker)
                 footer(picker)
             }
         }
@@ -344,60 +342,5 @@ struct CullMarkPill: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(CullStyle.color(mark.verdict), in: Capsule())
-    }
-}
-
-// MARK: Knock-out
-
-/// A burst of more than six: every frame at once, tap the weak ones out, keep what is left (like
-/// Lightroom's Survey view). A double-tap checks a frame's focus instead.
-private struct CullKnockOutPicker: View {
-    @Environment(AppServices.self) private var services
-    let session: CullSessionModel
-    let picker: CullPickerModel
-
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: 3)
-
-    var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 5) {
-                ForEach(picker.frames) { item in tile(item) }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-        }
-    }
-
-    private func tile(_ item: CullPickerFrame) -> some View {
-        let out = picker.isOut(item.id)
-        return ZStack {
-            Color.black
-            RemoteImage(url: services.client.imageURL(id: item.id, size: .thumb), fit: true)
-                .opacity(out ? 0.22 : 1)
-            if out {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .heavy))
-                    .foregroundStyle(Color.white)
-                    .frame(width: 26, height: 26)
-                    .background(Color.red, in: Circle())
-            }
-            if item.isSharpest {
-                Circle().fill(Color.yellow).frame(width: 7, height: 7)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .padding(6)
-            }
-        }
-        .aspectRatio(1.5, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 5))
-        .contentShape(RoundedRectangle(cornerRadius: 5))
-        .onTapGesture {
-            if picker.tapKnockOut(item.index, at: .now) == .focus {
-                session.openFocus(frameIndex: item.index)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(item.frame.file + (out ? ", out" : ""))
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction(named: "Check focus") { session.openFocus(frameIndex: item.index) }
     }
 }

@@ -248,18 +248,15 @@ struct CullFocusModelTests {
         #expect(try #require(model.picker).linkedFocus == false)            // a new picker starts unlinked
     }
 
-    @Test func aKnockOutFrameOpensFocusToo() async throws {
+    @Test func aFrameOfABigBurstOpensFocusToo() async throws {
         let (model, _) = await open(day(8))
         model.openPicker()
         let picker = try #require(model.picker)
-        let tap = picker.tapKnockOut(4, at: .now)
-        #expect(tap == .toggled && picker.isOut(105))
-        let tap2 = picker.tapKnockOut(4, at: .now)                          // a double tap
-        #expect(tap2 == .focus && !picker.isOut(105))
+        picker.show(4)
         model.openFocus(frameIndex: 4)
         #expect(try focus(model).frame.id == 105 && focus(model).counter == "5/8")
         model.closeFocus()
-        #expect(picker.knockedOut.isEmpty)
+        #expect(picker.viewIndex == 4)
     }
 
     // MARK: Keep and Reject from a card's focus

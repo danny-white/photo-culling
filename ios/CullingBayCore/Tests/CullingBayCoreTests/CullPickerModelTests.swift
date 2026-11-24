@@ -5,7 +5,7 @@ import FoundationNetworking
 import Testing
 @testable import CullingBayCore
 
-/// The burst picker: `openPicker`, `vStrip`, `vKnock` and the picker's part of the click switch.
+/// The burst picker: `openPicker`, `vStrip` and the picker's part of the click switch.
 @MainActor
 @Suite("Cull: burst picker")
 struct CullPickerModelTests {
@@ -43,19 +43,37 @@ struct CullPickerModelTests {
 
     // MARK: Opening
 
-    @Test func aBurstOfSixOrFewerOpensAsAStripAndABiggerOneAsAKnockOut() async throws {
-        let (six, _) = await open(day(6))
-        six.openPicker()
-        #expect(six.screen == .picker)
-        #expect(try picker(six).mode == .strip)
-        let (seven, _) = await open(day(7))
-        seven.openPicker()
-        #expect(seven.screen == .picker)
-        #expect(try picker(seven).mode == .knockOut)
-        #expect(CullPickerModel.stripMax == 6)
+    @Test func everyBurstOpensAsAStripEvenABigOne() async throws {
+        let (big, _) = await open(day(15, lead: 108))
+        big.openPicker()
+        #expect(big.screen == .picker)
+        let p = try picker(big)
+        #expect(p.frames.count == 15)
+        #expect(p.viewIndex == 7 && p.viewed.isSharpest)                 // opens on the sharpest, not the first
+        #expect(p.subtitle == "Tick the keepers")
+        #expect(p.keepLabel == "Tick a keeper" && !p.canKeep)
+        p.show(14)
+        p.tick()
+        #expect(p.keepLabel == "Keep 1 · reject 14")
         let (two, _) = await open(day(2))
         two.openPicker()
-        #expect(try picker(two).mode == .strip)
+        #expect(try picker(two).frames.count == 2)
+    }
+
+    @Test func comingBackToADecidedBigBurstTicksTheFramesThatWereKept() async throws {
+        let decisions: [Int: Decision] = [
+            101: draft(.reject, note: "n"), 102: draft(.pick), 103: draft(.reject, note: "n"),
+            104: draft(.reject, note: "n"), 105: draft(.pick, stars: 4), 106: draft(.reject, note: "n"),
+            107: draft(.reject, note: "n"),
+        ]
+        let (model, _) = await open(day(7, decisions: decisions))
+        model.go(-1)
+        model.openPicker()
+        let p = try picker(model)
+        #expect(p.selected == [102, 105])
+        #expect(p.rates == [105: 4])
+        #expect(p.keeps.map(\.id) == [102, 105])
+        #expect(p.keepLabel == "Keep 2 · reject 5")
     }
 
     @Test func aSingleDoesNotOpenAPickerAndNeitherDoesAScreenOtherThanTheCards() async {
@@ -69,14 +87,14 @@ struct CullPickerModelTests {
         #expect(summary.screen == .summary && summary.picker == nil)
     }
 
-    @Test func aSwipeUpAndChooseOpenOnTheFirstFrameButTheStripUnderTheCardOpensOnTheShownOne() async throws {
+    @Test func aSwipeUpAndChooseOpenOnTheSharpestFrameAndSoDoesTheStripUnderTheCard() async throws {
         let (model, _) = await open(day(5, lead: 103))
         model.openPicker()                                                 // swipe up, Choose
-        #expect(try picker(model).viewIndex == 0)                          // not the sharpest
+        #expect(try picker(model).viewIndex == 2)                          // the sharpest
+        #expect(try picker(model).viewed.isSharpest)
         model.closePicker()
         model.openPicker(fromStart: false)                                 // the strip under the card
         #expect(try picker(model).viewIndex == 2)                          // the lead is what the card shows
-        #expect(try picker(model).viewed.isSharpest)
     }
 
     @Test func comingBackToADecidedBurstTicksTheFramesThatWereKept() async throws {
@@ -90,40 +108,12 @@ struct CullPickerModelTests {
         model.openPicker()
         let p = try picker(model)
         #expect(p.selected == [102, 104])
-        #expect(p.viewIndex == 0)                                          // swipe up and Choose start at the first
+        #expect(p.viewIndex == 0)                                          // the lead (101) is the first here
         #expect(p.rates == [102: 3])                                       // the star row shows 3, so a keep saves 3
         #expect(p.keeps.map(\.id) == [102, 104])
         model.closePicker()
         model.openPicker(fromStart: false)
         #expect(try picker(model).viewIndex == 1)                          // the strip: the first kept frame, as the card shows
-    }
-
-    @Test func comingBackToADecidedBigBurstKnocksOutTheFramesThatWereNot() async throws {
-        let decisions: [Int: Decision] = [
-            101: draft(.reject, note: "n"), 102: draft(.pick), 103: draft(.reject, note: "n"),
-            104: draft(.reject, note: "n"), 105: draft(.pick), 106: draft(.reject, note: "n"),
-            107: draft(.reject, note: "n"),
-        ]
-        let (model, _) = await open(day(7, decisions: decisions))
-        model.go(-1)
-        model.openPicker()
-        let p = try picker(model)
-        #expect(p.mode == .knockOut)
-        #expect(p.knockedOut == [101, 103, 104, 106, 107])
-        #expect(p.keeps.map(\.id) == [102, 105])
-        #expect(p.subtitle == "2 left · tap the weaker frames out")
-    }
-
-    @Test func anUndecidedBigBurstStartsWithNothingOutAndSoDoesOneThatWasRejectedWhole() async throws {
-        let (fresh, _) = await open(day(8))
-        fresh.openPicker()
-        #expect(try picker(fresh).knockedOut.isEmpty)
-        #expect(try picker(fresh).keeps.count == 8)
-        let rejected = Dictionary(uniqueKeysWithValues: (101...107).map { ($0, draft(.reject)) })
-        let (all, _) = await open(day(7, decisions: rejected))
-        all.go(-1)
-        all.openPicker()
-        #expect(try picker(all).knockedOut.isEmpty)                        // nothing was kept, so nothing starts out
     }
 
     @Test func openingAndClosingThePickerSavesAndDecidesNothing() async throws {
@@ -406,90 +396,6 @@ struct CullPickerModelTests {
         model.undo()
         #expect(model.decisions[103] == draft(.reject, note: "x"))
         #expect(model.decisions[101] == draft(.pick, stars: 2))
-    }
-
-    // MARK: Knock-out
-
-    @Test func tappingAFrameOutAndBackInAndKeepingWhatIsLeft() async throws {
-        let (model, rig) = await open(day(8))
-        model.openPicker()
-        let p = try picker(model)
-        p.toggleOut(102)
-        p.toggleOut(103)
-        p.toggleOut(102)                                                    // back in
-        #expect(p.knockedOut == [103])
-        #expect(p.isOut(103) && !p.isOut(102))
-        #expect(p.subtitle == "7 left · tap the weaker frames out")
-        #expect(p.keepLabel == "Keep the 7 left")
-        for id in 104...108 { p.toggleOut(id) }
-        #expect(p.keepLabel == "Keep the 2 left")
-        model.keepPicked()
-        let note = "Burst reject · kept B101, B102"
-        #expect(model.decisions[101] == draft(.pick) && model.decisions[102] == draft(.pick))
-        #expect((103...108).allSatisfy { model.decisions[$0] == draft(.reject, note: note) })
-        #expect(model.toast?.text == "Kept 2 frames · 6 rejected with a note")
-        await rig.settle()
-        let changes = sentChanges(decided(rig)[0])
-        #expect(changes.allSatisfy { $0["via"] as? String == "burst" && $0["stars"] == nil })
-        #expect(changes.map { $0["id"] as? Int } == [101, 102, 103, 104, 105, 106, 107, 108])
-    }
-
-    @Test func aKnockOutKeepsOneFrameByNameAndNeverTakesStars() async throws {
-        let (model, _) = await open(day(7))
-        model.openPicker()
-        let p = try picker(model)
-        for id in 101...107 where id != 105 { p.toggleOut(id) }
-        p.tick()                                                            // the strip's controls do nothing here
-        p.rate(stars: 5)
-        #expect(p.selected.isEmpty && p.rates.isEmpty && p.keepRates.isEmpty)
-        model.keepPicked()
-        #expect(model.toast?.text == "Kept B105 · 6 rejected with a note")
-        #expect(model.decisions[105] == draft(.pick))
-    }
-
-    @Test func aKnockOutWithEveryFrameOutCannotBeKept() async throws {
-        let (model, rig) = await open(day(7))
-        model.openPicker()
-        let p = try picker(model)
-        for id in 101...107 { p.toggleOut(id) }
-        #expect(p.keeps.isEmpty && !p.canKeep && p.keepLabel == "Keep the 0 left")
-        model.keepPicked()
-        #expect(model.screen == .picker && model.decisions.isEmpty)
-        await rig.settle()
-        #expect(decided(rig).isEmpty)
-    }
-
-    @Test func aKnockOutTapDecidesBetweenAToggleAndADoubleTap() async throws {
-        let (model, _) = await open(day(8))
-        model.openPicker()
-        let p = try picker(model)
-        let t0 = ContinuousClock.now
-        #expect(p.tapKnockOut(2, at: t0) == .toggled)
-        #expect(p.knockedOut == [103])
-        // A second tap on the same tile soon after takes the first one's toggle back and asks for focus.
-        #expect(p.tapKnockOut(2, at: t0.advanced(by: .milliseconds(200))) == .focus)
-        #expect(p.knockedOut.isEmpty)
-        // A third tap straight after is a new first tap, not another double.
-        #expect(p.tapKnockOut(2, at: t0.advanced(by: .milliseconds(300))) == .toggled)
-        #expect(p.knockedOut == [103])
-        // Too slow, or another tile: two single taps.
-        #expect(p.tapKnockOut(2, at: t0.advanced(by: .milliseconds(900))) == .toggled)
-        #expect(p.knockedOut.isEmpty)
-        #expect(p.tapKnockOut(4, at: t0.advanced(by: .milliseconds(1000))) == .toggled)
-        #expect(p.tapKnockOut(5, at: t0.advanced(by: .milliseconds(1100))) == .toggled)
-        #expect(p.knockedOut == [105, 106])
-        #expect(p.tapKnockOut(99, at: t0.advanced(by: .milliseconds(1200))) == .toggled)   // no such tile
-    }
-
-    @Test func aDoubleTapOnAFrameThatWasOutLeavesItOut() async throws {
-        let (model, _) = await open(day(7))
-        model.openPicker()
-        let p = try picker(model)
-        p.toggleOut(101)                                                    // out already
-        let t0 = ContinuousClock.now
-        #expect(p.tapKnockOut(0, at: t0) == .toggled && !p.isOut(101))      // the first tap brought it back
-        #expect(p.tapKnockOut(0, at: t0.advanced(by: .milliseconds(100))) == .focus)
-        #expect(p.isOut(101))                                               // and the second put it back out, as it was
     }
 
     // MARK: The card
