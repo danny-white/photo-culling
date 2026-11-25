@@ -417,7 +417,8 @@ class BackupHealth(unittest.TestCase):
         trial = tmp / "trial.db"
         with closing(sqlite3.connect(trial)) as con:
             con.executescript("""
-                CREATE TABLE images (path TEXT, filename TEXT, status TEXT, processed_at TEXT, shot_checked TEXT, gps_checked TEXT);
+                CREATE TABLE images (path TEXT, filename TEXT, status TEXT, processed_at TEXT, shot_checked TEXT, gps_checked TEXT,
+                                     size INTEGER, attempts INTEGER, error_class TEXT, error_msg TEXT);
                 CREATE TABLE embeddings (path TEXT, embed_version TEXT);
                 CREATE TABLE day_summaries (folder TEXT);""")
 
@@ -437,7 +438,8 @@ class BackupHealth(unittest.TestCase):
         app.register_blueprint(mobile.make_blueprint(
             db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state",
             inbox=tmp / "inbox", check_mount=False, ingest_log=tmp / "ingest.log",
-            ollama_url="http://127.0.0.1:9", backup_status=cls.status_file))
+            ollama_url="http://127.0.0.1:9", backup_status=cls.status_file,
+            known_unreadable=tmp / "known-unreadable.txt"))
         cls.client = app.test_client()
 
     @classmethod
