@@ -18,11 +18,7 @@ enum OfflinePreferences {
     static let limitRange: ClosedRange<Double> = 0.5...10
 
     /// The settings as they stand, for code that does not sit in a view.
-    struct Values: Sendable {
-        let isEnabled: Bool
-        let limitGB: Double
-        let includeCrops: Bool
-    }
+    typealias Values = OfflineSettings
 
     static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabled) }
 
@@ -50,4 +46,12 @@ enum OfflinePreferences {
         guard let data = try? JSONEncoder().encode(raw) else { return }
         UserDefaults.standard.set(data, forKey: pins)
     }
+}
+
+/// `OfflinePreferences` as the settings `OfflineSync` reads, each read going to `UserDefaults`.
+struct UserDefaultsOfflineSettings: OfflineSettingsSource {
+    var isEnabled: Bool { OfflinePreferences.isEnabled }
+    func current() -> OfflineSettings { OfflinePreferences.current() }
+    func loadPins() -> [String: OfflinePin] { OfflinePreferences.loadPins() }
+    func savePins(_ pins: [String: OfflinePin]) { OfflinePreferences.savePins(pins) }
 }
