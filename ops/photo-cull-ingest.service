@@ -6,3 +6,7 @@ Description=Photo culling ingest watcher (one-shot poll)
 Type=oneshot
 WorkingDirectory=/home/danny/photo-culling
 ExecStart=/home/danny/photo-culling/ops/watch_ingest.sh
+# A real backlog ran about 8 hours (3-4 Oct). Without a limit, a run stuck on a stale NAS mount
+# leaves this unit "activating" forever, and the timer never starts it again (a running oneshot
+# is not restarted).
+TimeoutStartSec=12h

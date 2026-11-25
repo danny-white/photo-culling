@@ -1,0 +1,28 @@
+[Unit]
+Description=Photo culling review server (culling bay UI)
+# Local project: /home/danny/photo-culling
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/danny/photo-culling
+# The flags (systemd needs the command on one line, so they are explained here):
+#   --db           trial_out/trial.db: the photo index. The server only reads it.
+#   --log          trial_out/run.log: the tagging run's log, shown on the desktop monitor page.
+#   --annotations  trial_out/annotations.db: the phone's decisions and Practice progress. This
+#                  one is written to, and is backed up daily (see ops/README.md, "Backups").
+#   --folders      the library year folders the monitor page can resume or redrive a run from.
+#   --server-pidfile  the server writes its own PID here, so it can be stopped later.
+#   --host 0.0.0.0    listen on every interface, so the phone reaches it over the tailnet
+#                     (100.82.57.4) as well as the LAN.
+#   --port 8000       the address the phone app and web pages are pointed at.
+ExecStart=/home/danny/photo-culling/venv/bin/python /home/danny/photo-culling/review/server.py --db /home/danny/photo-culling/trial_out/trial.db --log /home/danny/photo-culling/trial_out/run.log --annotations /home/danny/photo-culling/trial_out/annotations.db --folders /mnt/passport/Pictures/2024 /mnt/passport/Pictures/2025 --server-pidfile /home/danny/photo-culling/trial_out/review-server.pid --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+# photo_cull.py 'run' subprocesses spawned by /api/intervene detach via start_new_session=True
+# and track themselves through their own pidfile. KillMode=process (not the control-group
+# default) keeps an in-flight tagging run alive across a server restart/redeploy.
+KillMode=process
+
+[Install]
+WantedBy=default.target

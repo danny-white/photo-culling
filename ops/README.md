@@ -52,14 +52,29 @@ show-user $USER -p Linger` should read `Linger=yes`, which is what lets the syst
 manager (and its enabled timers) start at boot without an interactive login. If a fresh box ever
 shows `Linger=no`, enable it with `loginctl enable-linger $USER`.
 
-## One-time setup
+## Installing the units
+
+Every unit lives in `ops/` and is a symlink from `~/.config/systemd/user/`, so the repo is the
+only copy and `git log` shows every change. Never edit the file under `~/.config/systemd/user/`;
+edit the one in `ops/`.
+
+| Unit | What it does |
+|---|---|
+| `photo-review.service` | The review server: Culling Bay's web pages and API on port 8000, the desktop monitor. Starts at login, restarts on failure. `KillMode=process`, so a tagging run it started survives a restart. |
+| `photo-cull-ingest.service` | One poll of the ingest watcher (`watch_ingest.sh`). A oneshot with a 12-hour limit, so a run stuck on a stale NAS mount is stopped instead of blocking every later poll. |
+| `photo-cull-ingest.timer` | Starts the poll 5 minutes after boot, then every 15 minutes. |
 
 ```bash
-ln -s /home/danny/photo-culling/ops/photo-cull-ingest.service ~/.config/systemd/user/
-ln -s /home/danny/photo-culling/ops/photo-cull-ingest.timer ~/.config/systemd/user/
+ln -sf ~/photo-culling/ops/photo-review.service ~/.config/systemd/user/
+ln -sf ~/photo-culling/ops/photo-cull-ingest.service ~/.config/systemd/user/
+ln -sf ~/photo-culling/ops/photo-cull-ingest.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now photo-cull-ingest.timer
+systemctl --user enable --now photo-cull-ingest.timer     # timers: enable --now
+systemctl --user enable --now photo-review.service        # first install only
 ```
+
+After changing a unit in `ops/`, run `systemctl --user daemon-reload`. A changed `ExecStart`
+also needs `systemctl --user restart photo-review.service` (the server is down for a few seconds).
 
 ### Batch-complete email (optional but recommended)
 

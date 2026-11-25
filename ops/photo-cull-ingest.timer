@@ -4,7 +4,8 @@ Description=Poll for new photo shoots to cull + sync every 15 minutes
 [Timer]
 OnBootSec=5min
 OnUnitActiveSec=15min
-Persistent=true
+# No Persistent=true here: it only catches up missed OnCalendar= runs, and does nothing with
+# OnBootSec=/OnUnitActiveSec=. A poll after boot comes from OnBootSec.
 
 [Install]
 WantedBy=timers.target
