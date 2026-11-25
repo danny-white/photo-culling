@@ -126,6 +126,25 @@ html.hide-af .af{display:none}
 .tag{flex:none;font:700 10.5px/1 var(--body);padding:5px 8px;border-radius:999px;background:var(--accent);color:var(--on-accent)}
 .tag.quiet{background:var(--raise);color:var(--muted)}
 .tag.warn{background:var(--hint);color:#1A1200}
+.tag.unsent{background:color-mix(in srgb,var(--hint) 22%,var(--panel));color:var(--hint)}
+.day-b em.unsent{font-style:normal;color:var(--hint)}
+/* Send all: the row on the Days list, and its sheet */
+.send-all{display:flex;align-items:center;gap:6px 14px;margin:4px 12px 6px;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);text-align:left;cursor:pointer;flex:none}
+.send-all b{font-size:14px;color:var(--accent)}
+.send-all span{flex:1;font-size:12.5px;color:var(--muted)}
+.send-all i{font-style:normal;color:var(--muted);font-size:18px}
+.sa-head{display:flex;align-items:baseline;justify-content:space-between}
+.send-sheet .sec{margin:12px 0 4px}
+.sa-row{display:flex;align-items:center;gap:12px;width:100%;padding:8px 4px;border:0;border-bottom:1px solid var(--line);background:none;text-align:left;cursor:pointer}
+.sa-row i{flex:none;width:22px;height:22px;border-radius:50%;border:1.5px solid var(--muted);display:grid;place-items:center;color:transparent}
+.sa-row i svg{width:14px;height:14px}
+.sa-row[aria-checked="true"] i{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.sa-row span{display:grid;gap:2px;min-width:0}
+.sa-row b{font-size:14px}
+.sa-row small{font-size:12px;color:var(--muted)}
+.sa-row:disabled{cursor:default;opacity:.7}
+.sa-msg{margin:8px 0 0;font-size:13px;color:var(--muted);min-height:1.3em}
+.sa-msg.warn{color:var(--hint)}
 
 /* day grid */
 .gv-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;margin-top:2px}

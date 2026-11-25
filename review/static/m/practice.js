@@ -32,7 +32,7 @@ function whenPlace(p) { return [dateLabel(p.date || p.day), p.place].filter(Bool
 async function load() {
   main.innerHTML = '<p class="p-note">Loading challenges…</p>';
   try {
-    const r = await fetch('/m/api/practice', {cache:'no-store'});
+    const r = await fetch('/m/api/practice', {cache:'no-cache'});
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
     S.challenges = body.challenges || [];

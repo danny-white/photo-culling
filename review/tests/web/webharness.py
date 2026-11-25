@@ -81,6 +81,13 @@ class Server:
             static_dir=Path(os.environ.get("CB_WEB_STATIC", ROOT / "review" / "static" / "m")), state_dir=self.state,
             inbox=self.inbox, check_mount=False, ingest_log=self.tmp / "ingest.log",
             ollama_url="http://127.0.0.1:9"))   # nothing listens there: search never reaches Ollama
+        self.log = []                         # (method, path, status) of every request, newest last
+
+        @app.after_request
+        def note(resp):
+            from flask import request
+            self.log.append((request.method, request.path, resp.status_code))
+            return resp
         self.srv = make_server("127.0.0.1", PORT, app, threaded=True)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
@@ -107,6 +114,7 @@ class Server:
 
     def reset(self):
         """Forget every decision, position, send, receipt and Lightroom state."""
+        self.log.clear()
         for p in list(self.inbox.iterdir()) + list(self.applied.iterdir()):
             if p.is_file():
                 p.unlink()
@@ -166,12 +174,13 @@ class Server:
 _server = None
 _pw = None
 _browser = None
+_no_images = None
 _why_not = None
 
 
 def _shutdown():
     global _browser, _pw, _server
-    for close in (lambda: _browser and _browser.close(), lambda: _pw and _pw.stop(),
+    for close in (lambda: _no_images and _no_images.close(), lambda: _browser and _browser.close(), lambda: _pw and _pw.stop(),
                   lambda: _server and _server.stop()):
         try:
             close()
@@ -214,6 +223,16 @@ def browser():
     return _browser
 
 
+def browser_without_images():
+    """A second Chromium that loads no pictures at all. Playwright turns the HTTP cache off in a
+    context with routes, so a test of revalidation (ETag, 304) can't stub the pictures."""
+    global _no_images
+    browser()
+    if _no_images is None:
+        _no_images = _pw.chromium.launch(args=["--blink-settings=imagesEnabled=false"])
+    return _no_images
+
+
 def stub_jpeg(w=600, h=400):
     from PIL import Image, ImageDraw
     im = Image.new("RGB", (w, h), (92, 96, 102))
@@ -235,6 +254,7 @@ class BrowserCase(unittest.TestCase):
     viewport = {"width": 1280, "height": 900}
     device = None             # a Playwright device name, e.g. "iPhone 15"
     real_pictures = False
+    no_pictures = False       # no pictures and no routes: the browser's HTTP cache works
 
     @classmethod
     def setUpClass(cls):
@@ -249,8 +269,8 @@ class BrowserCase(unittest.TestCase):
         self.problems = []
         self.expected = []        # regexes for console errors this test expects (refused requests)
         opts = dict(_pw.devices[self.device]) if self.device else {"viewport": self.viewport}
-        self.context = browser().new_context(**opts)
-        if not self.real_pictures:
+        self.context = (browser_without_images() if self.no_pictures else browser()).new_context(**opts)
+        if not self.real_pictures and not self.no_pictures:
             if STUB is None:
                 STUB = stub_jpeg()
             self.context.route(PICTURES, lambda route: route.fulfill(

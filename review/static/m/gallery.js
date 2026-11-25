@@ -38,7 +38,7 @@ function load(k, d) { try { const v = localStorage.getItem(k); return v === null
 function store(k, v) { try { localStorage.setItem(k, v ? '1' : '0'); } catch { /* private mode */ } }
 
 async function getJSON(url) {
-  const r = await fetch(url, { cache: 'no-store' });
+  const r = await fetch(url, { cache: 'no-cache' });
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
   return body;
@@ -62,7 +62,8 @@ const town = p => (p || '').split(',')[0].replace(/\b\w/g, c => c.toUpperCase())
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, '');
   const [kind, ...rest] = h.split('/');
-  const arg = decodeURIComponent(rest.join('/'));
+  let arg;
+  try { arg = decodeURIComponent(rest.join('/')); } catch { return { kind: 'home' }; }   // a malformed %
   if (kind === 'q' && arg) return { kind, arg };
   if (kind === 'day' && arg) return { kind, arg };
   if (kind === 'like' && arg) return { kind, arg };

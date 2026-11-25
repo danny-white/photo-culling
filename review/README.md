@@ -76,6 +76,10 @@ web app manifest any more (`desktop.js` removes one an older version registered)
 - **Start over:** "Start this day over", at the foot of the day grid and the review, clears the
   day's Culling Bay decisions and starts it again from the first stack. It works until anything from
   the day has reached Lightroom; rows already queued in the inbox are taken back out.
+- **Unsent:** each day row shows how many decisions haven't gone to Lightroom ("46 unsent"; a
+  finished day with some reads "Finished, not sent"). **Send to Lightroom** at the top of the
+  Days list (shown when any day has some) sends many days at once, as the iPhone's Send all
+  does: finished days are ticked, the others listed unticked.
 - **Send:** queues the day into `AICullInbox/cull-decisions.tsv`. The AI Cull plugin applies it
   on the next **Sync AI Cull Data**, or (v2.1) offers it when Lightroom starts, and leaves a
   receipt, which the app reads back: landed, your own flag kept, or not found.
@@ -98,7 +102,9 @@ All use the real `trial.db` read-only and a throwaway `annotations.db` and inbox
 suite (`review/tests/web`, Playwright from `requirements-dev.txt`) runs its own server on port
 8813 and skips when Playwright or its Chromium is missing.
 
-**Days** are grouped by year and month, under an **On this day** lane (unculled days from this
+**Days** keep their scroll position and open years when you come back from a day; the list is
+fetched again with the server's ETag (a 304 when nothing changed) and redrawn only if it changed.
+They are grouped by year and month, under an **On this day** lane (unculled days from this
 week in earlier years); a shoot under 48 hours old is marked Resting. **Search** finds days by
 words, places, dates ("snow 2019") or meaning, ranking three signals together
 ([`search.py`](search.py)): words in captions, tags and towns; caption meaning

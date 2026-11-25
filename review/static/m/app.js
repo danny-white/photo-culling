@@ -376,7 +376,7 @@ function toast(msg, withUndo) {
   clearTimeout(toastT);
   toastT = setTimeout(() => t.classList.remove('show'), 2800);
 }
-function closeSheet() { S.sheet = false; const el = $('#sheet'); el.hidden = true; el.innerHTML = ''; }
+function closeSheet() { S.sheet = false; S.sendAll = null; const el = $('#sheet'); el.hidden = true; el.innerHTML = ''; }
 function detailHTML(s, f) {
   const lead = leadOf(s), d = S.dec[f.id];
   const files = [f.file].concat(f.partners || []).join(' + ');
@@ -504,10 +504,16 @@ const lrCulled = d => !d.decided && !d.finished && d.stacks && d.lr_done >= d.st
 
 // A shoot under 48 hours old is marked as resting: a nudge to cull it with fresh eyes, never a block.
 const resting = d => !d.decided && !d.finished && d.last_ts && Date.now() / 1000 - d.last_ts < 48 * 3600;
+// Decisions a day has not sent to Lightroom yet (draft, or missing from the last sync); an older
+// server without `unsent` gives decided minus sent (the iPhone's CullSendAllModel.unsent).
+const unsentOf = d => (typeof d.unsent === 'number' ? d.unsent : Math.max(0, (d.decided || 0) - (d.sent || 0)));
 function dayRow(d, hit) {   // hit: a search result for the day, {why, ids}
   if (!hit || typeof hit !== 'object') hit = null;
-  const pct = d.frames ? Math.round(d.decided / d.frames * 100) : 0;
+  const pct = d.frames ? Math.round(d.decided / d.frames * 100) : 0, unsent = unsentOf(d);
+  // A day with decisions not sent never reads Sent or Synced, though an earlier send went.
   const tag = d.conflicts ? '<span class="tag warn">' + d.conflicts + ' conflict' + (d.conflicts > 1 ? 's' : '') + '</span>'
+    : unsent && d.finished ? '<span class="tag unsent">Finished, not sent</span>'
+    : unsent ? '<span class="tag">' + pct + '%</span>'
     : d.landed ? '<span class="tag quiet">Synced</span>'
     : d.sent_at ? '<span class="tag quiet">Sent</span>'
     : d.finished ? '<span class="tag quiet">Done</span>'
@@ -521,7 +527,8 @@ function dayRow(d, hit) {   // hit: a search result for the day, {why, ids}
   const thumbs = hit && hit.ids.length ? hit.ids.concat(d.thumbs.filter(id => !hit.ids.includes(id))).slice(0, 3) : d.thumbs;
   return '<button class="day" data-act="open-day" data-day="' + esc(d.day) + '"><span class="mos">' +
     thumbs.map(id => '<img src="' + img(id, 'thumb') + '" alt="" loading="lazy">').join('') + '</span>' +
-    '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + esc(meta.join(' · ')) + '</span>' +
+    '<span class="day-b"><b>' + esc(dayTitle(d)) + '</b><span>' + esc(meta.join(' · ')) +
+      (unsent ? ' · <em class="unsent">' + unsent + ' unsent</em>' : '') + '</span>' +
     (d.place ? '<span class="place">' + esc(town(d.place)) + '</span>' : '') +
     (hit && hit.why ? '<span class="why">' + esc(hit.why) + '</span>'
       : d.summary ? '<span class="dsum">' + d.summary.split('\n').map(esc).join('<br>') + '</span>' : '') +
@@ -537,8 +544,8 @@ function daysByDate(list, searching) {
   return years.map(y => {
     const days = list.filter(d => yearOf(d) === y), open = searching || S.yearsOpen.has(y);
     const frames = days.reduce((n, d) => n + d.frames, 0), done = days.filter(d => d.finished || lrCulled(d)).length;
-    const head = '<button class="year" data-act="toggle-year" data-year="' + y + '" id="year-' + y + '" aria-expanded="' + open + '">' +
-      '<b>' + y + '</b><span>' + days.length + ' day' + (days.length > 1 ? 's' : '') + ' · ' + frames.toLocaleString() + ' frames' + (done ? ' · ' + done + ' done' : '') + '</span><i>' + (open ? '−' : '+') + '</i></button>';
+    const head = '<button class="year" data-act="toggle-year" data-year="' + esc(y) + '" id="year-' + esc(y) + '" aria-expanded="' + open + '">' +
+      '<b>' + esc(y) + '</b><span>' + days.length + ' day' + (days.length > 1 ? 's' : '') + ' · ' + frames.toLocaleString() + ' frames' + (done ? ' · ' + done + ' done' : '') + '</span><i>' + (open ? '−' : '+') + '</i></button>';
     if (!open) return head;
     const months = [];
     for (const d of days) { const m = d.date ? MONTHS[+d.date.slice(5, 7) - 1] : 'Other folders'; if (!months.includes(m)) months.push(m); }
@@ -657,8 +664,63 @@ function vDays() {
     '<button class="sx" id="search-x" data-act="q-clear" aria-label="Clear the search"' + (S.daySearch || S.like ? '' : ' hidden') + '>×</button></label>' +
     '<div class="seg" role="tablist"><button data-act="day-view" data-v="date" aria-selected="' + (S.dayView !== 'place') + '">Date</button>' +
     '<button data-act="day-view" data-v="place" aria-selected="' + (S.dayView === 'place') + '">Place</button></div></div>' +
-    (S.dayView !== 'place' ? '<div class="yearbar">' + years.map(y => '<button data-act="jump-year" data-year="' + y + '">' + y + '</button>').join('') + '</div>' : '') +
+    sendAllRow() +
+    (S.dayView !== 'place' ? '<div class="yearbar">' + years.map(y => '<button data-act="jump-year" data-year="' + esc(y) + '">' + esc(y) + '</button>').join('') + '</div>' : '') +
     '<div class="scroll" id="days-list">' + dayListHTML() + '</div>';
+}
+
+/* ---------------------------------------------------------------- Send all
+   Send to Lightroom for many days at once (the iPhone's CullSendAllModel): every day with decisions
+   not sent yet, the finished ones ticked and the rest listed unticked, then one POST /m/api/send.
+   Like a day's own Send, it waits for the taps still saving first, so each day goes whole. */
+const unsentDays = () => (S.days || []).filter(d => unsentOf(d) > 0);
+function sendAllRow() {
+  const n = unsentDays().length;
+  return n ? '<button class="send-all" data-act="send-all"><b>Send to Lightroom</b><span>' + n + ' day' + (n === 1 ? '' : 's') +
+    ' with decisions not sent yet</span><i>›</i></button>' : '';
+}
+function openSendAll() {
+  const items = unsentDays().map(d => ({ d, n: unsentOf(d) }));
+  S.sendAll = { finished: items.filter(x => x.d.finished), unfinished: items.filter(x => !x.d.finished),
+    sel: new Set(items.filter(x => x.d.finished).map(x => x.d.day)), sending: false, sent: false, message: '' };
+  drawSendAll();
+}
+function drawSendAll() {
+  const A = S.sendAll, all = A.finished.concat(A.unfinished), el = $('#sheet');
+  const n = all.filter(x => A.sel.has(x.d.day)).length, decisions = all.filter(x => A.sel.has(x.d.day)).reduce((t, x) => t + x.n, 0);
+  const row = x => '<button class="sa-row" role="checkbox" aria-checked="' + A.sel.has(x.d.day) + '" data-act="sa-tick" data-day="' + esc(x.d.day) + '"' +
+    (A.sending || A.sent ? ' disabled' : '') + '><i>' + IC.check + '</i><span><b>' + esc(dayTitle(x.d)) + '</b><small>' +
+    esc([x.d.place && town(x.d.place), x.n + ' decision' + (x.n === 1 ? '' : 's')].filter(Boolean).join(' · ')) + '</small></span></button>';
+  const every = n === all.length;
+  el.innerHTML = '<div class="sheet send-sheet" role="dialog" aria-modal="true" aria-label="Send to Lightroom">' +
+    '<div class="sa-head"><p class="sh-q">Send to Lightroom</p>' + (all.length && !A.sent ? '<button class="link" data-act="sa-all"' + (A.sending ? ' disabled' : '') + '>' + (every ? 'None' : 'All') + '</button>' : '') + '</div>' +
+    (all.length ? '' : '<p class="sh-muted">Nothing is waiting to go to Lightroom.</p>') +
+    (A.finished.length ? '<p class="sec">Finished</p>' + A.finished.map(row).join('') : '') +
+    (A.unfinished.length ? '<p class="sec">Not finished yet</p>' + A.unfinished.map(row).join('') +
+      '<p class="sh-muted">Their decisions so far can go too; tick them to send.</p>' : '') +
+    '<p class="sa-msg' + (A.message && !A.sent ? ' warn' : '') + '" role="status">' + esc(A.message || (n ? decisions + ' decision' + (decisions === 1 ? '' : 's') + ' from ' + n + ' day' + (n === 1 ? '' : 's') : '')) + '</p>' +
+    '<div class="sh-row">' + (A.sent ? '<button class="pb2 pri" data-act="close-sheet">Done</button>'
+      : '<button class="pb2" data-act="close-sheet">Cancel</button><button class="pb2 pri" data-act="sa-send"' + (n && !A.sending ? '' : ' disabled') + '>' +
+        (A.sending ? 'Sending…' : n ? 'Send ' + n + ' day' + (n === 1 ? '' : 's') + ' to Lightroom' : 'Pick the days to send') + '</button>') + '</div></div>';
+  el.hidden = false;
+  S.sheet = true;
+}
+// The answer to a failed Send, for a day or for many: 503 is the inbox share not being mounted.
+const notSent = e => (e.status === 503 ? 'Not sent: the Lightroom inbox share is not mounted on the PC, so nothing was sent. Try again once it is.'
+  : 'Not sent: ' + e.message);
+async function sendAll() {
+  const A = S.sendAll, days = A.finished.concat(A.unfinished).map(x => x.d.day).filter(d => A.sel.has(d));
+  if (!days.length || A.sending) return;
+  A.sending = true; A.message = ''; drawSendAll();
+  try {
+    if (!await drained()) { A.message = stillOffline('Send once they are in.'); return; }
+    const r = await writeNow('/m/api/send', { days });
+    A.sent = true;
+    A.message = r.queued ? 'Queued ' + r.queued + ' decision' + (r.queued === 1 ? '' : 's') + ' from ' + days.length + ' day' + (days.length === 1 ? '' : 's') +
+      ' for Lightroom. On the Mac: Sync AI Cull Data.' : 'Nothing new to send.';
+    refreshDayList();
+  } catch (e) { A.message = notSent(e); }
+  finally { A.sending = false; if (S.sendAll === A && S.sheet) drawSendAll(); }
 }
 
 function vLoading(msg) { return top(backBtn('days', 'Days'), 'Culling Bay') + '<div class="empty-state">' + esc(msg) + '</div>'; }
@@ -922,6 +984,8 @@ function bindLarge() {
 function draw() {
   const perfT = performance.now();
   rememberStrip();
+  const list = view.dataset.screen === 'days' && $('#days-list', view);
+  if (list) S.daysScroll = list.scrollTop;   // where you were in the days, for coming back
   const active = lastInputKey && view.contains(document.activeElement) ? { ...document.activeElement.dataset } : null;
   if (S.screen === 'picker' && !S.picker) S.screen = 'cull';
   if ((S.screen === 'cull' || S.screen === 'picker') && !S.stacks[S.cursor]) S.screen = 'summary';
@@ -931,6 +995,7 @@ function draw() {
     : scr === 'picker' ? vStrip()
     : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : scr === 'large' ? vLarge() : vCull();
   view.dataset.screen = scr;
+  if (scr === 'days' && S.daysScroll) { const l = $('#days-list', view); if (l) l.scrollTop = S.daysScroll; }
   layoutWide();
   bindPhotos(view, perfT);
   restoreStrip();
@@ -1298,9 +1363,25 @@ async function showDays() {
   S.screen = 'days';
   if (location.hash !== '#/') history.replaceState(null, '', '#/');
   draw();
-  try { S.days = (await getJSON('/m/api/days')).days; }
-  catch (e) { S.screen = 'error'; S.error = 'Could not load days: ' + e.message; }
-  if (S.screen === 'days' || S.screen === 'error') draw();
+  await refreshDayList();
+}
+// Fetches the days (a 304 when nothing changed) and redraws the list only if it did, keeping the
+// scroll position and the open years.
+let daysSeq = 0;
+async function refreshDayList() {
+  const seq = ++daysSeq;
+  let list;
+  try { list = (await getJSON('/m/api/days')).days; }
+  catch (e) {
+    if (seq !== daysSeq || S.screen !== 'days') return;
+    if (S.days) return toast('Could not refresh the days: ' + e.message);
+    S.screen = 'error'; S.error = 'Could not load days: ' + e.message; return draw();
+  }
+  if (seq !== daysSeq) return;
+  const sig = JSON.stringify(list);
+  if (sig === S.daysSig) return;
+  S.days = list; S.daysSig = sig;
+  if (S.screen === 'days') draw();
 }
 // Taps for this day still in the queue (made offline, or not saved yet): the day as loaded doesn't
 // have them, so they are laid over it in order, an undo taking back its decide (the iPhone's
@@ -1351,7 +1432,7 @@ async function openDay(day, match) {   // match: {ids, label} from a search, who
   const i = status(S.stacks[S.cursor]).done ? firstOpen(S.cursor) : S.cursor;
   if (i < 0) S.screen = 'summary'; else { S.cursor = i; S.screen = 'cull'; await loadShape(shown(S.stacks[i]).id, 1500); }
   if (seq !== openSeq) return;
-  const hash = '#/day/' + day;
+  const hash = '#/day/' + dayPath(day);
   if (location.hash !== hash) history.replaceState(null, '', hash);
   draw();
 }
@@ -1376,7 +1457,7 @@ async function sendDay(btn) {
   if (!await drained()) { btn.disabled = false; return toast(stillOffline('Send once they are in.')); }
   let body;
   try { body = await writeNow('/m/api/day/' + dayPath(S.day.day) + '/send', {}); }
-  catch (e) { btn.disabled = false; return toast('Not sent: ' + e.message); }
+  catch (e) { btn.disabled = false; return toast(notSent(e)); }
   for (const id in S.dec) if (S.dec[id].state === 'draft' || S.dec[id].state === 'missing') S.dec[id].state = 'queued';
   toast(body.queued ? 'Queued ' + body.queued + ' for Lightroom. On the Mac: Sync AI Cull Data.' : 'Nothing new to send.');
   draw();
@@ -1454,10 +1535,10 @@ document.addEventListener('click', e => {
       const y = b.dataset.year;
       S.yearsOpen.add(y); store('cbm-years-open', [...S.yearsOpen]);
       $('#days-list').innerHTML = dayListHTML();
-      const h = $('#year-' + y); if (h) h.scrollIntoView({ block: 'start' });
+      const h = $('#year-' + CSS.escape(y)); if (h) h.scrollIntoView({ block: 'start' });
       return;
     }
-    case 'day-view': S.dayView = b.dataset.v; store('cbm-dayview', S.dayView); return draw();
+    case 'day-view': S.dayView = b.dataset.v; store('cbm-dayview', S.dayView); S.daysScroll = 0; return draw();
     case 'days': return showDays();
     case 'choose': return openPicker(true);
     case 'star': {
@@ -1516,6 +1597,14 @@ document.addEventListener('click', e => {
     }
     case 'send': return sendDay(b);
     case 'lost-ok': localStorage.removeItem(LOST); return showNet();
+    case 'send-all': return openSendAll();
+    case 'sa-tick': { const A = S.sendAll, d = b.dataset.day; if (A.sel.has(d)) A.sel.delete(d); else A.sel.add(d); return drawSendAll(); }
+    case 'sa-all': {
+      const A = S.sendAll, all = A.finished.concat(A.unfinished).map(x => x.d.day);
+      A.sel = new Set(A.sel.size === all.length ? [] : all);
+      return drawSendAll();
+    }
+    case 'sa-send': return sendAll();
   }
 });
 document.addEventListener('input', e => {
@@ -1528,7 +1617,9 @@ document.addEventListener('keydown', onKey);
 
 function route() {
   const m = location.hash.match(/^#\/day\/(.+)$/);
-  if (m) openDay(decodeURIComponent(m[1])); else showDays();
+  let day = null;
+  try { day = m && decodeURIComponent(m[1]); } catch (_) { day = null; }   // a malformed % shows the days
+  if (day) openDay(day); else showDays();
 }
 window.addEventListener('popstate', route);
 route();

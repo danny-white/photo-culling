@@ -44,7 +44,7 @@ its reports are logged as `device: "iphone"`, `app: "ios"`.
 | `summary` | string? | One-line summary of the day |
 | `decided`, `sent`, `landed`, `conflicts`, `lr_done` | int | Cull progress (Cull tab) |
 | `finished` | bool | Day finished in the cull |
-| `unsent` | int | Decisions not yet sent to Lightroom: draft, or missing from the last sync |
+| `unsent` | int | Decisions not yet sent to Lightroom: draft, or missing from the last sync. The web app's day rows show it ("N unsent", and "Finished, not sent" on a finished day) |
 | `sent_at` | string? | When the day was last sent to Lightroom |
 
 ## Gallery
@@ -278,7 +278,7 @@ decode), two at a time beside the decodes someone is waiting for, and nothing is
 cache. A RAW the region decode can't read (not a 2x2 Bayer sensor) is decoded whole instead.
 
 **`POST /m/api/send`**: body `{days: [day, ...]}` → `{ok: true, queued, file_rows, days: [{day, queued}]}`.
-Send for several days at once (the Cull tab's Send all): the same as `day/<day>/send` for each, in one write to
+Send for several days at once (Send all: the app's Cull tab, and the web app's Days list): the same as `day/<day>/send` for each, in one write to
 the inbox file, each day stamped `sent_at`. `400 {error}` unless `days` is a non-empty list of strings; `404
 {error}` naming an unknown day (nothing is sent); `503 {error}` when the inbox share is not mounted.
 
