@@ -292,10 +292,14 @@ nothing is reset. Lightroom flags and stars are never touched.
 A day is known if it has library rows or retained phone decisions or progress/Send state.
 This allows resetting a day whose folder vanished.
 
-**Order.** The web app sends its writes one at a time, in order, from a queue saved on the phone, and drops a
-request after a 4xx; a 5xx or no connection is retried unchanged, which is safe because `decide` is idempotent
-by `action_id` and the others are idempotent by nature. A `decide` followed by its `undo` must not overtake
-each other.
+**Order.** Both clients send their writes one at a time, in order, from a queue they keep (the web app's is
+in `localStorage`, shared by its tabs, with one tab sending at a time), and drop a request after a 4xx; a 5xx
+or no answer (the web app gives up on a request after 15 s) is retried unchanged, which is safe because
+`decide` is idempotent by `action_id` and the others are idempotent by nature. A `decide` followed by its `undo`
+must not overtake each other. A `409` to an `undo` means the tap is still in force: both clients put its
+decisions back and say "Not undone". The web app also puts a card back when its `decide` gets another 4xx,
+and keeps a "N taps not saved" banner up until it is dismissed. It keeps only the newest queued `progress`
+per day. Opening a day, both lay the queued taps for it over what `day/<day>` returned.
 
 ## Pictures
 

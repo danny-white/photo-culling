@@ -42,57 +42,153 @@ function newId() {
   crypto.getRandomValues(b);                  // randomUUID needs HTTPS; this works over plain http
   return Date.now().toString(36) + '-' + Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
 }
-async function getJSON(url) {
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} };
+const recall = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (_) { return d; } };
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+const WRITE_TIMEOUT = 15000;   // a PC that doesn't answer (asleep, in Windows) is Offline after this
+const READ_TIMEOUT = 30000;
+async function timed(url, opts, ms) {   // fetch, aborted after ms; null when nothing came back
+  const ctrl = new AbortController(), t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, Object.assign({ signal: ctrl.signal }, opts)); }
+  catch (_) { return null; }
+  finally { clearTimeout(t); }
+}
+const errorOf = async r => (await r.json().catch(() => ({}))).error || 'HTTP ' + r.status;
+async function getJSON(url) {   // a read; no-cache revalidates, so the server's ETag can answer 304
+  const r = await timed(url, { cache: 'no-cache' }, READ_TIMEOUT);
+  if (!r) throw new Error('no answer from the PC');
+  if (!r.ok) throw new Error(await errorOf(r));
   return r.json();
 }
+// One write, with the header the server asks for; null when the PC didn't answer.
+const write = (method, url, body) => timed(url, { method, headers: { 'Content-Type': 'application/json', 'X-Culling-Bay': '1' },
+  body: JSON.stringify(body) }, WRITE_TIMEOUT);
 
-// Writes go through a queue kept in localStorage, sent strictly in order, so a decide followed
-// by its undo can never arrive the other way round. 4xx means the request itself is wrong: it
-// is dropped and reported. Anything else (offline, 5xx) is retried.
-const Q = { items: [], busy: false, offline: false };
-try { Q.items = JSON.parse(localStorage.getItem('cbm-queue') || '[]'); } catch (_) { Q.items = []; }
-function persistQueue() { try { localStorage.setItem('cbm-queue', JSON.stringify(Q.items)); } catch (_) {} }
-function send(method, url, body) { Q.items.push({ method, url, body }); persistQueue(); pump(); }
+/* ---------------------------------------------------------------- the write queue
+   Every tap goes through one queue in localStorage (cbm-queue), shared by all the app's tabs and
+   sent strictly in order, so a decide followed by its undo can never arrive the other way round.
+   Each item has an id, and every change re-reads the key, changes it and writes it back, so two
+   tabs never wipe each other's taps. Only one tab sends at a time: navigator.locks where the
+   browser has it (https or localhost), else a lease key the sending tab keeps renewing.
+   - no answer in 15 s, or no connection: "Offline", tried again every 4 s;
+   - 5xx: "PC refused: <its reason>", tried again every 4 s;
+   - 409 on an undo: the tap is still in force (it reached Lightroom), so it goes back on the card
+     and in Undo: "Not undone: <reason>" (the iPhone's queueDropped);
+   - another 4xx on a decide: the request itself is wrong and is dropped; the card goes back to
+     what it was, and "N taps not saved" stays up with the reason until dismissed;
+   - another 4xx: dropped, with a toast.
+   Sending again is safe: decide is idempotent by action_id, undo and progress by nature. Only
+   the newest queued position per day is kept, and the banner counts taps, not positions. */
+const QKEY = 'cbm-queue', LEASE = 'cbm-queue-lease', LOST = 'cbm-lost', DROP = 'cbm-drop';
+const LEASE_MS = WRITE_TIMEOUT + 5000;
+const TAB = newId();
+const Q = { busy: false, state: 'ok', reason: '', retryT: 0 };   // state: ok, offline or refused
+const kindOf = url => (/\/decide$/.test(url) ? 'decide' : /\/undo$/.test(url) ? 'undo' : /\/progress$/.test(url) ? 'progress' : 'other');
+const dayOfUrl = url => { const m = url.match(/\/day\/(.+)\/progress$/); try { return m ? decodeURIComponent(m[1]) : null; } catch (_) { return null; } };
+function qRead() {
+  let items = recall(QKEY, []);
+  if (!Array.isArray(items)) items = [];
+  items = items.filter(it => it && typeof it.url === 'string');
+  if (items.some(it => !it.id)) {   // saved by an older version: give each an id, once
+    items = items.map(it => (it.id ? it : Object.assign({ id: newId(), kind: kindOf(it.url), day: it.body && it.body.day || dayOfUrl(it.url) }, it)));
+    store(QKEY, items);
+  }
+  return items;
+}
+function qChange(fn) { const items = fn(qRead()); store(QKEY, items); return items; }
+const tapsIn = items => items.filter(it => it.kind === 'decide' || it.kind === 'undo').length;
+function send(method, url, body, day) {
+  const it = { id: newId(), kind: kindOf(url), method, url, body, day };
+  qChange(items => (it.kind === 'progress'   // the first item may be on its way: leave it
+    ? items.filter((x, i) => i === 0 || x.kind !== 'progress' || x.day !== day) : items).concat(it));
+  showNet();
+  pump();
+}
+async function withQueueLock(fn) {   // false when another tab is sending
+  if (navigator.locks) return navigator.locks.request('cbm-queue', { ifAvailable: true }, lock => (lock ? fn() : false));
+  const held = () => recall(LEASE, null), now = Date.now(), l = held();
+  if (l && l.tab !== TAB && l.until > now) return false;
+  store(LEASE, { tab: TAB, until: now + LEASE_MS });
+  await sleep(40);                      // two tabs taking it at once: the last write wins
+  if ((held() || {}).tab !== TAB) return false;
+  try { return await fn(); } finally { if ((held() || {}).tab === TAB) localStorage.removeItem(LEASE); }
+}
+const renewLease = () => { if (!navigator.locks) store(LEASE, { tab: TAB, until: Date.now() + LEASE_MS }); };
+// A tab closed or reloaded while sending leaves no lease behind for the others to wait out.
+addEventListener('pagehide', () => { if ((recall(LEASE, null) || {}).tab === TAB) localStorage.removeItem(LEASE); });
 async function pump() {
   if (Q.busy) return;
   Q.busy = true;
-  while (Q.items.length) {
-    const it = Q.items[0];
-    let r;
-    try {
-      r = await fetch(it.url, { method: it.method, headers: { 'Content-Type': 'application/json', 'X-Culling-Bay': '1' }, body: JSON.stringify(it.body) });
-    } catch (_) { r = null; }
+  clearTimeout(Q.retryT);
+  let sent;
+  try { sent = await withQueueLock(sendQueued); } finally { Q.busy = false; }
+  if (sent === false && qRead().length) Q.retryT = setTimeout(pump, 1000);   // another tab is on it
+}
+async function sendQueued() {
+  for (;;) {
+    const it = qRead()[0];
+    if (!it) { setNet('ok'); return true; }
+    renewLease();
+    const r = await write(it.method, it.url, it.body);
     if (!r || r.status >= 500) {
-      setOffline(true);
-      Q.busy = false;
-      setTimeout(pump, 4000);
-      return;
+      setNet(r ? 'refused' : 'offline', r ? await errorOf(r) : '');
+      Q.retryT = setTimeout(pump, 4000);
+      return true;
     }
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({}));
-      toast('Not saved: ' + (e.error || 'HTTP ' + r.status));
-    }
-    Q.items.shift();
-    persistQueue();
+    const err = r.ok ? null : await errorOf(r);
+    // a decide the PC refused takes its queued undo with it (that would only be refused too)
+    qChange(items => items.filter(x => x.id !== it.id &&
+      !(err && it.kind === 'decide' && x.kind === 'undo' && x.body.action_id === it.body.action_id)));
+    if (err) dropped(it, r.status, err);
+    setNet('ok');
   }
-  setOffline(false);
-  Q.busy = false;
 }
-function setOffline(on) {
-  if (Q.offline === on && !on) return;
-  Q.offline = on;
-  const el = $('.net', view);
-  if (el) { el.hidden = !on; el.textContent = 'Offline · ' + Q.items.length + ' waiting to save'; }
+function setNet(state, reason) {
+  if (Q.state === state && (Q.reason || '') === (reason || '')) return showNet();
+  Q.state = state; Q.reason = reason || '';
+  showNet();
 }
+// The banners: Offline or PC refused (with the taps still waiting), and taps the PC refused.
+function netInner() {
+  const n = tapsIn(qRead()), lost = recall(LOST, null);
+  const wait = n ? ' · ' + n + ' waiting to save' : '';
+  return (Q.state === 'offline' ? '<p>Offline' + wait + '</p>' : Q.state === 'refused' ? '<p>PC refused: ' + esc(Q.reason) + wait + '</p>' : '') +
+    (lost && lost.n ? '<p class="lost">' + lost.n + (lost.n === 1 ? ' tap' : ' taps') + ' not saved: ' + esc(lost.reason) +
+      '. Look at ' + (lost.n === 1 ? 'that stack' : 'those stacks') + ' again. <button class="link" data-act="lost-ok">Dismiss</button></p>' : '');
+}
+const netDiv = () => { const h = netInner(); return '<div class="net" id="net"' + (h ? '' : ' hidden') + '>' + h + '</div>'; };
+function showNet() {
+  const el = $('#net', view);
+  if (!el) return;
+  const h = netInner();
+  el.innerHTML = h; el.hidden = !h;
+}
+// A write the PC refused for good. The tab that sent it tells the others (the storage event), so
+// the tab where the tap was made puts its card back.
+function dropped(it, status, err) {
+  if (it.kind === 'decide') { const l = recall(LOST, null); store(LOST, { n: ((l && l.n) || 0) + 1, reason: err }); }
+  const d = { it, status, err, at: Date.now() + Math.random() };
+  store(DROP, d);
+  onDrop(d, true);
+}
+function onDrop(d, here) {
+  const { it, status, err } = d;
+  if (it.kind === 'undo' && status === 409) { if (!undoRefused(it.body.action_id, err) && here) toast('Not undone: ' + err); }
+  else if (it.kind === 'decide') { decideRefused(it.body.action_id); showNet(); }
+  else if (here) toast('Not saved: ' + err);
+}
+addEventListener('storage', e => {
+  if (e.key === QKEY) { showNet(); if (!Q.busy && qRead().length) pump(); }
+  else if (e.key === LOST) showNet();
+  else if (e.key === DROP && e.newValue) { try { onDrop(JSON.parse(e.newValue), false); } catch (_) {} }
+});
 let progressT;
 function saveProgress(finished) {
   if (!S.day) return;
   clearTimeout(progressT);
   const st = S.stacks[S.cursor], day = S.day.day, body = { pass: S.pass, cursor: st ? st.id : 0, finished: !!finished };
   if (st && typeof st.lead === 'number') body.lead = st.lead;
-  progressT = setTimeout(() => send('PUT', '/m/api/day/' + dayPath(day) + '/progress', body), finished ? 0 : 600);
+  progressT = setTimeout(() => send('PUT', '/m/api/day/' + dayPath(day) + '/progress', body, day), finished ? 0 : 600);
 }
 window.addEventListener('online', pump);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) pump(); });
@@ -162,20 +258,26 @@ function dayTitle(d) {
 }
 
 /* one action = one tap; saved to the server and to the undo history */
+const decisionOf = c => ({ flag: c.flag, stars: c.flag === 'pick' ? (c.stars || null) : null, note: c.note || '', state: 'draft', outcome: null });
+const sameDecision = (a, b) => (!a || a.flag === 'none' ? null : a.flag + '|' + (a.stars || '') + '|' + (a.note || '')) ===
+  (!b || b.flag === 'none' ? null : b.flag + '|' + (b.stars || '') + '|' + (b.note || ''));
+const copy = d => (d ? Object.assign({}, d) : null);
 function act(label, changes, extra) {
-  const before = changes.map(c => [c.id, S.dec[c.id] ? Object.assign({}, S.dec[c.id]) : null]);
-  for (const c of changes) {
-    S.dec[c.id] = { flag: c.flag, stars: c.flag === 'pick' ? (c.stars || null) : null, note: c.note || '', state: 'draft', outcome: null };
-  }
+  const before = changes.map(c => [c.id, copy(S.dec[c.id])]);
+  for (const c of changes) S.dec[c.id] = decisionOf(c);
   const action_id = newId();
-  S.hist.push(Object.assign({ action_id, label, before, cursor: S.cursor, pass: S.pass, screen: 'cull' }, extra || {}));
-  send('POST', '/m/api/decide', { action_id, day: S.day.day, label, changes });
+  S.hist.push(Object.assign({ action_id, label, before, changes, day: S.day.day, cursor: S.cursor, pass: S.pass, screen: 'cull' }, extra || {}));
+  send('POST', '/m/api/decide', { action_id, day: S.day.day, label, changes }, S.day.day);
 }
+S.undone = {};   // action_id -> history entry, for an undo the PC may refuse
 function undo() {
   const h = S.hist.pop();
   if (!h) { toast('Nothing to undo'); return; }
+  h.at = S.hist.length;
+  h.undoneFrom = h.before.map(([id]) => [id, copy(S.dec[id])]);
   for (const [id, d] of h.before) { if (d) S.dec[id] = d; else delete S.dec[id]; }
-  send('POST', '/m/api/undo', { action_id: h.action_id });
+  S.undone[h.action_id] = h;
+  send('POST', '/m/api/undo', { action_id: h.action_id }, h.day);
   S.pass = h.pass;
   S.picker = null;
   closeSheet();
@@ -185,6 +287,31 @@ function undo() {
   S.screen = 'cull';
   saveProgress();
   draw();
+}
+// The PC refused an undo (409: the tap already reached Lightroom), so it is still in force: put
+// its decisions back, except on a frame decided again since, and the entry back in Undo.
+function undoRefused(actionId, err) {
+  const h = S.undone[actionId];
+  if (!h) return false;
+  delete S.undone[actionId];
+  if (S.day && S.day.day === h.day) {
+    const was = new Map(h.before);
+    for (const [id, d] of h.undoneFrom) if (sameDecision(S.dec[id], was.get(id))) { if (d) S.dec[id] = d; else delete S.dec[id]; }
+    S.hist.splice(Math.min(h.at, S.hist.length), 0, h);
+    if (S.screen !== 'days') draw();
+  }
+  toast('Not undone: ' + err);
+  return true;
+}
+// The PC refused a decide (a 4xx): the card goes back to what it was, unless decided again since.
+function decideRefused(actionId) {
+  const u = S.undone[actionId];
+  delete S.undone[actionId];   // already undone here: the card shows what it was
+  const i = S.hist.findIndex(h => h.action_id === actionId);
+  if (i < 0 || u) return;
+  const h = S.hist.splice(i, 1)[0], was = new Map(h.before);
+  for (const c of h.changes) if (sameDecision(S.dec[c.id], decisionOf(c))) { const d = was.get(c.id); if (d) S.dec[c.id] = d; else delete S.dec[c.id]; }
+  if (S.screen !== 'days') draw();
 }
 function commit(label, changes) {
   act(label, changes);
@@ -348,12 +475,10 @@ function stLine(s, st) {
 /* ---------------------------------------------------------------- views */
 const top = (left, title, sub, right, subHtml) =>
   '<div class="top">' + left + '<div class="t">' + esc(title) + (sub ? '<small>' + esc(sub) + '</small>' : subHtml ? '<small>' + subHtml + '</small>' : '') + '</div>' + (right || '<span class="sp"></span>') + '</div>' +
-  '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>';
+  netDiv();
 const backBtn = (act, label) => '<button class="tbtn" data-act="' + act + '">' + IC.back + '<span>' + label + '</span></button>';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} };
-const recall = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (_) { return d; } };
 S.dayView = recall('cbm-dayview', 'date');
 // The camera's AF point as a box on the photo: off unless you turn it on (the AF button on a card).
 S.showAF = recall('cbm-show-af', false);
@@ -515,7 +640,7 @@ function vDays() {
   for (const d of S.days) { const y = yearOf(d); if (!years.includes(y)) years.push(y); }
   return '<div class="head"><h1>Days</h1><span>mycloud · Pictures · ' + S.days.length + ' days</span>' +
     '<a class="monitor-link" href="/">Monitor</a><a class="plink" href="/m/practice.html">Practice ›</a><a class="glink" href="/m/gallery.html">Gallery ›</a></div>' +
-    '<div class="net"' + (Q.offline ? '' : ' hidden') + '>Offline · ' + Q.items.length + ' waiting to save</div>' +
+    netDiv() +
     '<div class="dtools"><label class="sbox"><input class="search" id="day-search" type="search" placeholder="Search what, where, when" value="' + esc(S.daySearch) + '" autocomplete="off" enterkeyhint="search" aria-label="Search days">' +
     '<button class="sx" id="search-x" data-act="q-clear" aria-label="Clear the search"' + (S.daySearch || S.like ? '' : ' hidden') + '>×</button></label>' +
     '<div class="seg" role="tablist"><button data-act="day-view" data-v="date" aria-selected="' + (S.dayView !== 'place') + '">Date</button>' +
@@ -1154,6 +1279,23 @@ async function showDays() {
   catch (e) { S.screen = 'error'; S.error = 'Could not load days: ' + e.message; }
   if (S.screen === 'days' || S.screen === 'error') draw();
 }
+// Taps for this day still in the queue (made offline, or not saved yet): the day as loaded doesn't
+// have them, so they are laid over it in order, an undo taking back its decide (the iPhone's
+// layQueued). Returns the newest position still queued for the day.
+function layQueued(day) {
+  const before = {};
+  let at = null;
+  for (const it of qRead()) {
+    if (it.kind === 'decide' && it.body.day === day) {
+      before[it.body.action_id] = it.body.changes.map(c => [c.id, copy(S.dec[c.id])]);
+      for (const c of it.body.changes) S.dec[c.id] = decisionOf(c);
+    } else if (it.kind === 'undo' && before[it.body.action_id]) {
+      for (const [id, d] of before[it.body.action_id]) { if (d) S.dec[id] = d; else delete S.dec[id]; }
+      delete before[it.body.action_id];
+    } else if (it.kind === 'progress' && it.day === day) at = it.body;
+  }
+  return at;
+}
 async function openDay(day, match) {   // match: {ids, label} from a search, whose stacks go first
   S.perfDay = performance.now();
   S.screen = 'loading'; draw();
@@ -1162,6 +1304,7 @@ async function openDay(day, match) {   // match: {ids, label} from a search, who
   catch (e) { S.screen = 'error'; S.error = 'Could not load ' + day + ': ' + e.message; return draw(); }
   S.day = body; S.stacks = body.stacks; S.dec = {}; S.hist = []; S.picker = null; S.matches = null;
   for (const s of S.stacks) for (const f of s.frames) if (f.decision) S.dec[f.id] = f.decision;
+  const queuedAt = layQueued(body.day);
   if (match) {
     const ids = new Set(match.ids), first = S.stacks.filter(s => s.frames.some(f => ids.has(f.id)));
     if (first.length && first.length < S.stacks.length) {
@@ -1172,6 +1315,10 @@ async function openDay(day, match) {   // match: {ids, label} from a search, who
   const p = body.progress;
   S.pass = 2;                       // one pass now; the server still records pass and position
   S.cursor = S.matches || !p ? 0 : Math.max(0, S.stacks.findIndex(s => s.id === p.cursor));
+  if (!S.matches && queuedAt) {     // a position still in the queue is newer than the server's
+    const i = queuedAt.lead != null ? S.stacks.findIndex(s => s.lead === queuedAt.lead) : -1;
+    S.cursor = i >= 0 ? i : Math.max(0, S.stacks.findIndex(s => s.id === queuedAt.cursor));
+  }
   const i = status(S.stacks[S.cursor]).done ? firstOpen(S.cursor) : S.cursor;
   if (i < 0) S.screen = 'summary'; else { S.cursor = i; S.screen = 'cull'; await loadShape(shown(S.stacks[i]).id, 1500); }
   const hash = '#/day/' + day;
@@ -1179,17 +1326,27 @@ async function openDay(day, match) {   // match: {ids, label} from a search, who
   draw();
 }
 // Send: every queued tap must reach the server first, so the day is sent whole.
+// Waits up to 10 s for every queued write to reach the PC; false if some are still waiting.
+async function drained() {
+  pump();
+  for (let i = 0; i < 40 && qRead().length; i++) await sleep(250);
+  return !qRead().length;
+}
+const stillOffline = then => 'Still offline: ' + (tapsIn(qRead()) || 'some') + ' taps waiting to save. ' + then;
+// A write that is not queued (Send, Start over): its answer, or an error to show.
+async function writeNow(url, body) {
+  const r = await write('POST', url, body);
+  if (!r) throw new Error('no answer from the PC');
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(out.error || 'HTTP ' + r.status), { status: r.status });
+  return out;
+}
 async function sendDay(btn) {
   btn.disabled = true;
-  pump();
-  for (let i = 0; i < 40 && Q.items.length; i++) await new Promise(r => setTimeout(r, 250));
-  if (Q.items.length) { btn.disabled = false; return toast('Still offline: ' + Q.items.length + ' taps waiting to save. Send once they are in.'); }
+  if (!await drained()) { btn.disabled = false; return toast(stillOffline('Send once they are in.')); }
   let body;
-  try {
-    const r = await fetch('/m/api/day/' + dayPath(S.day.day) + '/send', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Culling-Bay': '1' }, body: '{}' });
-    body = await r.json();
-    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
-  } catch (e) { btn.disabled = false; return toast('Not sent: ' + e.message); }
+  try { body = await writeNow('/m/api/day/' + dayPath(S.day.day) + '/send', {}); }
+  catch (e) { btn.disabled = false; return toast('Not sent: ' + e.message); }
   for (const id in S.dec) if (S.dec[id].state === 'draft' || S.dec[id].state === 'missing') S.dec[id].state = 'queued';
   toast(body.queued ? 'Queued ' + body.queued + ' for Lightroom. On the Mac: Sync AI Cull Data.' : 'Nothing new to send.');
   draw();
@@ -1215,16 +1372,11 @@ function resetAsk() {
 async function resetDo(btn) {
   btn.disabled = true;
   clearTimeout(progressT);                          // a position save still pending would bring the day back
-  pump();                                           // taps still in the queue must land first
-  for (let i = 0; i < 40 && Q.items.length; i++) await new Promise(r => setTimeout(r, 250));
-  if (Q.items.length) { btn.disabled = false; return toast('Still offline: ' + Q.items.length + ' taps waiting to save. Try again once they are in.'); }
+  if (!await drained()) { btn.disabled = false; return toast(stillOffline('Try again once they are in.')); }   // taps must land first
   const day = S.day.day;
   let body;
-  try {
-    const r = await fetch('/m/api/day/' + dayPath(day) + '/reset', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Culling-Bay': '1' }, body: '{}' });
-    body = await r.json();
-    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
-  } catch (e) { btn.disabled = false; closeSheet(); return toast('Not reset: ' + e.message); }
+  try { body = await writeNow('/m/api/day/' + dayPath(day) + '/reset', {}); }
+  catch (e) { btn.disabled = false; closeSheet(); return toast('Not reset: ' + e.message); }
   closeSheet();
   await openDay(day);
   toast('Started over: cleared ' + body.cleared + (body.withdrawn ? ', took ' + body.withdrawn + ' back out of the inbox' : ''));
@@ -1332,6 +1484,7 @@ document.addEventListener('click', e => {
       return draw();
     }
     case 'send': return sendDay(b);
+    case 'lost-ok': localStorage.removeItem(LOST); return showNet();
   }
 });
 document.addEventListener('input', e => {
