@@ -314,3 +314,9 @@ itself once fixed. The failed-photo alerts and the `index` fields that go with t
 | `N originals can't be read` (warn) | error rows that no retry will help: `size = 0`, `error_class = 'empty'` or `attempts >= 4`, minus the paths in `trial_out/known-unreadable.txt` (one path per line, `#` starts a comment, a missing file is an empty list) | `unreadable` (after that list), `acknowledged_unreadable` (the ones it removed), `unreadable_files` (up to 100 of `{path, size, error}`, sorted by path) |
 
 `index.caption_errors` is every error row, retry or not, and is unchanged: the Pi dashboard may read it.
+
+`Ingest watcher hasn't run for N hours` (bad) appears when the ingest log exists and nothing has been written
+to it for over 2 hours. The watcher writes a `poll: ...` line at least once an hour, even when nothing
+changed. The log file's own modification time counts as activity too, because one long run can go hours
+without a timestamped line while it writes the log all the time. `last_poll` is the time of the newest
+timestamped line in the log (ISO, or `null` when there is no log). `poll:` lines are never read as failures.

@@ -56,10 +56,20 @@ case "$cmd" in
   run)
     folder=$(basename "$1")
     [ -f "$STUB_DIR/rc.run.$folder" ] && exit "$(cat "$STUB_DIR/rc.run.$folder")"
+    # photos "tagged" by this run: run.ok rows of status ok go into the DB
+    [ -f "$STUB_DIR/run.ok" ] && for _ in $(seq "$(cat "$STUB_DIR/run.ok")"); do
+      sqlite3 "$DB" "INSERT INTO images VALUES('ok')"
+    done
     ;;
 esac
 [ -f "$STUB_DIR/rc.$cmd" ] && exit "$(cat "$STUB_DIR/rc.$cmd")"
 exit 0
+"""
+
+# Logs every find the watcher runs, then runs the real one.
+STUB_FIND = r"""#!/usr/bin/env bash
+echo "$*" >> "$STUB_DIR/find.log"
+exec /usr/bin/find "$@"
 """
 
 STUB_MSMTP = r"""#!/usr/bin/env bash
@@ -85,6 +95,7 @@ class WatcherCase(unittest.TestCase):
         self.py = self.stub / "py"
         self.write_exec(self.py, STUB_PY)
         self.write_exec(self.bin / "msmtp", STUB_MSMTP)
+        self.write_exec(self.bin / "find", STUB_FIND)
         # what `folder-state --print-extensions` says: photo_cull's own list
         (self.stub / "extensions.txt").write_text("".join(e + "\n" for e in sorted(pc.ALL_EXTENSIONS)))
         con = sqlite3.connect(self.db)
@@ -169,6 +180,25 @@ class WatcherCase(unittest.TestCase):
 
     def clear_calls(self):
         (self.stub / "calls.log").unlink(missing_ok=True)
+        (self.stub / "find.log").unlink(missing_ok=True)
+
+    def finds(self):
+        f = self.stub / "find.log"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def mails(self):
+        f = self.stub / "mail.log"
+        return f.read_text().split("-----\n")[:-1] if f.exists() else []
+
+    def set_db(self, status, n=1):
+        con = sqlite3.connect(self.db)
+        con.executemany("INSERT INTO images VALUES(?)", [(status,)] * n)
+        con.commit()
+        con.close()
+
+    def age_stamp(self, name, seconds):
+        t = time.time() - seconds
+        os.utime(self.markers / name, (t, t))
 
     def runs(self):
         """Folders `run` was called for, in order."""
@@ -571,6 +601,7 @@ class JunkFiles(WatcherCase):
         d = self.finished()
         t = self.now - 1500
         os.utime(d / "IMG_0001.ARW", (t, t))             # a photo written again, newer than all
+        self.age_stamp(".last-full-scan", 25 * 3600)     # (the folder's mtime didn't move: see IdleCost)
         self.poll()
         self.assertEqual(self.runs(), ["2026-10-01"])
 
@@ -593,6 +624,33 @@ class JunkFiles(WatcherCase):
         self.touch_dir(d, 7200)
         self.poll()
         self.assertEqual(self.runs(), [])
+        # the folder's mtime is noted, so later polls skip it by a stat instead of a find
+        self.assertEqual(self.marker_text(d), f"v2 {int(d.stat().st_mtime)} 0 0")
+        self.clear_calls()
+        self.poll()
+        self.assertEqual(self.finds(), [])
+        # until a photo is copied in
+        self.add_file(d, "IMG_0001.ARW", 6 * 3600)
+        self.touch_dir(d, 1200)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-05"])
+        self.assertTrue(self.marker_text(d).endswith(" 1"))
+
+    def test_a_folder_with_no_photos_but_failed_rows_is_still_run(self):
+        d = self.lib / "2026" / "2026-10-05"
+        d.mkdir(parents=True)
+        self.add_file(d, "IMG_0000.xmp", 7200)
+        self.touch_dir(d, 7200)
+        self.set_state(d, 0, 2, retryable=2)             # rows for photos that are gone
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-05"])
+
+    def test_a_dry_run_does_not_note_the_mtime_of_a_folder_with_no_photos(self):
+        d = self.lib / "2026" / "2026-10-05"
+        d.mkdir(parents=True)
+        self.touch_dir(d, 7200)
+        self.markers.mkdir()
+        self.poll(DRY_RUN=1)
         self.assertIsNone(self.marker_text(d))
 
     def test_junk_newer_than_the_photos_does_not_stop_an_old_marker_upgrading(self):
@@ -630,6 +688,235 @@ class JunkFiles(WatcherCase):
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.runs(), [])
         self.assertTrue(self.log_lines("poll skipped"))
+
+
+class IdleCost(WatcherCase):
+    """An idle poll looks at each folder's own mtime and nothing else."""
+
+    def three_finished(self):
+        ds = [self.folder(f"2026-10-0{i}") for i in (1, 2, 3)]
+        self.poll()
+        self.assertEqual(len(self.runs()), 3)
+        self.clear_calls()
+        return ds
+
+    def test_unchanged_folders_get_no_find_and_no_python_call(self):
+        self.three_finished()
+        r = self.poll()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.finds(), [])
+        # the only Python calls are the two that cover the whole poll: the extension list and the
+        # folders with failed photos; none is about a folder
+        self.assertEqual(len(self.calls()), 2)
+        self.assertTrue(any("--print-extensions" in c for c in self.calls()))
+        self.assertTrue(any("--retryable-only" in c for c in self.calls()))
+        self.assertEqual(self.runs(), [])
+
+    def test_only_the_changed_folder_gets_a_find(self):
+        ds = self.three_finished()
+        self.add_file(ds[1], "late.ARW", 6 * 3600)
+        self.touch_dir(ds[1], 1200)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-02"])
+        self.assertEqual(len(self.finds()), 2)           # one to look, one just before the run
+        self.assertTrue(all(str(ds[1]) in f for f in self.finds()))
+        self.assertEqual(len([c for c in self.calls() if c.startswith("photo_cull.py folder-state")
+                              and "--retryable-only" not in c and "--print-extensions" not in c]), 1)
+
+    def test_a_folder_with_a_changed_mtime_but_the_same_photos_gets_a_find_and_no_run(self):
+        ds = self.three_finished()
+        self.add_file(ds[0], ".DS_Store", 3000)
+        self.touch_dir(ds[0], 1200)
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(len(self.finds()), 1)
+        self.assertEqual(self.marker_text(ds[0]), self.signature(ds[0]))
+
+    def test_the_daily_full_pass_looks_at_every_folder(self):
+        ds = self.three_finished()
+        self.assertTrue((self.markers / ".last-full-scan").exists())     # the first poll did the first pass
+        self.poll()
+        self.assertEqual(self.finds(), [])                               # a fresh stamp: no pass
+        # a photo rewritten in place with a newer time; the folder's own mtime did not move
+        t = self.now - 1500
+        os.utime(ds[2] / "IMG_0002.ARW", (t, t))
+        self.age_stamp(".last-full-scan", 23 * 3600)
+        self.poll()
+        self.assertEqual(self.runs(), [])                                # under 24 hours: still no pass
+        self.age_stamp(".last-full-scan", 25 * 3600)
+        self.clear_calls()
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-03"])                    # found, and only that one
+        self.assertGreaterEqual(len(self.finds()), 3)                    # every folder was looked at
+        age = time.time() - (self.markers / ".last-full-scan").stat().st_mtime
+        self.assertLess(age, 120)                                        # and the stamp renewed
+        self.clear_calls()
+        self.poll()
+        self.assertEqual(self.finds(), [])
+
+    def test_the_first_poll_is_a_full_pass(self):
+        self.folder("2026-10-01")
+        self.poll()
+        self.assertTrue((self.markers / ".last-full-scan").exists())
+
+    def test_a_dry_run_leaves_the_stamps_alone(self):
+        self.three_finished()
+        self.age_stamp(".last-full-scan", 25 * 3600)
+        before = (self.markers / ".last-full-scan").stat().st_mtime
+        self.poll(DRY_RUN=1)
+        self.assertEqual((self.markers / ".last-full-scan").stat().st_mtime, before)
+
+
+class Heartbeat(WatcherCase):
+    POLL = re.compile(r"^poll: (\d+) folders, (\d+) changed, (\d+) processed, (\d+)s$")
+
+    def beats(self):
+        return [self.POLL.match(ln).groups() for ln in self.log_lines("poll: ")]
+
+    def test_a_poll_that_processed_something_logs_a_parseable_line(self):
+        self.folder("2026-10-01")
+        self.folder("2026-10-02")
+        self.poll()
+        (b,) = self.beats()
+        self.assertEqual(b[:3], ("2", "2", "2"))
+
+    def test_an_idle_poll_stays_quiet_inside_the_hour_then_logs_once(self):
+        for i in (1, 2, 3):
+            self.folder(f"2026-10-0{i}")
+        self.poll()                                      # processed: logs
+        self.poll()                                      # idle, inside the hour: nothing
+        self.poll()
+        self.assertEqual(len(self.beats()), 1)
+        self.age_stamp(".last-heartbeat", 61 * 60)
+        self.poll()
+        self.assertEqual(len(self.beats()), 2)
+        self.assertEqual(self.beats()[1][:3], ("3", "0", "0"))           # three folders, none changed
+        self.poll()
+        self.assertEqual(len(self.beats()), 2)
+
+    def test_a_poll_that_processes_something_always_logs(self):
+        d = self.folder("2026-10-01")
+        self.poll()
+        self.add_file(d, "late.ARW", 6 * 3600)
+        self.touch_dir(d, 1200)
+        self.poll()                                      # the stamp is minutes old, but a folder was processed
+        self.assertEqual(len(self.beats()), 2)
+        self.assertEqual(self.beats()[1][:3], ("1", "1", "1"))
+
+    def test_the_count_of_changed_folders(self):
+        a = self.folder("2026-10-01")
+        self.folder("2026-10-02")
+        self.poll()
+        (self.markers / ".last-heartbeat").unlink()
+        self.add_file(a, ".DS_Store", 3000)              # a change that needs a look but no run
+        self.touch_dir(a, 1200)
+        self.poll()
+        self.assertEqual(self.beats()[-1][:3], ("2", "1", "0"))
+
+    def test_the_line_is_logged_after_the_work_and_never_looks_like_a_failure(self):
+        self.folder("2026-10-01")
+        self.poll()
+        lines = self.log_lines("")
+        self.assertTrue(lines[-1].startswith("poll: "))
+        self.assertNotIn("FAILED", lines[-1])
+
+    def test_no_heartbeat_when_the_poll_aborts(self):
+        self.folder("2026-10-01")
+        (self.root / "inbox").mkdir()
+        self.poll(CHECK_MOUNT=1)
+        self.assertEqual(self.beats(), [])
+
+    def test_dry_run_prints_one_line_and_keeps_no_stamp(self):
+        self.folder("2026-10-01")
+        r = self.poll(DRY_RUN=1)
+        self.assertRegex(r.stdout, r"DRY RUN: poll: 1 folders, 1 changed, 1 to process, \d+s")
+        self.assertFalse(self.markers.exists())
+
+
+class BatchEmail(WatcherCase):
+    def test_one_email_when_a_poll_finishes_folders_and_nothing_is_pending(self):
+        a = self.folder("2026-10-01")
+        b = self.folder("2026-10-02")
+        (self.stub / "run.ok").write_text("5")           # each run tags 5 photos
+        self.set_state(a, 5, 5, unreadable=2)
+        self.set_state(b, 5, 5, unreadable=1)
+        self.poll()
+        (mail,) = self.mails()
+        self.assertIn("ARGS: nobody@example.invalid", mail)
+        self.assertIn("Subject: Photo cull: batch complete (10 processed)", mail)
+        self.assertIn("To: nobody@example.invalid", mail)
+        self.assertIn("2 folder(s) done, 10 photo(s) processed", mail)
+        self.assertIn("  2026-10-01", mail)
+        self.assertIn("  2026-10-02", mail)
+        self.assertIn("Photos waiting for a retry: 0", mail)
+        self.assertIn("Originals that can't be read: 3", mail)
+        self.assertIn("Sync AI Cull Data", mail)
+        self.assertEqual(self.log_lines("sent batch-complete email"), ["sent batch-complete email (10 processed)"])
+
+    def test_it_fires_once_not_on_the_next_idle_poll(self):
+        self.folder("2026-10-01")
+        self.poll()
+        self.poll()
+        self.poll()
+        self.assertEqual(len(self.mails()), 1)
+
+    def test_an_idle_poll_sends_nothing(self):
+        self.poll()
+        self.assertEqual(self.mails(), [])
+
+    def test_nothing_is_sent_while_photos_are_still_pending(self):
+        self.set_db("pending", 3)
+        self.folder("2026-10-01")
+        self.poll()
+        self.assertEqual(self.mails(), [])
+        # the queue drains; the poll that finishes the next folder sends the email, for that folder only
+        con = sqlite3.connect(self.db)
+        con.execute("DELETE FROM images WHERE status='pending'")
+        con.commit()
+        con.close()
+        self.folder("2026-10-02")
+        self.poll()
+        (mail,) = self.mails()
+        self.assertIn("1 folder(s) done", mail)
+        self.assertIn("  2026-10-02", mail)
+        self.assertNotIn("  2026-10-01", mail)
+
+    def test_a_folder_that_is_waiting_for_a_retry_is_not_finished_so_no_email(self):
+        d = self.folder("2026-10-01")
+        self.set_state(d, 3, 3, retryable=2)
+        self.poll()
+        self.assertEqual(self.mails(), [])
+        self.set_state(d, 3, 3, retryable=0, unreadable=2)
+        self.poll()
+        (mail,) = self.mails()
+        self.assertIn("Originals that can't be read: 2", mail)
+
+    def test_the_retry_count_is_in_the_body_when_another_folder_is_waiting(self):
+        a = self.folder("2026-10-01")
+        b = self.folder("2026-10-02")
+        self.set_state(a, 3, 3, retryable=4)
+        self.poll()
+        (mail,) = self.mails()
+        self.assertIn("1 folder(s) done", mail)
+        self.assertIn("Photos waiting for a retry: 4", mail)
+
+    def test_a_deferred_poll_with_ollama_down_sends_nothing(self):
+        self.folder("2026-10-01")
+        (self.stub / "rc.run").write_text("3")
+        self.poll()
+        self.assertEqual(self.mails(), [])
+
+    def test_a_failed_send_is_logged(self):
+        self.folder("2026-10-01")
+        (self.stub / "rc.msmtp").write_text("1")
+        self.poll()
+        self.assertEqual(len(self.log_lines("msmtp send FAILED")), 1)
+        self.assertEqual(len(self.mails()), 1)
+
+    def test_a_dry_run_sends_nothing(self):
+        self.folder("2026-10-01")
+        self.poll(DRY_RUN=1)
+        self.assertEqual(self.mails(), [])
 
 
 class DryRun(WatcherCase):

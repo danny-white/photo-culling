@@ -1397,11 +1397,14 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                       "Remount the AICull inbox (see ~/nas-drive/docs/open-tasks.md)")
 
         # The watcher's log, last 7 days: failures, each marked resolved where the state says so.
-        # It logs nothing on an idle poll, so "last_ingest" is the last shoot it finished.
-        recent, last = [], None
+        # "last_ingest" is the last shoot it finished; "last_poll" is the newest timestamped line,
+        # which the watcher writes at least once an hour (a "poll:" line) even when nothing changed.
+        recent, last, last_poll = [], None, None
         week = datetime.now().astimezone() - timedelta(days=7)
+        log_mtime = None
         try:
             with open(ingest_log, "rb") as fh:
+                log_mtime = datetime.fromtimestamp(os.fstat(fh.fileno()).st_mtime).astimezone()
                 fh.seek(0, 2)
                 fh.seek(max(0, fh.tell() - 600_000))
                 tail = fh.read().decode("utf-8", "replace").splitlines()[1:]
@@ -1416,7 +1419,10 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 at = datetime.fromisoformat(m.group(1))
             except ValueError:
                 continue
+            last_poll = at if last_poll is None or at > last_poll else last_poll
             msg = m.group(2)
+            if msg.startswith("poll:"):          # the heartbeat: never a failure, whatever it says
+                continue
             if msg.startswith("done: "):
                 done_after[msg[6:].split(" -> ")[0]] = m.group(1)
                 last = {"at": at.isoformat(timespec="seconds"), "shoot": os.path.basename(msg[6:].split(" -> ")[0])}
@@ -1429,6 +1435,17 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "geotag": not ungeo, "shotinfo": not noshot, "daysum": not unsummed,
                              "inbox": check_mount and not mount}.get(
                 r["step"], bool(r["folder"]) and done_after.get(r["folder"], "") > r["at"])
+        if log_mtime is not None:
+            # A single run can write no timestamped line for hours (a backlog ran 8 hours in
+            # October) but it writes the log all the while, so the file's own time counts too.
+            alive = max(last_poll, log_mtime) if last_poll else log_mtime
+            silent = datetime.now().astimezone() - alive
+            if silent > timedelta(hours=2):
+                alert("bad", f"Ingest watcher hasn't run for {int(silent.total_seconds() // 3600)} hours",
+                      "Nothing has been written to its log since "
+                      f"{alive.strftime('%a %d %b %H:%M')}; it normally writes a line at least once an hour.",
+                      "systemctl --user status photo-cull-ingest.timer photo-cull-ingest.service; "
+                      "tail ~/photo-culling/trial_out/ingest_watch.log")
         for step in ("run", "export"):
             open_ = [r for r in recent if r["step"] == step and not r["resolved"]]
             if open_:
@@ -1487,6 +1504,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                                             "error": r["error_msg"] or r["error_class"]} for r in unreadable[:100]]},
             "model": model, "last_ingest": last, "recent": recent[-8:],
             "backup": backup,
+            "last_poll": last_poll.isoformat(timespec="seconds") if last_poll else None,
         })
 
     # ---------------------------------------------------------------- routes: timing

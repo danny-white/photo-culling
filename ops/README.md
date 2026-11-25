@@ -83,10 +83,12 @@ also needs `systemctl --user restart photo-review.service` (the server is down f
 
 ### Batch-complete email (optional but recommended)
 
-The watcher emails `NOTIFY_EMAIL` (set at the top of `watch_ingest.sh`) exactly once whenever
-the pending queue drains from >0 back to 0 -- i.e. "the batch you just imported is fully culled
-and ready to sync," whether that took one 15-minute poll or several. Idle polls (nothing pending)
-and in-progress polls (still >0 after this run) stay silent.
+The watcher emails `NOTIFY_EMAIL` (set at the top of `watch_ingest.sh`) once at the end of any
+poll that finished at least one folder (a `done:` line in this run) and left nothing pending in
+the DB. The body lists the folders done, how many photos were processed, how many are waiting
+for a retry and how many originals can't be read, in the folders that poll processed. Idle polls
+and polls that finished nothing send nothing; a poll that stopped early (Ollama down) leaves rows
+pending and stays silent, and the poll that finishes the batch sends the email.
 
 Needs `msmtp` + a one-time Gmail App Password (not your normal Google password):
 
@@ -111,7 +113,16 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
 
 - `journalctl --user -u photo-cull-ingest.service -f` — watch it fire.
 - `tail -f trial_out/ingest_watch.log` — the watcher's own log (what it culled/exported/skipped/
-  aborted).
+  aborted). It writes one `poll: <n> folders, <m> changed, <k> processed, <s>s` line at least
+  once an hour, and on every poll that processed something, so a quiet log still shows it is
+  alive. `/m/api/pipeline-health` raises "Ingest watcher hasn't run for N hours" when nothing
+  has been written for over 2 hours.
+- **What an idle poll costs.** It reads each folder's own mtime (one `stat` for all of them) and
+  compares it with the one in the folder's marker. Only folders that differ, folders with no
+  marker or an old-format one, and folders with failed photos to retry get the `find` that takes
+  the full signature. Once every 24 hours (`trial_out/ingest_markers/.last-full-scan`, delete it
+  to force one) every folder's signature is taken, which catches a photo rewritten in place
+  without moving the folder's mtime. The hourly log line is stamped by `.last-heartbeat`.
 - `trial_out/ingest_markers/<shoot>.done` — one marker per finished shoot folder, holding its
   signature, `v2 <folder mtime> <newest photo mtime> <photo count>` (epoch seconds). A "photo" is
   a file `photo_cull.py` would register: its `ALL_EXTENSIONS` in any case, no dotfiles. The
@@ -126,7 +137,8 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
   To force a re-cull + re-export of a folder, delete its marker. Do that after replacing a photo
   in place with a different file of the same name and camera date (for example a recovered copy
   of an empty original): the count and newest photo don't change, so the watcher can't see it.
-  A folder with no photos in it is skipped.
+  A folder with no photos in it is not processed; its marker just records its own mtime
+  (`v2 <mtime> 0 0`), so later polls skip it with a stat.
   Markers from before 24 Nov 2026 hold a single number (the newest file's mtime). The first poll
   rewrites those in the new form *without* processing, when the number still matches the newest
   file (or the newest photo, with only non-photos newer since), the folder's photo count equals

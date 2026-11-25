@@ -4,6 +4,7 @@ annotations.db, cache and state dir. Skipped when trial.db is missing. Run from 
 """
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -1248,10 +1249,9 @@ class DecodeAhead(unittest.TestCase):
         self.assertEqual((len(self.calls), len(self.regions)), (1, 2))
 
 
-class PipelineHealthFailures(unittest.TestCase):
-    """The two alerts for photos that failed to tag: still waiting for a retry, and originals that
-    can't be read. A small temp DB with an error row of each kind, so the real snapshot's counts
-    don't matter."""
+class HealthFixture(unittest.TestCase):
+    """A blueprint over a small temp DB, a temp ingest log and a temp known-unreadable list, so the
+    real snapshot's counts don't matter."""
     LIB = "/mnt/passport/Pictures"
 
     def setUp(self):
@@ -1260,6 +1260,7 @@ class PipelineHealthFailures(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.db = self.dir / "t.db"
         self.known = self.dir / "known-unreadable.txt"
+        self.log = self.dir / "ingest.log"
         self.n = 0
 
     def add(self, folder, *, n=1, status="error", size=100, cls="model", attempts=1, msg="Server disconnected"):
@@ -1296,13 +1297,18 @@ class PipelineHealthFailures(unittest.TestCase):
         app.register_blueprint(mobile.make_blueprint(
             db_ro=db_ro, anno=lambda: sqlite3.connect(self.dir / "annotations.db"), pc=pc, cache_dir=self.dir,
             static_dir=self.dir / "static", state_dir=self.dir / "state", inbox=self.dir / "inbox",
-            check_mount=False, ingest_log=self.dir / "ingest.log", known_unreadable=self.known,
+            check_mount=False, ingest_log=self.log, known_unreadable=self.known,
             ollama_url="http://127.0.0.1:9"))
         return app.test_client().get("/m/api/pipeline-health").get_json()
 
     def alert(self, d, suffix):
         found = [a for a in d["alerts"] if a["title"].endswith(suffix)]
         return found[0] if found else None
+
+
+class PipelineHealthFailures(HealthFixture):
+    """The two alerts for photos that failed to tag: still waiting for a retry, and originals that
+    can't be read. A small temp DB with an error row of each kind."""
 
     def seed(self):
         self.add("2026/2026-09-29", n=3, cls="model", attempts=1)
@@ -1423,3 +1429,80 @@ class PipelineHealthFailures(unittest.TestCase):
         self.assertEqual((idx["retrying"], idx["unreadable"], idx["acknowledged_unreadable"], idx["unreadable_files"]),
                          (0, 0, 0, []))
         self.assertEqual(idx["caption_errors"], 0)
+
+
+class PipelineHealthWatcher(HealthFixture):
+    """The ingest log: is the watcher alive, and which of its lines count as failures."""
+
+    def write_log(self, lines, age_hours=None):
+        """Lines as (hours ago, text). The file's own time is set to the newest line's, unless
+        age_hours says otherwise (a run that is still writing)."""
+        from datetime import datetime, timedelta
+        now = datetime.now().astimezone()
+        out = ["first line is skipped as a possible partial line"]
+        for hours, text in lines:
+            out.append(f"[{(now - timedelta(hours=hours)).isoformat(timespec='seconds')}] {text}")
+        self.log.write_text("\n".join(out) + "\n")
+        newest = min(h for h, _ in lines) if lines else 0
+        t = time.time() - 3600 * (newest if age_hours is None else age_hours)
+        os.utime(self.log, (t, t))
+
+    def test_an_old_log_means_the_watcher_has_stopped(self):
+        self.write_log([(7, "poll: 394 folders, 0 changed, 0 processed, 22s"), (5.2, "processing /x/2026/2026-10-01")])
+        d = self.health()
+        a = self.alert(d, "hours")
+        self.assertEqual(a["title"], "Ingest watcher hasn't run for 5 hours")
+        self.assertEqual(a["level"], "bad")
+        self.assertEqual(d["status"], "bad")
+        self.assertIn("ingest_watch.log", a["fix"])
+        self.assertIn("photo-cull-ingest.timer", a["fix"])
+
+    def test_the_hourly_heartbeat_keeps_it_quiet(self):
+        self.write_log([(9, "done: /x/2026/2026-10-01 -> /inbox/pending.tsv"),
+                        (1.2, "poll: 394 folders, 0 changed, 0 processed, 3s")])
+        d = self.health()
+        self.assertIsNone(self.alert(d, "hours"))
+
+    def test_just_under_two_hours_is_fine_and_just_over_is_not(self):
+        self.write_log([(1.9, "poll: 394 folders, 0 changed, 0 processed, 3s")])
+        self.assertIsNone(self.alert(self.health(), "hours"))
+        self.write_log([(2.1, "poll: 394 folders, 0 changed, 0 processed, 3s")])
+        self.assertEqual(self.alert(self.health(), "hours")["title"], "Ingest watcher hasn't run for 2 hours")
+
+    def test_no_log_no_alert(self):
+        self.assertFalse(self.log.exists())
+        d = self.health()
+        self.assertIsNone(self.alert(d, "hours"))
+        self.assertIsNone(d["last_poll"])
+
+    def test_a_long_run_still_writing_the_log_is_alive(self):
+        # A backlog run writes a line per photo but no timestamped line for hours.
+        self.write_log([(6, "processing /x/2026/2026-10-01")], age_hours=0.01)
+        self.assertIsNone(self.alert(self.health(), "hours"))
+
+    def test_last_poll_is_the_newest_timestamped_line(self):
+        from datetime import datetime, timedelta
+        self.write_log([(3, "poll: 394 folders, 0 changed, 0 processed, 3s"), (0.5, "done: /x/2026/2026-10-01 -> /i/p.tsv")])
+        d = self.health()
+        got = datetime.fromisoformat(d["last_poll"])
+        self.assertLess(abs((datetime.now().astimezone() - timedelta(hours=0.5) - got).total_seconds()), 5)
+        self.assertEqual(d["last_ingest"]["shoot"], "2026-10-01")
+
+    def test_poll_and_retry_lines_are_not_failures(self):
+        self.write_log([
+            (3, "run deferred: Ollama not answering"),
+            (2.5, "retry pending for /x/2026/2026-09-29: 35 photos"),
+            (2, "poll: 394 folders, 1 changed, 1 processed, 40s"),
+            (1.5, "poll: 5 folders, 0 changed, 0 processed, 1s FAILED"),     # never a failure, whatever it says
+            (1, "marker upgraded for /x/2026/2026-02-02 (nothing changed since it was finished)")])
+        d = self.health()
+        self.assertEqual(d["recent"], [])
+        titles = [a["title"] for a in d["alerts"]]
+        self.assertFalse([t for t in titles if t.startswith("Ingest")], titles)
+
+    def test_real_failures_still_count(self):
+        self.write_log([(3, "export FAILED for /x/2026/2026-10-01 -- leaving unmarked, will retry next poll"),
+                        (0.2, "poll: 394 folders, 1 changed, 1 processed, 40s")])
+        d = self.health()
+        self.assertEqual([r["step"] for r in d["recent"]], ["export"])
+        self.assertIn("Ingest export failing", [a["title"] for a in d["alerts"]])

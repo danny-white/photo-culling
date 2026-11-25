@@ -28,6 +28,14 @@
 # is rewritten and nothing is processed. Busy is wider: the folder's mtime or ANY file's mtime
 # within STABLE_MINUTES, since a copy in progress can show up as any file.
 #
+# An idle poll looks at each folder's own mtime only (one stat call for all of them) and takes the
+# full signature, which needs a find over the folder, just for folders whose mtime differs from
+# their marker's, folders with no marker or an old-format one, and folders with failed photos to
+# retry. Once every 24 hours ($MARKERS/.last-full-scan) it takes every folder's signature, which
+# catches a photo rewritten in place. It logs one "poll: ..." line at least once an hour (the
+# health check reads it to see the watcher is alive), and one email when a poll finishes folders
+# and leaves nothing pending.
+#
 # Every setting below can be overridden from the environment; the defaults are the live paths.
 # That is how review/tests/test_watch_ingest.py runs this script against a temp library. Try a
 # change with DRY_RUN=1: it logs what it would do and runs no step and writes no marker.
@@ -44,8 +52,12 @@ LOG=${LOG:-$PROJ/trial_out/ingest_watch.log}
 PY=${PY:-./venv/bin/python}                            # run from $PROJ, so this is the venv's Python
 CHECK_MOUNT=${CHECK_MOUNT:-1}                          # 0 skips both mount guards: for tests only
 STABLE_MINUTES=${STABLE_MINUTES:-15}                   # a folder must be quiet this long before we touch it
-NOTIFY_EMAIL=${NOTIFY_EMAIL:-97danny.white@gmail.com}  # emailed via msmtp (~/.msmtprc) when a batch drains to 0
+NOTIFY_EMAIL=${NOTIFY_EMAIL:-97danny.white@gmail.com}  # emailed via msmtp (~/.msmtprc) when a poll finishes folders
 DRY_RUN=${DRY_RUN:-0}                                  # 1: log what would happen, run nothing, write nothing
+
+FULL_SCAN_EVERY=$((24 * 3600))   # seconds between passes that take every folder's signature
+HEARTBEAT_EVERY=3600             # seconds between "poll:" lines on a poll that processed nothing
+SECONDS=0
 
 [ "$DRY_RUN" = 1 ] || mkdir -p "$MARKERS"
 cd "$PROJ" || exit 1
@@ -70,11 +82,7 @@ if [ "$CHECK_MOUNT" = 1 ]; then
     fi
 fi
 
-# Snapshot before/after this invocation's work, purely from DB status -- lets us detect "the
-# queue just fully drained" (steady-state: idle at 0, a new import bumps pending>0, this
-# eventually brings it back to 0) regardless of how many 15-min poll cycles it took, and
-# regardless of whether this script or a separate manual run did the actual processing.
-pending_before=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='pending'" 2>/dev/null || echo 0)
+# How many photos are done before this poll's work, for the email's "processed" count.
 ok_before=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='ok'" 2>/dev/null || echo 0)
 
 # The extensions a run registers, from photo_cull.py itself so the two can't drift apart. The
@@ -90,7 +98,7 @@ fi
 # own mtime is the time files were last copied in or removed (on this CIFS mount a copy keeps each
 # file's camera mtime, so the file times alone can't see a copy in progress). The last number
 # covers every file: it is for the busy test, and for old markers, which held that number.
-# Prints nothing and fails for a folder with no photos in it.
+# Fails (prints nothing) only if the folder itself can't be read; a folder with no photos gives 0 0.
 folder_signature() {
     local listing
     listing=$(find "$1" -printf '%d\t%Y\t%T@\t%f\n' 2>/dev/null)
@@ -104,12 +112,18 @@ folder_signature() {
                 photos++; if (t > newest) newest = t
             }
         }
-        END { if (have && photos > 0) print dirm, newest, photos, anynewest; else exit 1 }' <<< "$listing"
+        END { if (have) print dirm, newest + 0, photos + 0, anynewest + 0; else exit 1 }' <<< "$listing"
 }
 
 shopt -s nullglob
 now=$(date +%s)
 window=$((STABLE_MINUTES * 60))
+
+# Is it time for the daily pass that takes every folder's signature?
+full_scan=0
+if [ ! -e "$MARKERS/.last-full-scan" ] || [ $((now - $(stat -c %Y "$MARKERS/.last-full-scan"))) -ge "$FULL_SCAN_EVERY" ]; then
+    full_scan=1
+fi
 
 # Folders with failed photos that have tries left, whatever their signature says. One call.
 declare -A retryable=()
@@ -123,11 +137,37 @@ old_format=()     # folders whose marker is the old single number: upgrade it, o
 # Scoped to YYYY/YYYY-MM-DD -- the date-organized library only. $LIBRARY_ROOT also has other
 # top-level folders (screenshots, $RECYCLE.BIN, one-off trip dumps, ...) that are NOT meant to
 # be auto-culled; a bare */*/ glob would silently wander into those.
-for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
-    folder="${folder%/}"
+folders=("$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/)
+folders=("${folders[@]%/}")
+# Every folder's own mtime, in one stat call: all an unchanged folder costs.
+declare -A dir_mtime=()
+if [ "${#folders[@]}" -gt 0 ]; then
+    while IFS=$'\t' read -r t f; do
+        dir_mtime["$f"]=$t
+    done < <(stat --printf '%Y\t%n\n' -- "${folders[@]}" 2>/dev/null)
+fi
+n_folders=${#folders[@]}
+n_changed=0       # folders that differ from their marker, or have no usable one
+n_processed=0     # folders `run` was started for
+for folder in "${folders[@]}"; do
     marker="$MARKERS/$(basename "$folder").done"
+    stored=""
+    [ -f "$marker" ] && { IFS= read -r stored < "$marker" || true; }
+    d="${dir_mtime[$folder]:-}"
+    [ -n "$d" ] || continue                                 # could not stat it
 
-    sig=$(folder_signature "$folder") || continue          # no photos in it
+    # Unchanged since it was finished: same folder mtime as its v2 marker, nothing to retry. Skip
+    # it without a find or a Python call, except on the daily full pass.
+    flagged=1
+    if [[ "$stored" =~ ^v2\ ([0-9]+)\  ]] && [ "${BASH_REMATCH[1]}" = "$d" ] && [ -z "${retryable[$folder]:-}" ]; then
+        flagged=0
+    fi
+    if [ "$flagged" = 0 ] && [ "$full_scan" = 0 ]; then
+        continue
+    fi
+    [ "$flagged" = 1 ] && n_changed=$((n_changed + 1))
+
+    sig=$(folder_signature "$folder") || continue          # could not read it
     read -r dirm newest count anynewest <<< "$sig"
     # Busy: copied into, or any file written, within the last STABLE_MINUTES (avoids culling a
     # shoot mid-copy). Skipped this poll; the next one sees it again.
@@ -135,8 +175,18 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
         continue
     fi
     cur="v2 $dirm $newest $count"
+    if [ "$count" -eq 0 ]; then
+        # No photos here (empty, or only sidecars and videos): nothing to ingest. Note the folder's
+        # mtime so later polls skip it by a stat, as they do any other finished folder.
+        if [ "$stored" != "$cur" ] && [ "$DRY_RUN" != 1 ]; then printf '%s\n' "$cur" > "$marker"; fi
+        if [ -n "${retryable[$folder]:-}" ]; then   # rows left from files that are gone: let them run out
+            todo+=("$folder"); reason["$folder"]="failed photos with tries left"
+        fi
+        continue
+    fi
     sig_at_scan["$folder"]="$cur"
-    stored=$(cat "$marker" 2>/dev/null || true)
+    # a change only the daily full pass could find (a photo rewritten without moving the folder's mtime)
+    if [ "$flagged" = 0 ] && [ "$stored" != "$cur" ]; then n_changed=$((n_changed + 1)); fi
 
     if [ "$stored" = "$cur" ]; then
         # unchanged since it was finished; only failed photos with tries left bring it back
@@ -166,6 +216,10 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
         todo+=("$folder"); reason["$folder"]="signature changed"
     fi
 done
+
+if [ "$full_scan" = 1 ] && [ "$DRY_RUN" != 1 ]; then
+    touch "$MARKERS/.last-full-scan"
+fi
 
 # Old markers hold only the newest file's mtime. Reprocessing every such folder would append
 # all of them to the Lightroom inbox's pending.tsv again, so a folder whose marker still matches
@@ -197,6 +251,9 @@ if [ "${#todo[@]}" -gt 0 ]; then
     mapfile -t todo < <(printf '%s\n' "${todo[@]}" | sort)
 fi
 
+done_folders=()        # folders finished (marker written) this poll
+batch_retry=0          # photos still pending or waiting for a retry, in folders this poll processed
+batch_unreadable=0     # originals that can't be read, in folders this poll processed
 for folder in "${todo[@]}"; do
     name="$(basename "$folder")"
     marker="$MARKERS/$name.done"
@@ -217,6 +274,7 @@ for folder in "${todo[@]}"; do
     cur="v2 $dirm $newest $count"
 
     log "processing $folder"
+    n_processed=$((n_processed + 1))
     "$PY" photo_cull.py run "$folder" --db "$DB" --retry-failed >> "$LOG" 2>&1
     rc=$?
     if [ "$rc" -eq 3 ]; then
@@ -276,32 +334,60 @@ for folder in "${todo[@]}"; do
     IFS=$'\t' read -r _ disk rows pending retry unreadable <<< "$state"
     if [ -z "${retry:-}" ]; then
         log "retry pending for $folder: could not read the folder's state; will look again next poll"
-    elif [ "$pending" -eq 0 ] && [ "$retry" -eq 0 ]; then
+        continue
+    fi
+    batch_retry=$((batch_retry + pending + retry))
+    batch_unreadable=$((batch_unreadable + unreadable))
+    if [ "$pending" -eq 0 ] && [ "$retry" -eq 0 ]; then
         printf '%s\n' "$cur" > "$marker"
+        done_folders+=("$name")
         log "done: $folder -> $tsv"
     else
         log "retry pending for $folder: $((pending + retry)) photos"
     fi
 done
 
-# Batch-complete notification: only fires on the exact poll that brings the queue from >0 back
-# to 0 -- silent on idle polls (pending_before=0) and on in-progress polls (pending_after>0),
-# whether draining took one cycle or many.
-pending_after=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='pending'" 2>/dev/null || echo 0)
-ok_after=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='ok'" 2>/dev/null || echo 0)
-if [ "$DRY_RUN" != 1 ] && [ "$pending_before" -gt 0 ] && [ "$pending_after" -eq 0 ]; then
-    processed=$((ok_after - ok_before))
-    subject="Photo cull: batch complete ($processed processed)"
-    body="Batch finished. $processed image(s) processed this run; $ok_after total culled, $pending_after pending.
+# Batch-complete email: one per poll that finished at least one folder and left nothing pending
+# in the DB (a poll that stopped early, with Ollama down, leaves rows pending and stays silent; the
+# poll that finishes the batch sends it). Idle polls send nothing.
+if [ "$DRY_RUN" != 1 ] && [ "${#done_folders[@]}" -gt 0 ]; then
+    pending_after=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='pending'" 2>/dev/null || echo 0)
+    ok_after=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='ok'" 2>/dev/null || echo 0)
+    if [ "$pending_after" -eq 0 ]; then
+        processed=$((ok_after - ok_before))
+        [ "$processed" -ge 0 ] || processed=0
+        listed=$(printf '  %s\n' "${done_folders[@]:0:20}")
+        [ "${#done_folders[@]}" -le 20 ] || listed+=$'\n'"  ... and $((${#done_folders[@]} - 20)) more"
+        subject="Photo cull: batch complete ($processed processed)"
+        body="Batch finished: ${#done_folders[@]} folder(s) done, $processed photo(s) processed this run; $ok_after culled in all, $pending_after pending.
+
+Folders done:
+$listed
+
+Photos waiting for a retry: $batch_retry (the watcher tries again every 15 minutes, up to 4 tries each)
+Originals that can't be read: $batch_unreadable (empty or damaged files; see the pipeline health page)
 
 Ready to sync in Lightroom: Library -> Plug-in Extras -> Sync AI Cull Data..."
-    if command -v msmtp >/dev/null 2>&1; then
-        if printf 'Subject: %s\nTo: %s\n\n%s\n' "$subject" "$NOTIFY_EMAIL" "$body" | msmtp "$NOTIFY_EMAIL"; then
-            log "sent batch-complete email ($processed processed)"
+        if command -v msmtp >/dev/null 2>&1; then
+            if printf 'Subject: %s\nTo: %s\n\n%s\n' "$subject" "$NOTIFY_EMAIL" "$body" | msmtp "$NOTIFY_EMAIL"; then
+                log "sent batch-complete email ($processed processed)"
+            else
+                log "msmtp send FAILED (check ~/.msmtprc and ~/.msmtp.log) -- batch WAS complete ($processed processed)"
+            fi
         else
-            log "msmtp send FAILED (check ~/.msmtprc and ~/.msmtp.log) -- batch WAS complete ($processed processed)"
+            log "batch complete ($processed processed) but msmtp isn't installed -- no email sent"
         fi
-    else
-        log "batch complete ($processed processed) but msmtp isn't installed -- no email sent"
+    fi
+fi
+
+# Heartbeat: one line, at most once an hour and always when something was processed, so the log
+# (and the health check reading it) shows the watcher is alive on idle polls too.
+if [ "$DRY_RUN" = 1 ]; then
+    log "DRY RUN: poll: $n_folders folders, $n_changed changed, ${#todo[@]} to process, ${SECONDS}s"
+else
+    beat="$MARKERS/.last-heartbeat"
+    if [ "$n_processed" -gt 0 ] || [ ! -e "$beat" ] || [ $(($(date +%s) - $(stat -c %Y "$beat"))) -ge "$HEARTBEAT_EVERY" ]; then
+        log "poll: $n_folders folders, $n_changed changed, $n_processed processed, ${SECONDS}s"
+        touch "$beat"
     fi
 fi
