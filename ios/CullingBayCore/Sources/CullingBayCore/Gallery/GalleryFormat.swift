@@ -64,6 +64,17 @@ public enum GalleryFormat {
         String(repeating: "★", count: min(max(n, 0), 5))
     }
 
+    /// What VoiceOver says for a grid tile: the caption (or the file name when there is none),
+    /// the day, and the stars, so tiles can be told apart: `"Two dogs on a beach, Sat, Oct 17 2026, 4 stars"`.
+    public static func tileDescription(_ photo: Photo) -> String {
+        let caption = photo.caption?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return [
+            caption.isEmpty ? photo.file : caption,
+            longDate(photo.date),
+            photo.stars > 0 ? "\(photo.stars) star" + (photo.stars == 1 ? "" : "s") : "",
+        ].filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
     private static func grouped(_ n: Int, locale: Locale) -> String {
         let formatter = NumberFormatter()
         formatter.locale = locale

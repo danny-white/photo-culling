@@ -19,11 +19,11 @@ struct CullOfflineBanner: View {
     }
 }
 
-/// What the day just did (`Rejected DSC05050 · Undo`). It goes after about 4 s, or on a tap.
+/// What the day just did (`Rejected DSC05050 · Undo`). It goes after about 4 s, or on a tap (a
+/// toast with Undo stays while VoiceOver is running).
 struct CullToastView: View {
-    private static let lifetime: Duration = .seconds(4)
-
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverRunning
     let session: CullSessionModel
 
     var body: some View {
@@ -50,8 +50,10 @@ struct CullToastView: View {
                 .id(toast.id)
                 .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
                 .task(id: toast.id) {
-                    // A newer toast restarts this task, so each one gets its own 4 s.
-                    do { try await Task.sleep(for: Self.lifetime) } catch { return }
+                    // A newer toast restarts this task, so each one gets its own 4 s. One with Undo
+                    // stays while VoiceOver runs: there is time to find the button.
+                    guard let lifetime = toast.lifetime(voiceOverRunning: voiceOverRunning) else { return }
+                    do { try await Task.sleep(for: lifetime) } catch { return }
                     session.dismissToast()
                 }
                 .onAppear { AccessibilityNotification.Announcement(toast.text).post() }

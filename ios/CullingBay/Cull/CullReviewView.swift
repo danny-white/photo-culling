@@ -280,16 +280,16 @@ private struct CullReviewThumb: View {
             .overlay(alignment: .topTrailing) {
                 if style == .kept {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 9, weight: .heavy))
+                        .font(.system(.caption2, weight: .heavy))
                         .foregroundStyle(Color.black)
-                        .frame(width: 17, height: 17)
+                        .padding(4)
                         .background(Color.green, in: Circle())
                         .padding(3)
                 } else if style == .rejected {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .heavy))
+                        .font(.system(.caption2, weight: .heavy))
                         .foregroundStyle(Color.white)
-                        .frame(width: 17, height: 17)
+                        .padding(4)
                         .background(Color.red, in: Circle())
                         .padding(3)
                 }
@@ -297,7 +297,7 @@ private struct CullReviewThumb: View {
             .overlay(alignment: .bottom) {
                 if let label {
                     Text(label)
-                        .font(.system(size: 9.5, weight: .semibold))
+                        .font(.system(.caption2, weight: .semibold))
                         .lineLimit(2)
                         .minimumScaleFactor(0.8)
                         .multilineTextAlignment(.center)
@@ -308,6 +308,8 @@ private struct CullReviewThumb: View {
                         .padding(3)
                 }
             }
+            // Labels on a thumbnail stay a size that leaves the picture to look at.
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityText)

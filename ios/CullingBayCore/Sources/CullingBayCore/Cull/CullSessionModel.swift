@@ -43,6 +43,13 @@ public final class CullSessionModel {
         public let id: Int
         public let text: String
         public let offersUndo: Bool
+
+        /// How long the toast stays before it goes by itself; nil when it stays until a newer
+        /// toast, a tap or Undo. A toast with Undo stays while VoiceOver is running, because
+        /// reaching Undo takes longer than the 4 s a sighted tap does.
+        public func lifetime(voiceOverRunning: Bool) -> Duration? {
+            offersUndo && voiceOverRunning ? nil : .seconds(4)
+        }
     }
 
     /// The last thing the user did, for a haptic: watch `id` and play one per change.

@@ -63,11 +63,5 @@ struct PhotoTile: View {
             .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
-    private var accessibilityText: String {
-        [
-            "Photo",
-            GalleryFormat.longDate(photo.date),
-            photo.stars > 0 ? "\(photo.stars) stars" : "",
-        ].filter { !$0.isEmpty }.joined(separator: ", ")
-    }
+    private var accessibilityText: String { GalleryFormat.tileDescription(photo) }
 }

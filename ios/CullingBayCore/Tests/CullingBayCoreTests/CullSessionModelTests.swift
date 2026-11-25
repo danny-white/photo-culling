@@ -568,4 +568,13 @@ struct CullSessionModelTests {
         model.dismissToast()
         #expect(model.toast == nil)
     }
+
+    @Test func aToastGoesAfterFourSecondsExceptOneWithUndoWhileVoiceOverRuns() {
+        let plain = CullSessionModel.Toast(id: 1, text: "Not sent", offersUndo: false)
+        let undo = CullSessionModel.Toast(id: 2, text: "Rejected S1", offersUndo: true)
+        #expect(plain.lifetime(voiceOverRunning: false) == .seconds(4))
+        #expect(undo.lifetime(voiceOverRunning: false) == .seconds(4))
+        #expect(plain.lifetime(voiceOverRunning: true) == .seconds(4))      // nothing to reach: it goes
+        #expect(undo.lifetime(voiceOverRunning: true) == nil)               // stays until a tap, Undo or a newer toast
+    }
 }

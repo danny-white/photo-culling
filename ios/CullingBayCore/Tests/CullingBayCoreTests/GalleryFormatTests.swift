@@ -21,6 +21,19 @@ struct GalleryFormatTests {
         #expect(GalleryFormat.longDate("2026-13-01") == "2026-13-01")
     }
 
+    @Test func aTileIsDescribedByItsCaptionOrFileNameTheDayAndItsStars() {
+        #expect(GalleryFormat.tileDescription(
+            galleryPhoto(1, date: "2026-10-17", caption: "Two dogs on a beach", stars: 4))
+            == "Two dogs on a beach, Sat, Oct 17 2026, 4 stars")
+        #expect(GalleryFormat.tileDescription(galleryPhoto(2, date: "2026-10-17", file: "DSC05050.ARW", stars: 1))
+            == "DSC05050.ARW, Sat, Oct 17 2026, 1 star")
+        // No caption (nil, empty or blank): the file name; no stars: none said; no date: Undated.
+        #expect(GalleryFormat.tileDescription(galleryPhoto(3, date: nil, file: "A.JPG", caption: "  \n"))
+            == "A.JPG, Undated")
+        #expect(GalleryFormat.tileDescription(galleryPhoto(4, date: "2026-10-17", caption: ""))
+            == "IMG_4.JPG, Sat, Oct 17 2026")
+    }
+
     @Test func shortDateHasATwoDigitYear() {
         #expect(GalleryFormat.shortDate("2026-10-17") == "Oct 17 ’26")
         #expect(GalleryFormat.shortDate("2005-03-04") == "Mar 4 ’05")

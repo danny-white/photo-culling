@@ -101,6 +101,12 @@ struct CullCardPage: View {
             @unknown default: break
             }
         }
+        // The buttons go when the controls are hidden, and the swipes are not for VoiceOver: these
+        // do what a swipe up (Keep, or Choose on a burst) and a swipe down (Reject) do.
+        .accessibilityAction(named: card.isBurst ? "Choose" : "Keep") {
+            onDecide(card.isBurst ? .choose : .keep)
+        }
+        .accessibilityAction(named: "Reject") { onDecide(.reject) }
     }
 
     // MARK: Drawing
