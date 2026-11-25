@@ -1246,3 +1246,180 @@ class DecodeAhead(unittest.TestCase):
         self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200")        # an ordinary 1:1 decodes and keeps
         self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=200&h=200&keep=0") # which keep=0 then uses
         self.assertEqual((len(self.calls), len(self.regions)), (1, 2))
+
+
+class PipelineHealthFailures(unittest.TestCase):
+    """The two alerts for photos that failed to tag: still waiting for a retry, and originals that
+    can't be read. A small temp DB with an error row of each kind, so the real snapshot's counts
+    don't matter."""
+    LIB = "/mnt/passport/Pictures"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.db = self.dir / "t.db"
+        self.known = self.dir / "known-unreadable.txt"
+        self.n = 0
+
+    def add(self, folder, *, n=1, status="error", size=100, cls="model", attempts=1, msg="Server disconnected"):
+        """n rows under LIB/<folder>; returns their paths."""
+        import photo_cull as pc
+        con = pc.connect(self.db)
+        paths = []
+        for _ in range(n):
+            self.n += 1
+            path = f"{self.LIB}/{folder}/IMG_{self.n:05d}.ARW"
+            con.execute("INSERT INTO images(path, filename, size, status, attempts, error_class, error_msg, processed_at) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (path, Path(path).name, size, status, attempts, cls if status == "error" else None,
+                         msg if status == "error" else None, "2026-01-01T00:00:00+00:00"))
+            paths.append(path)
+        con.commit()
+        con.close()
+        return paths
+
+    def health(self):
+        from flask import Flask
+        import mobile
+        import photo_cull as pc
+        if not self.db.exists():
+            pc.connect(self.db).close()
+
+        def db_ro():
+            con = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            return con
+
+        (self.dir / "static").mkdir(exist_ok=True)
+        app = Flask(__name__)
+        app.register_blueprint(mobile.make_blueprint(
+            db_ro=db_ro, anno=lambda: sqlite3.connect(self.dir / "annotations.db"), pc=pc, cache_dir=self.dir,
+            static_dir=self.dir / "static", state_dir=self.dir / "state", inbox=self.dir / "inbox",
+            check_mount=False, ingest_log=self.dir / "ingest.log", known_unreadable=self.known,
+            ollama_url="http://127.0.0.1:9"))
+        return app.test_client().get("/m/api/pipeline-health").get_json()
+
+    def alert(self, d, suffix):
+        found = [a for a in d["alerts"] if a["title"].endswith(suffix)]
+        return found[0] if found else None
+
+    def seed(self):
+        self.add("2026/2026-09-29", n=3, cls="model", attempts=1)
+        self.add("2026/2026-09-29", n=2, cls="timeout", attempts=2)
+        self.add("2026/2026-06-27", n=2, cls="io", attempts=3, msg="Input/output error")
+        self.add("2024/2024-04-14", n=3, cls="io", size=0, msg="Input/output error")       # as ingested in August
+        self.add("2024/2024-04-14", n=1, cls="empty", size=0, msg="The file on the NAS is empty (0 bytes)")
+        self.add("2024/2024-12-25", n=1, cls="io", attempts=4, msg="broken data stream")  # out of tries
+        acked = self.add("2025/2025-01-01", n=1, cls="io", size=0)[0]       # the one Danny listed
+        self.add("2026/2026-10-01", n=4, status="ok", attempts=1)
+        self.known.write_text(f"{acked}\n")
+        return acked
+
+    def test_a_retry_alert_and_a_cant_be_read_alert(self):
+        self.seed()
+        d = self.health()
+        wait = self.alert(d, "waiting for a retry")
+        self.assertEqual(wait["title"], "7 photos waiting for a retry")
+        self.assertEqual(wait["level"], "warn")
+        self.assertIn("5 in 2026-09-29 and 2 in 2026-06-27", wait["detail"])
+        self.assertIn("Causes: model (3), timeout (2), io (2)", wait["detail"])
+        self.assertIn("every 15 minutes", wait["fix"])
+        self.assertIn("up to 4 tries", wait["fix"])
+        self.assertIn("cd ~/photo-culling && ./venv/bin/python photo_cull.py run <folder> "
+                      "--db trial_out/trial.db --retry-failed", wait["fix"])
+        bad = self.alert(d, "can't be read")
+        self.assertEqual(bad["title"], "5 originals can't be read")
+        self.assertEqual(bad["level"], "warn")
+        self.assertIn("4 in 2024-04-14 and 1 in 2024-12-25", bad["detail"])
+        self.assertRegex(bad["detail"], r"IMG_\d{5}\.ARW")                      # a few file names
+        self.assertIn("another copy", bad["fix"])
+        self.assertIn("camera card", bad["fix"])
+        self.assertIn("~/photo-culling/trial_out/known-unreadable.txt", bad["fix"])
+        self.assertIn(d["status"], ("warn", "bad"))
+
+    def test_index_block(self):
+        acked = self.seed()
+        idx = self.health()["index"]
+        self.assertEqual(idx["retrying"], 7)
+        self.assertEqual(idx["unreadable"], 5)
+        self.assertEqual(idx["acknowledged_unreadable"], 1)
+        self.assertEqual(idx["caption_errors"], 13)                             # every error row, as before
+        self.assertEqual(len(idx["unreadable_files"]), 5)
+        first = idx["unreadable_files"][0]
+        self.assertEqual(set(first), {"path", "size", "error"})
+        self.assertEqual(first["path"], f"{self.LIB}/2024/2024-04-14/IMG_00008.ARW")   # sorted by path
+        self.assertEqual((first["size"], first["error"]), (0, "Input/output error"))
+        self.assertNotIn(acked, [f["path"] for f in idx["unreadable_files"]])
+        self.assertEqual(idx["ok"], 4)
+
+    def test_known_unreadable_file_format(self):
+        paths = self.add("2024/2024-04-14", n=5, cls="io", size=0)
+        self.known.write_text("\n".join([
+            "# the 14 April 2024 shoot, accepted as lost",
+            "",
+            f"  {paths[0]}  ",                            # spaces around a path
+            f"{paths[1]} # card was reformatted",          # a trailing comment
+            f"#{paths[2]}",                                # commented out: still reported
+            "/some/other/file.ARW"]))                      # not in the DB: ignored
+        d = self.health()
+        self.assertEqual(d["index"]["acknowledged_unreadable"], 2)
+        self.assertEqual(d["index"]["unreadable"], 3)
+        self.assertEqual(self.alert(d, "can't be read")["title"], "3 originals can't be read")
+
+    def test_a_missing_list_means_nothing_is_acknowledged(self):
+        self.add("2024/2024-04-14", n=2, cls="io", size=0)
+        self.assertFalse(self.known.exists())
+        d = self.health()
+        self.assertEqual(d["index"]["acknowledged_unreadable"], 0)
+        self.assertEqual(d["index"]["unreadable"], 2)
+
+    def test_listing_every_unreadable_file_silences_the_alert(self):
+        paths = self.add("2024/2024-04-14", n=3, cls="io", size=0)
+        self.known.write_text("\n".join(paths))
+        d = self.health()
+        self.assertIsNone(self.alert(d, "can't be read"))
+        self.assertEqual((d["index"]["unreadable"], d["index"]["acknowledged_unreadable"]), (0, 3))
+        self.assertEqual(d["index"]["unreadable_files"], [])
+
+    def test_unreadable_files_is_capped_at_100_but_the_count_is_not(self):
+        self.add("2024/2024-04-14", n=130, cls="io", size=0)
+        idx = self.health()["index"]
+        self.assertEqual(idx["unreadable"], 130)
+        self.assertEqual(len(idx["unreadable_files"]), 100)
+
+    def test_one_photo_reads_in_the_singular(self):
+        self.add("2026/2026-09-29", n=1)
+        self.add("2024/2024-04-14", n=1, cls="empty", size=0)
+        d = self.health()
+        self.assertEqual(self.alert(d, "waiting for a retry")["title"], "1 photo waiting for a retry")
+        self.assertEqual(self.alert(d, "can't be read")["title"], "1 original can't be read")
+
+    def test_rows_with_missing_attempts_or_class_are_still_retried(self):
+        paths = self.add("2026/2026-09-29", n=2)
+        import photo_cull as pc
+        con = pc.connect(self.db)
+        con.execute("UPDATE images SET attempts=NULL WHERE path=?", (paths[0],))
+        con.execute("UPDATE images SET error_class=NULL WHERE path=?", (paths[1],))
+        con.commit()
+        con.close()
+        d = self.health()
+        self.assertEqual((d["index"]["retrying"], d["index"]["unreadable"]), (2, 0))
+        self.assertIn("unknown (1)", self.alert(d, "waiting for a retry")["detail"])
+
+    def test_the_retry_limit_comes_from_photo_cull(self):
+        import photo_cull as pc
+        self.add("2026/2026-09-29", n=1, attempts=pc.MAX_ATTEMPTS - 1)
+        self.add("2026/2026-09-29", n=1, attempts=pc.MAX_ATTEMPTS)
+        idx = self.health()["index"]
+        self.assertEqual((idx["retrying"], idx["unreadable"]), (1, 1))
+
+    def test_nothing_failed_nothing_alerted(self):
+        self.add("2026/2026-10-01", n=3, status="ok")
+        d = self.health()
+        self.assertIsNone(self.alert(d, "waiting for a retry"))
+        self.assertIsNone(self.alert(d, "can't be read"))
+        idx = d["index"]
+        self.assertEqual((idx["retrying"], idx["unreadable"], idx["acknowledged_unreadable"], idx["unreadable_files"]),
+                         (0, 0, 0, []))
+        self.assertEqual(idx["caption_errors"], 0)

@@ -43,6 +43,7 @@ LIBRARY_ROOT = "/mnt/passport/Pictures"
 INBOX = Path("/mnt/Passport_AICullInbox")          # the narrow rw mount the watcher also writes
 INBOX_SOURCE = "//mycloud/Passport/AICullInbox"     # ...and must come from this share (as in watch_ingest.sh)
 INGEST_LOG = Path(__file__).resolve().parents[1] / "trial_out" / "ingest_watch.log"   # ops/watch_ingest.sh
+KNOWN_UNREADABLE = INGEST_LOG.parent / "known-unreadable.txt"   # originals Danny has accepted as lost
 OLLAMA_URL = "http://localhost:11434"
 DECISIONS_FILE = "cull-decisions.tsv"
 DECISIONS_HEADER = "#cull-decisions v1"
@@ -151,6 +152,21 @@ def day_date(day: str) -> str | None:
         return None
 
 
+def read_known_unreadable(path: Path) -> set[str]:
+    """Paths listed in known-unreadable.txt: one per line, `#` starts a comment (a whole line, or
+    after a space), a missing file is an empty list."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    out = set()
+    for line in text.splitlines():
+        line = line.split(" #", 1)[0].strip()
+        if line and not line.startswith("#"):
+            out.add(line)
+    return out
+
+
 def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
     """One cull-decisions.tsv line for a file, keyed like the plugin matches: (folder, file)."""
     p = Path(path)
@@ -161,12 +177,13 @@ def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
 
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
-                   ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
+                   known_unreadable: Path = KNOWN_UNREADABLE, ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
                    raw_decoder=None, region_decoder=None, backup_status: Path | None = None) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
-    the narrow AICullInbox mount (tests turn it off and pass a temp dir). raw_decoder(path) ->
+    the narrow AICullInbox mount (tests turn it off and pass a temp dir). known_unreadable: the
+    list of originals pipeline-health stops reporting as unreadable. raw_decoder(path) ->
     PIL image replaces the rawpy decode (tests pass a fast fake); region_decoder(path, x, y, w, h)
     -> (image, box) replaces region_decode.decode_region for the offline crops. backup_status: the file
     ops/backup.sh writes after each run, read by the pipeline-health alerts (default: next to the DB)."""
@@ -1301,8 +1318,23 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 folders[f] = max(folders.get(f, ""), r["processed_at"] or "")
             summed = {r["folder"] for r in con.execute("SELECT folder FROM day_summaries")}
             errored = con.execute("SELECT COUNT(*) FROM images WHERE status='error'").fetchone()[0]
+            # Failed photos: those another try can still help, and those no try will (empty files,
+            # or all their tries used). The same test as photo_cull's `--retry-failed`.
+            retrying = con.execute(f"SELECT path, error_class FROM images WHERE {pc.RETRYABLE_SQL}").fetchall()
+            unreadable_all = con.execute(
+                f"SELECT path, size, error_class, error_msg FROM images WHERE status='error' "
+                f"AND NOT ({pc.RETRYABLE_SQL}) ORDER BY path").fetchall()
         finally:
             con.close()
+        known = read_known_unreadable(known_unreadable)
+        unreadable = [r for r in unreadable_all if r["path"] not in known]
+        acknowledged = len(unreadable_all) - len(unreadable)
+
+        def by_folder(rows) -> str:
+            """'35 in 2026-09-29, 7 in 2026-06-27 and 5 in 2024-04-14' for the three biggest folders."""
+            top = collections.Counter(os.path.basename(os.path.dirname(r["path"])) for r in rows).most_common(3)
+            names = [f"{n} in {f}" for f, n in top]
+            return ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
         unsummed = sorted(f for f, t in folders.items() if f not in summed and t < cutoff)
 
         model = {"name": pc.EMBED_MODEL, "installed": None}
@@ -1341,6 +1373,22 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             alert("warn", f"{len(unsummed)} day{'s' if len(unsummed) > 1 else ''} without a summary",
                   ", ".join(os.path.basename(f) for f in unsummed[:4]) + (" …" if len(unsummed) > 4 else ""),
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py daysum --db trial_out/trial.db")
+        if retrying:
+            n = len(retrying)
+            classes = ", ".join(f"{k} ({c})" for k, c in collections.Counter(
+                r["error_class"] or "unknown" for r in retrying).most_common())
+            alert("warn", f"{n:,} photo{'s' if n > 1 else ''} waiting for a retry",
+                  f"Tagging failed for {by_folder(retrying)}. Causes: {classes}.",
+                  f"The watcher retries them every 15 minutes, up to {pc.MAX_ATTEMPTS} tries each. To do it now: "
+                  "cd ~/photo-culling && ./venv/bin/python photo_cull.py run <folder> --db trial_out/trial.db --retry-failed")
+        if unreadable:
+            n = len(unreadable)
+            names = ", ".join(os.path.basename(r["path"]) for r in unreadable[:3])
+            alert("warn", f"{n:,} original{'s' if n > 1 else ''} can't be read",
+                  f"{by_folder(unreadable)}, for example {names}. They are empty, damaged or out of retries, "
+                  "so they never reach Culling Bay.",
+                  "Look for another copy (the camera card, another drive). If they are gone for good, list their paths "
+                  "in ~/photo-culling/trial_out/known-unreadable.txt (one per line) to silence this.")
         mount = None
         if check_mount:
             mount = inbox_problem()
@@ -1433,7 +1481,10 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         return jsonify({
             "status": status, "alerts": alerts, "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "index": {"ok": ok, "unindexed": unindexed, "no_picture": nopic, "no_shot_info": noshot, "ungeotagged": ungeo, "unsummarised": len(unsummed),
-                      "days": len(folders), "caption_errors": errored},
+                      "days": len(folders), "caption_errors": errored, "retrying": len(retrying),
+                      "unreadable": len(unreadable), "acknowledged_unreadable": acknowledged,
+                      "unreadable_files": [{"path": r["path"], "size": r["size"],
+                                            "error": r["error_msg"] or r["error_class"]} for r in unreadable[:100]]},
             "model": model, "last_ingest": last, "recent": recent[-8:],
             "backup": backup,
         })

@@ -301,3 +301,16 @@ each other.
 | `GET /m/api/export/<id>?s=original` | The original file untouched (a RAW for editing), always a download, `Content-Disposition` carries the file name |
 
 Unknown ids give `404` JSON `{error}`; a file that won't decode gives `415` JSON `{error}`.
+
+## Pipeline health (for the Pi status page, not the app)
+
+`GET /m/api/pipeline-health` returns `{status: ok|warn|bad, alerts: [{level, title, detail, fix}], index, model,
+last_ingest, recent, checked_at}`. Every alert is worked out from the pipeline's current state, so it clears
+itself once fixed. The failed-photo alerts and the `index` fields that go with them:
+
+| Alert | When | `index` field |
+|---|---|---|
+| `N photos waiting for a retry` (warn) | rows with `status='error'` that another try can help: `size > 0`, `error_class != 'empty'`, `attempts < 4`. The watcher retries them every 15 minutes. | `retrying` |
+| `N originals can't be read` (warn) | error rows that no retry will help: `size = 0`, `error_class = 'empty'` or `attempts >= 4`, minus the paths in `trial_out/known-unreadable.txt` (one path per line, `#` starts a comment, a missing file is an empty list) | `unreadable` (after that list), `acknowledged_unreadable` (the ones it removed), `unreadable_files` (up to 100 of `{path, size, error}`, sorted by path) |
+
+`index.caption_errors` is every error row, retry or not, and is unchanged: the Pi dashboard may read it.
