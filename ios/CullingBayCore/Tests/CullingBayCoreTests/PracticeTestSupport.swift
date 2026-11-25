@@ -20,12 +20,13 @@ private func quoted(_ text: String?) -> String {
 
 /// A challenge as the server returns it. `hints: nil` leaves the key out, as an old file can; so does
 /// each of the Needs Desktop fields (`needsDesktop`, `reason`, `companionOf`, `companions`) when
-/// nil, as an older server leaves them out.
+/// nil, as an older server leaves them out. `lightroom` is the JSON of that object, as written; nil
+/// leaves the key out, as when nobody has checked.
 func practiceJSON(
     _ id: String, status: String = "todo", level: String = "easy", note: String = "",
     downloadedAt: String? = nil, doneAt: String? = nil, hints: [String]? = ["Start with the light."],
     photo: String = photoFullJSON, needsDesktop: Bool? = nil, reason: String? = nil,
-    companionOf: String? = nil, companions: [String]? = nil
+    companionOf: String? = nil, companions: [String]? = nil, lightroom: String? = nil
 ) -> String {
     let hintsPart = hints.map { "\"hints\":[\($0.map { "\"\($0)\"" }.joined(separator: ","))]," } ?? ""
     let desktopPart = [
@@ -33,6 +34,7 @@ func practiceJSON(
         reason.map { "\"desktop_reason\":\"\($0)\"," },
         companionOf.map { "\"companion_of\":\"\($0)\"," },
         companions.map { "\"companions\":[\($0.map { "\"\($0)\"" }.joined(separator: ","))]," },
+        lightroom.map { "\"lightroom\":\($0)," },
     ].compactMap { $0 }.joined()
     return """
     {"id":"\(id)","title":"Title of \(id)","mode":"phone","level":"\(level)","minutes":8,

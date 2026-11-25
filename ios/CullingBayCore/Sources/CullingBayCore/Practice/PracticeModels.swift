@@ -29,6 +29,50 @@ public enum PracticeLevel: String, Codable, Sendable, Hashable, CaseIterable {
     public var title: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
 }
 
+/// What the server found out, once, about whether a challenge's photo is already in Lightroom on
+/// the phone (`lightroom` on a challenge). Nothing keeps it current, so `checked` says when.
+public struct PracticeLightroom: Codable, Sendable, Hashable {
+    /// The synced albums the photo is in, smallest first. Empty means it is not on the phone.
+    public let albums: [String]
+    /// The album to look in (the smallest); nil when `albums` is empty.
+    public let findIn: String?
+    /// Lightroom's own capture time, local with no zone: `2025-01-18T13:13:02`. It can be a day off
+    /// the photo's `date`, for a photo whose time was shifted in Lightroom Classic.
+    public let captured: String?
+    /// Lightroom Classic already has edits on the photo.
+    public let edited: Bool
+    /// The day it was checked, `YYYY-MM-DD`.
+    public let checked: String?
+
+    public init(
+        albums: [String], findIn: String? = nil, captured: String? = nil, edited: Bool = false,
+        checked: String? = nil
+    ) {
+        self.albums = albums
+        self.findIn = findIn
+        self.captured = captured
+        self.edited = edited
+        self.checked = checked
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case albums
+        case findIn = "find_in"
+        case captured, edited, checked
+    }
+
+    /// `albums` is the one key that has to be there: without it the app cannot say whether the photo
+    /// is on the phone. Every other key may be missing or null, and a key it does not know is ignored.
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        albums = try values.decode([String].self, forKey: .albums)
+        findIn = try values.decodeIfPresent(String.self, forKey: .findIn)
+        captured = try values.decodeIfPresent(String.self, forKey: .captured)
+        edited = try values.decodeIfPresent(Bool.self, forKey: .edited) ?? false
+        checked = try values.decodeIfPresent(String.self, forKey: .checked)
+    }
+}
+
 /// One editing challenge (`GET /m/api/practice`): a photo of Danny's, a tool limit and an aim,
 /// and where he has got with it.
 public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
@@ -71,6 +115,9 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
     /// The ids of the challenges that are this one's on-the-go versions, in the file's order.
     /// Empty when the server does not send it.
     public let companions: [String]
+    /// Whether the photo is already in Lightroom on the phone. nil when nobody has checked, and when
+    /// the server sends something the app cannot read: the screen then offers the download.
+    public let lightroom: PracticeLightroom?
 
     /// The RAW has been fetched at some point.
     public var wasDownloaded: Bool { !(downloadedAt ?? "").isEmpty }
@@ -81,7 +128,8 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         hints: [String] = [], pickedBy: String = "Claude", added: String = "", photo: Photo,
         status: PracticeStatus = .todo, note: String = "", updatedAt: String? = nil,
         downloadedAt: String? = nil, doneAt: String? = nil, needsDesktop: Bool = false,
-        desktopReason: String? = nil, companionOf: String? = nil, companions: [String] = []
+        desktopReason: String? = nil, companionOf: String? = nil, companions: [String] = [],
+        lightroom: PracticeLightroom? = nil
     ) {
         self.id = id
         self.title = title
@@ -104,6 +152,7 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         self.desktopReason = desktopReason
         self.companionOf = companionOf
         self.companions = companions
+        self.lightroom = lightroom
     }
 
     enum CodingKeys: String, CodingKey {
@@ -116,7 +165,7 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         case needsDesktop = "needs_desktop"
         case desktopReason = "desktop_reason"
         case companionOf = "companion_of"
-        case companions
+        case companions, lightroom
     }
 
     public init(from decoder: any Decoder) throws {
@@ -142,6 +191,8 @@ public struct PracticeChallenge: Codable, Sendable, Hashable, Identifiable {
         desktopReason = try values.decodeIfPresent(String.self, forKey: .desktopReason)
         companionOf = try values.decodeIfPresent(String.self, forKey: .companionOf)
         companions = try values.decodeIfPresent([String].self, forKey: .companions) ?? []
+        // A `lightroom` the app cannot read is no check at all, not a list that fails to load.
+        lightroom = (try? values.decodeIfPresent(PracticeLightroom.self, forKey: .lightroom)) ?? nil
     }
 
     /// Takes the server's answer to a write.
