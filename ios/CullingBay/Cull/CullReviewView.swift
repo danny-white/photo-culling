@@ -10,6 +10,7 @@ struct CullReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
     let session: CullSessionModel
+    @State private var isRefreshing = false
 
     var body: some View {
         let summary = session.summary
@@ -29,6 +30,7 @@ struct CullReviewView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 16)
             }
+            .refreshable { await session.refresh() }
             .overlay(alignment: .bottom) {
                 CullToastView(session: session)
                     .padding(.horizontal, 12)
@@ -182,6 +184,7 @@ struct CullReviewView: View {
         return layout {
             Button("Back to days") { dismiss() }
                 .buttonStyle(CullFooterStyle(isPrimary: false))
+            refreshButton
             Button {
                 Task {
                     await session.send()
@@ -203,6 +206,32 @@ struct CullReviewView: View {
         .padding(.top, 10)
         .padding(.bottom, 6)
         .background(Color.black)
+    }
+
+    /// Loads the day again for the receipts, after waiting for the taps to be saved (the messages
+    /// on this screen say to refresh). A small button beside the others, or a full one when the
+    /// text is large.
+    private var refreshButton: some View {
+        Button {
+            guard !isRefreshing else { return }
+            isRefreshing = true
+            Task {
+                await session.refresh()
+                isRefreshing = false
+            }
+        } label: {
+            if isRefreshing {
+                ProgressView().tint(.white)
+            } else if typeSize.isAccessibilitySize {
+                Text("Refresh")
+            } else {
+                Image(systemName: "arrow.clockwise")
+            }
+        }
+        .buttonStyle(CullFooterStyle(isPrimary: false))
+        .frame(maxWidth: typeSize.isAccessibilitySize ? .infinity : 58)
+        .accessibilityLabel(isRefreshing ? "Refreshing" : "Refresh")
+        .accessibilityHint("Checks what Lightroom has taken")
     }
 }
 
