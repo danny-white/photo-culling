@@ -19,16 +19,6 @@ struct GalleryHomeView: View {
                 .padding(.horizontal, 12)
             }
             .refreshable { await model.refresh() }
-            // The year chips are a bar of their own under the search field, not the first row of the
-            // list, so scrolling the list cannot leave them drawn over the search field.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if model.phase == .loaded, model.index.years.count > 1 {
-                    yearBar(proxy)
-                        .padding(.horizontal, 12)
-                        // Not under the title and the search field above it, as a plain background would be.
-                        .background(.bar, ignoresSafeAreaEdges: [])
-                }
-            }
         }
         .navigationTitle("Gallery")
         .searchable(
@@ -79,6 +69,11 @@ struct GalleryHomeView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.vertical, 6)
+        }
+        // The year chips scroll away with the list. Pinned under the search field (build 145) they
+        // followed Danny down the whole page, which he called a bug.
+        if model.index.years.count > 1 {
+            yearBar(proxy)
         }
         if !model.onThisDay.isEmpty {
             onThisDay
