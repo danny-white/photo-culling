@@ -57,6 +57,10 @@ final class OfflineManager {
     /// Stops a sync in progress. The app calls it when it goes to the background.
     func cancel() { core.cancel() }
 
+    /// Holds back the 1:1 crop top-up while a day is open in the Cull tab, so the PC decodes the
+    /// RAWs of the 1:1 checks first. Letting go syncs again if a top-up was held back.
+    func setCropsPaused(_ paused: Bool) { core.setCropsPaused(paused) }
+
     /// Saves a pin and syncs again.
     func pin(_ day: String, _ pin: OfflinePin) { core.pin(day, pin) }
 

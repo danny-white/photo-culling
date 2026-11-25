@@ -87,7 +87,9 @@ extension OfflineStore: OfflineSyncStore {}
 /// 3. Pictures first, for every planned day in plan order, each day tried once. Before each, the
 ///    plan is made again and the days that left it are deleted.
 /// 4. If 1:1 crops are on and nothing went wrong, tops up every saved planned day once, in plan
-///    order (`topUp`: the day stays saved meanwhile).
+///    order (`topUp`: the day stays saved meanwhile). Not while the crops are paused (a day is
+///    open in the Cull tab, `setCropsPaused`): the PC reads each whole RAW from the NAS for these,
+///    which a 1:1 check of the open day should not have to compete with.
 ///
 /// A transport error (or any error that is not the PC's answer) ends the sync as `offline`. Any
 /// other error leaves that day for next time, skips the top-up, and ends the sync as `failed`.
@@ -118,6 +120,8 @@ public final class OfflineSync {
     public private(set) var pins: [String: OfflinePin]
     /// The day being fetched now.
     public private(set) var syncingDay: String?
+    /// Whether the 1:1 crop pass is held back (`setCropsPaused`).
+    @ObservationIgnored public private(set) var cropsPaused = false
 
     @ObservationIgnored private let store: any OfflineSyncStore
     @ObservationIgnored private let daysSource: any OfflineDaysSource
@@ -130,6 +134,10 @@ public final class OfflineSync {
     @ObservationIgnored private var debounce: Task<Void, Never>?
     @ObservationIgnored private var wipe: Task<Void, Never>?
     @ObservationIgnored private var markedExcludedFromBackup = false
+    /// The sync is in its second pass, the 1:1 crops.
+    @ObservationIgnored private var inCropPass = false
+    /// The crop pass was held back, or stopped, by the pause, so unpausing has it to do.
+    @ObservationIgnored private var cropsWaiting = false
 
     /// How long a change to a setting waits for the next one before it syncs, so dragging the
     /// slider is one sync, not twenty.
@@ -195,6 +203,28 @@ public final class OfflineSync {
         task?.cancel()
     }
 
+    /// Holds back the 1:1 crop pass while a day is open in Cull, so the PC's reads of the NAS go
+    /// to the 1:1 checks of that day and not to the top-up. The app sets it from whether a day is
+    /// open.
+    ///
+    /// While paused, a sync saves days' pictures as always and skips the crop pass. Pausing while
+    /// the crop pass runs stops it at once (it cancels the sync): the files it has saved stay, and
+    /// every day stays saved as it is. Unpausing syncs again if a crop pass was held back or
+    /// stopped, and that pass fetches only the files still missing. With nothing held back it does
+    /// nothing.
+    public func setCropsPaused(_ paused: Bool) {
+        guard paused != cropsPaused else { return }
+        cropsPaused = paused
+        if paused {
+            guard inCropPass else { return }
+            cropsWaiting = true
+            task?.cancel()
+        } else if cropsWaiting {
+            cropsWaiting = false
+            sync()
+        }
+    }
+
     /// Saves a pin and syncs again.
     public func pin(_ day: String, _ pin: OfflinePin) {
         pins[day] = pin == .auto ? nil : pin
@@ -256,6 +286,7 @@ public final class OfflineSync {
     }
 
     private func run() async {
+        defer { inCropPass = false }
         await wipe?.value
         let settings = preferences.current()
         guard settings.isEnabled else { return }
@@ -309,10 +340,13 @@ public final class OfflineSync {
             }
         }
         // Second pass: the crops of the saved days, each day once per sync (a fetch of its data,
-        // then only the files it lacks). The day stays saved meanwhile.
+        // then only the files it lacks). The day stays saved meanwhile. Not while paused: it waits
+        // for `setCropsPaused(false)`.
         if settings.includeCrops && !Task.isCancelled && problem == nil {
+            cropsWaiting = cropsPaused
             var topped = Set<String>()
-            while !Task.isCancelled {
+            inCropPass = !cropsPaused
+            while !Task.isCancelled && !cropsPaused {
                 refreshPlan()
                 guard let next = plan.kept.first(where: { store.isSaved($0.day.day) && !topped.contains($0.day.day) })
                 else { break }
@@ -331,6 +365,7 @@ public final class OfflineSync {
                     problem = Self.message(for: error)
                 }
             }
+            inCropPass = false
         }
         syncingDay = nil
         await measure()

@@ -483,6 +483,124 @@ struct OfflineSyncTests {
         #expect(rig.sync.state == .idle)
     }
 
+    // MARK: Pausing the crops while a day is open
+
+    @Test func withThePauseSetASyncSavesPicturesAndFetchesNoCropsUntilItIsLifted() async {
+        let rig = SyncRig(.fresh([newest, started]))
+        rig.sync.setCropsPaused(true)
+        #expect(rig.sync.cropsPaused)
+        await rig.syncNow()
+        #expect(rig.fake.calls.map(\.day) == ids([started, newest]))           // the pictures, as always
+        #expect(rig.fake.calls.allSatisfy { !$0.includeCrops && !$0.topUp })
+        #expect(rig.sync.savedDays == Set(ids([started, newest])))
+        #expect(rig.sync.state == .idle)
+
+        rig.sync.setCropsPaused(false)                                         // a crop pass was held back: it runs now
+        await rig.sync.settled()
+        let later = rig.fake.calls.dropFirst(2)
+        #expect(later.map(\.day) == ids([started, newest]))
+        #expect(later.allSatisfy { $0.includeCrops && $0.topUp && $0.wasSaved })
+        #expect(rig.sync.state == .idle)
+    }
+
+    @Test func thePausedPassLeavesThePicturePassAlone() async {
+        let gate = CallGate()
+        let rig = SyncRig(.fresh([newest, started]), gate: gate)
+        rig.sync.sync()
+        #expect(await gate.waitForArrivals(1))                                 // the first day's pictures
+        rig.sync.setCropsPaused(true)                                          // not in the crop pass: nothing is stopped
+        for index in 0..<4 { await gate.open(index) }
+        await rig.sync.settled()
+        #expect(rig.fake.calls.map(\.day) == ids([started, newest]))
+        #expect(rig.fake.calls.allSatisfy { !$0.topUp })
+        #expect(rig.sync.savedDays == Set(ids([started, newest])))
+        #expect(rig.sync.state == .idle)
+    }
+
+    @Test func pausingDuringTheCropPassStopsItAtOnceAndEveryDayStaysSaved() async {
+        let gate = CallGate()
+        let rig = SyncRig(.fresh([newest, started]), gate: gate)
+        rig.sync.sync()
+        #expect(await gate.waitForArrivals(1))
+        await gate.open(0)
+        #expect(await gate.waitForArrivals(2))
+        await gate.open(1)                                                     // both days' pictures are in
+        #expect(await gate.waitForArrivals(3))                                 // the first top-up is under way
+        #expect(rig.fake.calls.map(\.topUp) == [false, false, true])
+        #expect(rig.sync.syncingDay == started.day)
+
+        rig.sync.setCropsPaused(true)
+        await gate.open(2)                                                     // it sees it was stopped
+        await rig.sync.settled()
+        #expect(rig.fake.calls.count == 3)                                     // the second top-up never started
+        #expect(rig.sync.savedDays == Set(ids([started, newest])))
+        #expect(rig.store.isSaved(started.day) && rig.store.isSaved(newest.day))
+        #expect(rig.sync.syncingDay == nil)
+        #expect(rig.sync.state == .idle)
+
+        for index in 3..<8 { await gate.open(index) }
+        rig.sync.setCropsPaused(false)                                         // the pass picks up again
+        await rig.sync.settled()
+        #expect(rig.list.calls == 2)
+        #expect(rig.fake.calls.dropFirst(3).map(\.day) == ids([started, newest]))
+        #expect(rig.fake.calls.dropFirst(3).allSatisfy { $0.topUp && $0.includeCrops })
+        #expect(rig.sync.state == .idle)
+    }
+
+    @Test func unpausingCompletesTheRemainingCropsWithoutFetchingTheSavedOnesAgain() async {
+        let frames = (1...6).map { cullFrame($0, af: [0.5, 0.5]) }
+        let body = cullJSON(cullDay(frames.map { cullStack($0.id, .single, [$0]) }))
+        let day = planDay("2026-10-01", frames: 6, decided: 1)
+        let gate = CallGate()
+        let crops = SendableLog<Int>()
+        let held: Set<Int> = [3, 4, 5, 6]                                      // crops 1 and 2 come at once
+        let rig = SyncRig(.fresh([day]), network: GatedPC(day: body, gate: gate, held: held, crops: crops))
+        rig.sync.sync()
+        #expect(await gate.waitForArrivals(4))                                 // 3 to 6 are waiting at the PC
+        #expect(await eventually { @MainActor in rig.store.hasImage(.af, id: 1) && rig.store.hasImage(.af, id: 2) })
+
+        rig.sync.setCropsPaused(true)                                          // a day was opened
+        for id in held { await gate.open(id) }                                 // their answers come, too late to be kept
+        await rig.sync.settled()
+        #expect(rig.store.isSaved(day.day))
+        #expect((1...6).filter { rig.store.hasImage(.af, id: $0) } == [1, 2])
+        #expect(crops.all.sorted() == [1, 2, 3, 4, 5, 6])
+        #expect(rig.sync.state == .idle)
+
+        for id in held { await gate.open(id) }                                 // the PC answers at once from now on
+        rig.sync.setCropsPaused(false)                                         // the day was closed
+        await rig.sync.settled()
+        #expect((1...6).allSatisfy { rig.store.hasImage(.af, id: $0) })
+        #expect(crops.all.filter { $0 <= 2 }.sorted() == [1, 2])               // not fetched again
+        #expect(crops.all.filter { $0 >= 3 }.sorted() == [3, 3, 4, 4, 5, 5, 6, 6])
+        #expect(rig.store.isSaved(day.day))
+        #expect(rig.sync.state == .idle)
+    }
+
+    @Test func unpausingWithNothingToDoDoesNothing() async {
+        let rig = SyncRig(.fresh([newest, started]))
+        await rig.syncNow()
+        let fetched = rig.fake.calls.count, lists = rig.list.calls
+
+        rig.sync.setCropsPaused(true)                                          // no crop pass is running: nothing to stop
+        rig.sync.setCropsPaused(true)
+        rig.sync.setCropsPaused(false)                                         // and none was held back
+        rig.sync.setCropsPaused(false)
+        await rig.sync.settled()
+        #expect(rig.fake.calls.count == fetched && rig.list.calls == lists)
+        #expect(rig.sync.state == .idle)
+        #expect(!rig.sync.cropsPaused)
+        #expect(rig.sync.savedDays == Set(ids([started, newest])))
+
+        // With crops off there is no pass to hold back either.
+        let off = SyncRig(.fresh([started]), settings: FakeOfflineSettings(crops: false))
+        off.sync.setCropsPaused(true)
+        await off.syncNow()
+        off.sync.setCropsPaused(false)
+        await off.sync.settled()
+        #expect(off.fake.calls.count == 1 && off.list.calls == 1)
+    }
+
     @Test func theChooseDaysListMakesThePlanWithoutFetchingAnything() async {
         let rig = SyncRig(.savedCopy([newest, started]))
         await rig.sync.reload()
@@ -505,5 +623,24 @@ struct OfflineSyncTests {
         #expect(on.sync.state == .idle)
         let off = SyncRig(.fresh([started]), settings: FakeOfflineSettings(enabled: false), root: first.root)
         #expect(off.sync.state == .off)
+    }
+}
+
+/// A PC that answers a day, then every picture, holding the crops of the photos in `held` at the
+/// gate (by photo id) until the test lets them through, and noting every crop asked for.
+private struct GatedPC: HTTPTransport {
+    let day: String
+    let gate: CallGate
+    let held: Set<Int>
+    let crops: SendableLog<Int>
+
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let path = request.url?.path ?? ""
+        if path.hasPrefix("/m/api/day/") { return jsonResponse(day, for: request) }
+        if path.hasPrefix("/m/api/crop/"), let id = Int(path.split(separator: "/").last ?? "") {
+            crops.append(id)
+            if held.contains(id) { await gate.pass(id) }
+        }
+        return (Data("jpeg".utf8), makeResponse(for: request))
     }
 }

@@ -23,9 +23,16 @@ struct CullTabView: View {
             openedLaunchDay = true
             router.open(day, services: services)
         }
-        .onAppear(perform: updateScreenAwake)
+        .onAppear {
+            updateScreenAwake()
+            services.offline.setCropsPaused(router.isDayOpen)
+        }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
-        .onChange(of: router.isDayOpen) { updateScreenAwake() }
+        .onChange(of: router.isDayOpen) {
+            updateScreenAwake()
+            // The saved days' 1:1 crops wait while a day is open, so its own 1:1 checks have the PC.
+            services.offline.setCropsPaused(router.isDayOpen)
+        }
         .onChange(of: scenePhase) { updateScreenAwake() }
     }
 
