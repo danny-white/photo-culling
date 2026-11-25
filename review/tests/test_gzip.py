@@ -16,18 +16,7 @@ sys.path.insert(0, str(ROOT / "review"))
 sys.path.insert(0, str(ROOT))
 TRIAL_DB = ROOT / "trial_out" / "trial.db"
 GZ = {"Accept-Encoding": "gzip"}
-
-
-class FakePC:
-    """photo_cull, except that a preview is a small grey picture (no NAS needed)."""
-
-    def __getattr__(self, name):
-        import photo_cull
-        return getattr(photo_cull, name)
-
-    def load_source(self, path):
-        from PIL import Image
-        return Image.new("RGB", (64, 48), "grey")
+from review.tests.helpers import FakePC, anno_connection  # noqa: E402
 
 
 @unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
@@ -56,9 +45,7 @@ class Compression(unittest.TestCase):
             return con
 
         def anno():
-            con = sqlite3.connect(tmp / "annotations.db", timeout=5)
-            con.row_factory = sqlite3.Row
-            return con
+            return anno_connection(tmp / "annotations.db")
 
         def fake_decode(path):
             return Image.new("RGB", (600, 400), "grey")

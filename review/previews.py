@@ -21,6 +21,7 @@ import os
 import sqlite3
 import sys
 import time
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -35,9 +36,10 @@ def preview_path(cache_dir: Path, path: str, edge: int) -> Path:
 
 
 def write_atomic(im, dest: Path, quality: int = 85) -> None:
-    """Write through a temporary name unique to this process, so the server and a backfill
-    making the same file at once can't leave a broken one."""
-    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+    """Write through a temporary name unique to this call, so two requests (threads) or the
+    server and a backfill (processes) making the same file at once can't clobber each other's
+    temporary file, and a reader never sees a half-written one under the final name."""
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     im.save(tmp, "JPEG", quality=quality)
     tmp.replace(dest)
 

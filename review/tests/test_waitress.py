@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "review"))
 sys.path.insert(0, str(ROOT))
 TRIAL_DB = ROOT / "trial_out" / "trial.db"
 DAY = "2026/2026-10-01"
+from review.tests.helpers import anno_connection  # noqa: E402
 
 
 class Served:
@@ -264,9 +265,7 @@ class SlowCropsLeaveRoomForDecides(unittest.TestCase):
             return con
 
         def anno():
-            con = sqlite3.connect(tmp / "annotations.db", timeout=5)
-            con.row_factory = sqlite3.Row
-            return con
+            return anno_connection(tmp / "annotations.db")
 
         (tmp / "static").mkdir()
         (tmp / "inbox").mkdir()

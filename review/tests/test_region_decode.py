@@ -15,6 +15,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "review"))
 TRIAL_DB = ROOT / "trial_out" / "trial.db"
+from review.tests.helpers import require_nas  # noqa: E402
 
 
 def library_path(rowid):
@@ -25,7 +26,7 @@ def library_path(rowid):
         r = con.execute("SELECT path FROM images WHERE rowid=?", (rowid,)).fetchone()
     finally:
         con.close()
-    return r[0] if r and Path(r[0]).exists() else None
+    return r[0] if r else None
 
 
 class RegionDecode(unittest.TestCase):
@@ -34,7 +35,8 @@ class RegionDecode(unittest.TestCase):
         import region_decode as rd
         path = library_path(rowid)
         if not path:
-            self.skipTest("needs trial.db and the NAS")
+            self.skipTest(f"needs trial_out/trial.db with photo {rowid}")
+        require_nas(self, path)
         with rawpy.imread(path) as raw:
             full = raw.postprocess(use_camera_wb=True)
         H, W = full.shape[:2]

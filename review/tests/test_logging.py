@@ -17,21 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "review"))
 sys.path.insert(0, str(ROOT))
 TRIAL_DB = ROOT / "trial_out" / "trial.db"
-
-
-class FakePC:
-    """photo_cull, except that reading a photo for a preview can be made to fail."""
-    load_error: Exception | None = None
-
-    def __getattr__(self, name):
-        import photo_cull
-        return getattr(photo_cull, name)
-
-    def load_source(self, path):
-        from PIL import Image
-        if self.load_error:
-            raise self.load_error
-        return Image.new("RGB", (64, 48))
+from review.tests.helpers import FakePC, anno_connection  # noqa: E402
 
 
 @unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
@@ -58,9 +44,7 @@ class DecodeFailuresAreLogged(unittest.TestCase):
             return con
 
         def anno():
-            con = sqlite3.connect(tmp / "annotations.db")
-            con.row_factory = sqlite3.Row
-            return con
+            return anno_connection(tmp / "annotations.db")
 
         (tmp / "static").mkdir()
         (tmp / "inbox").mkdir()

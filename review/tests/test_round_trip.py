@@ -19,6 +19,7 @@ TRIAL_DB = ROOT / "trial_out" / "trial.db"
 DAY = "2026/2026-10-01"
 MAC_DIR = "/Volumes/Passport/Pictures/2026/2026-10-01/"
 H = {"X-Culling-Bay": "1"}
+from review.tests.helpers import anno_connection  # noqa: E402
 
 
 @unittest.skipUnless(TRIAL_DB.exists() and shutil.which("lua5.1"), "needs trial.db and lua5.1")
@@ -38,9 +39,7 @@ class RoundTrip(unittest.TestCase):
             return con
 
         def anno():
-            con = sqlite3.connect(tmp / "annotations.db")
-            con.row_factory = sqlite3.Row
-            return con
+            return anno_connection(tmp / "annotations.db")
 
         app = Flask(__name__)
         app.register_blueprint(mobile.make_blueprint(

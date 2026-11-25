@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "review"))
 sys.path.insert(0, str(ROOT))
 TRIAL_DB = ROOT / "trial_out" / "trial.db"
 DAY = "2026/2026-10-01"
+from review.tests.helpers import FakePC, anno_connection, require_nas  # noqa: E402
 
 
 @unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
@@ -39,9 +40,7 @@ class MobileApi(unittest.TestCase):
             return con
 
         def anno():
-            con = sqlite3.connect(tmp / "annotations.db")
-            con.row_factory = sqlite3.Row
-            return con
+            return anno_connection(tmp / "annotations.db")
 
         (tmp / "static").mkdir()
         (tmp / "inbox").mkdir()          # Send writes cull-decisions.tsv here
@@ -120,6 +119,15 @@ class MobileApi(unittest.TestCase):
 
     H = {"X-Culling-Bay": "1"}
 
+    def need_nas(self, *rowids):
+        """Skip the running test unless the NAS holds these photos (a real RAW decode or file read)."""
+        con = self.db_ro()
+        try:
+            paths = [con.execute("SELECT path FROM images WHERE rowid=?", (i,)).fetchone()[0] for i in rowids]
+        finally:
+            con.close()
+        require_nas(self, *paths)
+
     def frames(self):
         body = self.client.get(f"/m/api/day/{DAY}").get_json()
         return {f["file"]: f for s in body["stacks"] for f in s["frames"]}, body
@@ -189,6 +197,24 @@ class MobileApi(unittest.TestCase):
             {"id": x, "flag": "pick", "via": "card"}]}, headers=self.H)
         self.assertEqual(r.status_code, 400)
 
+    def test_progress_with_odd_numbers_today(self):
+        """Documents what the route does now, not what it should do (server.md "Input validation", card
+        D3, not chosen): a float, NaN or non-integer is a clean 400, but an integer past SQLite's range
+        is a 500 with an HTML body. If the range check is added, these three become 400s."""
+        url = f"/m/api/day/{DAY}/progress"
+        for cursor in (float("nan"), 1.5, "7", True):
+            with self.subTest(cursor=cursor):
+                r = self.client.put(url, json={"pass": 1, "cursor": cursor}, headers=self.H)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("error", r.get_json())
+        logger = self.client.application.logger.name
+        for body in ({"pass": 1, "cursor": 2 ** 70}, {"pass": 1, "cursor": 0, "lead": 2 ** 70},
+                     {"pass": 1, "cursor": -2 ** 63 - 1}):
+            with self.subTest(body=body), self.assertLogs(logger, "ERROR"):
+                r = self.client.put(url, json=body, headers=self.H)
+                self.assertEqual(r.status_code, 500)
+                self.assertIsNone(r.get_json(silent=True), "an HTML error page, not the {error} JSON the app expects")
+
     def test_progress(self):
         r = self.client.put(f"/m/api/day/{DAY}/progress", json={"pass": 2, "cursor": 5}, headers=self.H)
         self.assertTrue(r.get_json()["ok"])
@@ -202,22 +228,21 @@ class MobileApi(unittest.TestCase):
         self.assertIn("lens", f)
 
     def test_crop(self):
-        import time
+        import rawpy
         from PIL import Image
         fid = self.frames()[0]["DSC05036.ARW"]["id"]
-        t = time.time()
-        r = self.client.get(f"/m/api/crop/{fid}?x=0.5&y=0.5&w=800&h=600")
-        first = time.time() - t
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(Image.open(io.BytesIO(r.data)).size, (800, 600))
-        self.assertTrue(r.headers["X-Crop-Box"].endswith("of 7968x5320"))
-        r.close()
-        t = time.time()
-        r = self.client.get(f"/m/api/crop/{fid}?x=1&y=0&w=5000&h=400")   # clamped to the corner
-        second = time.time() - t
-        self.assertTrue(r.headers["X-Crop-Box"].startswith("5568,0,2400,400"), r.headers["X-Crop-Box"])
-        r.close()
-        self.assertLess(second, first / 2, f"second crop should reuse the decode ({first:.2f}s, {second:.2f}s)")
+        self.need_nas(fid)
+        with patch("rawpy.imread", wraps=rawpy.imread) as imread:      # counts real decodes
+            r = self.client.get(f"/m/api/crop/{fid}?x=0.5&y=0.5&w=800&h=600")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(Image.open(io.BytesIO(r.data)).size, (800, 600))
+            self.assertTrue(r.headers["X-Crop-Box"].endswith("of 7968x5320"))
+            r.close()
+            r = self.client.get(f"/m/api/crop/{fid}?x=1&y=0&w=5000&h=400")   # clamped to the corner
+            self.assertTrue(r.headers["X-Crop-Box"].startswith("5568,0,2400,400"), r.headers["X-Crop-Box"])
+            r.close()
+            # a count, not a stopwatch: the second crop must come from the first one's decode
+            self.assertEqual(imread.call_count, 1, "the second crop should reuse the decode")
         self.assertEqual(self.client.get(f"/m/api/crop/{fid}").status_code, 400)
 
     def test_gps_health(self):
@@ -234,6 +259,7 @@ class MobileApi(unittest.TestCase):
         from PIL import Image
         body = self.client.get(f"/m/api/day/{DAY}").get_json()
         rowid = body["stacks"][0]["lead"]
+        self.need_nas(rowid)
         r = self.client.get(f"/m/api/img/{rowid}?s=thumb")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.mimetype, "image/jpeg")
@@ -269,6 +295,7 @@ class MobileApi(unittest.TestCase):
     def test_export_carries_the_capture_time(self):
         from PIL import Image
         lead = self.client.get(f"/m/api/gallery/day/{DAY}").get_json()["photos"][0]
+        self.need_nas(lead["id"])
         r = self.client.get(f"/m/api/export/{lead['id']}?s=large&dl=1")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.mimetype, "image/jpeg")
@@ -287,8 +314,7 @@ class MobileApi(unittest.TestCase):
                                       "LIMIT 1").fetchone()
         finally:
             con.close()
-        if not Path(path).exists():
-            self.skipTest("the NAS is not mounted")
+        require_nas(self, path)
         r = self.client.get(f"/m/api/export/{rowid}")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data, Path(path).read_bytes())
@@ -296,6 +322,7 @@ class MobileApi(unittest.TestCase):
 
     def test_export_original_raw_is_a_download_of_the_file(self):
         lead = self.client.get(f"/m/api/gallery/day/{DAY}").get_json()["photos"][0]
+        self.need_nas(lead["id"])
         self.assertTrue(lead["raw"])
         self.assertGreater(lead["bytes"], 1_000_000)
         r = self.client.get(f"/m/api/export/{lead['id']}?s=original")
@@ -1167,15 +1194,13 @@ class DecodeAhead(unittest.TestCase):
             return con
 
         def anno():
-            con = sqlite3.connect(tmp / "annotations.db")
-            con.row_factory = sqlite3.Row
-            return con
+            return anno_connection(tmp / "annotations.db")
 
         (tmp / "static").mkdir()
         (tmp / "inbox").mkdir()
         app = Flask(__name__)
         app.register_blueprint(mobile.make_blueprint(
-            db_ro=db_ro, anno=anno, pc=pc, cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state",
+            db_ro=db_ro, anno=anno, pc=FakePC(), cache_dir=tmp, static_dir=tmp / "static", state_dir=tmp / "state",
             inbox=tmp / "inbox", check_mount=False, ingest_log=tmp / "ingest.log",
             ollama_url="http://127.0.0.1:9", raw_decoder=fake_decode, region_decoder=fake_region))
         self.client = app.test_client()
@@ -1214,6 +1239,26 @@ class DecodeAhead(unittest.TestCase):
         self.assertEqual(len(self.calls), before)
         self.assertEqual(self.client.get(f"/m/api/crop/{self.many_raws[0]}?x=0.5&y=0.5&w=64&h=64").status_code, 200)
         self.assertEqual(len(self.calls), before + 1)
+
+    def test_crop_with_odd_numbers_today(self):
+        """Documents what the route does now, not what it should do (server.md "Input validation", card
+        D3, not chosen). Infinity is clamped like any too-big number, and a non-numeric size is a 400;
+        NaN as the centre decodes the whole RAW and then fails (500, an HTML page), and so does an id
+        past SQLite's integer range. If validation is added, those two become 400s."""
+        self.decode_seconds = 0
+        rid = self.raws[0]
+        crop = f"/m/api/crop/{rid}?y=0.5&w=200&h=200&x="
+        self.assertEqual(self.client.get(crop + "inf").status_code, 200)
+        self.assertEqual(self.client.get(crop + "-inf").status_code, 200)
+        r = self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w={2 ** 70}&h={2 ** 70}")      # clamped to the frame
+        self.assertEqual((r.status_code, r.headers["X-Crop-Box"]), (200, "0,0,600,400 of 600x400"))
+        self.assertEqual(self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=nan&h=200").status_code, 400)
+        logger = self.client.application.logger.name
+        for url in (crop + "nan", f"/m/api/crop/{2 ** 70}?x=0.5&y=0.5"):
+            with self.subTest(url=url[-30:]), self.assertLogs(logger, "ERROR"):
+                r = self.client.get(url)
+                self.assertEqual(r.status_code, 500)
+                self.assertIsNone(r.get_json(silent=True))
 
     def test_a_cards_picture_starts_its_decode_and_the_crop_uses_it(self):
         rid = self.raws[0]
