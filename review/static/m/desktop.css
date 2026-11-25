@@ -1,5 +1,11 @@
-/* Desktop additions only. wide.js owns the capability query for both pages. */
+/* The desktop layout, the only one: desktop.js sets html.wide on every computer (a phone or tablet
+   gets a page pointing to the iPhone app instead). Under 900 px the window scrolls sideways rather
+   than squeezing: the rail keeps its 340 px, so 900 leaves the photo a 560 px stage (a 3:2 frame at
+   about 540 x 360). Narrower, the photo is too small to judge and the day header crowds; it wraps
+   at about 640 px. */
 html.wide{--rail:clamp(340px,24vw,520px)}
+html.wide body{min-width:900px}
+html.wide #app{position:absolute;min-width:900px}
 html.wide *{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
 html.wide :is(button,a,input,[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 html.wide #view{max-width:1800px}

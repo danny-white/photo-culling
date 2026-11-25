@@ -4,7 +4,8 @@
 
 - **`/`** — the run monitor for `photo_cull` ingest: progress, throughput, errors and GPU, with
   controls to steer the runs. Nothing is ever written to the NAS.
-- **`/m`** — Culling Bay Mobile: culling, search and the gallery on the phone (below).
+- **`/m`** — Culling Bay on a computer: culling, search, the gallery and Practice (below). On the
+  iPhone, Culling Bay is the native app (`ios/`); its builds are served at `/m/ios/`.
 
 The desktop page's Review, Search, Bursts, Feedback and Tune tabs were retired on 2026-10-17:
 the AI verdicts, stars and burst picks weren't used for culling, and `/m` covers culling and search.
@@ -34,11 +35,14 @@ and what's up next. **Pause** (SIGINT to every running `photo_cull.py run`), **R
 **Redrive** failures, **Export** a CSV+XMP snapshot, and switch the bulk-run timer on or off.
 The topbar widget refreshes every 5 s, the page every 8 s.
 
-## Culling Bay Mobile (`/m`)
+## Culling Bay on a computer (`/m`)
 
-Cull a day from the NAS on your phone, then send the flags to Lightroom. Open
-`http://100.82.57.4:8000/m/` over Tailscale (or the `tailscale serve` HTTPS address, which
-also lets it install to the Home Screen with an offline app shell).
+Cull a day from the NAS, then send the flags to Lightroom. Open `http://100.82.57.4:8000/m/`
+over Tailscale on the Mac or the PC, beside Lightroom. The web app is desktop only (since
+2026-11-24): a phone or tablet (no hover and a coarse pointer, or a phone or tablet in the user
+agent) gets a short page pointing to the iPhone app and `/m/ios/`, where its builds are. The
+desktop layout needs 900 px; a narrower window scrolls sideways. There is no service worker or
+web app manifest any more (`desktop.js` removes one an older version registered).
 
 - **One pass of cards:** one stack per card. Swipe up to keep, down to reject the stack,
   sideways to browse; tap to give the photo the whole screen, double-tap for the 1:1 focus check.
@@ -81,10 +85,13 @@ Tests (from the repo root):
 
 ```bash
 ./venv/bin/python -m unittest discover -s review/tests -t .   # rules, API, phone->Lightroom->phone
-./venv/bin/python review/tests/ui_smoke.py                    # the app in headless Firefox
+./venv/bin/python -m unittest discover -s review/tests/web     # the web app in headless Chromium
+./venv/bin/python review/tests/ui_smoke.py                    # older click-through in headless Firefox
 ```
 
-Both use the real `trial.db` read-only and a throwaway `annotations.db` and inbox.
+All use the real `trial.db` read-only and a throwaway `annotations.db` and inbox. The browser
+suite (`review/tests/web`, Playwright from `requirements-dev.txt`) runs its own server on port
+8813 and skips when Playwright or its Chromium is missing.
 
 **Days** are grouped by year and month, under an **On this day** lane (unculled days from this
 week in earlier years); a shoot under 48 hours old is marked Resting. **Search** finds days by

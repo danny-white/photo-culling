@@ -6,6 +6,8 @@
      #/like/<id>   photos like one photo                   (/m/api/gallery/like/<id>)
    The viewer is an overlay with its own history entry, so Back closes it. */
 'use strict';
+(() => {
+if (window.cbPhone) return;   // a phone gets desktop.js's page pointing to the app
 
 const $ = s => document.querySelector(s);
 const wide = () => window.cbWide();
@@ -683,3 +685,4 @@ $('#sheet').addEventListener('click', e => { if (e.target.id === 'sheet') closeS
 window.addEventListener('popstate', () => { if (S.v && !(history.state && history.state.v)) closeViewer(false); });
 window.addEventListener('hashchange', route);
 route();
+})();

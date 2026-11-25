@@ -9,6 +9,7 @@
    fails the batch is dropped. */
 'use strict';
 (function () {
+  if (window.cbPhone) return;   // a phone gets desktop.js's page, which measures nothing
   const queue = [];
   const MAX = 400;
   const add = item => { if (queue.length < MAX) queue.push(item); };

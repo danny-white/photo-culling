@@ -1,0 +1,5 @@
+# For the browser tests of the web app (review/tests/web), on top of requirements.txt:
+#   ./venv/bin/pip install -r requirements-dev.txt
+#   ./venv/bin/python -m playwright install chromium     # once; skip if ~/.cache/ms-playwright has it
+# Without them the browser tests skip.
+playwright==1.64.0

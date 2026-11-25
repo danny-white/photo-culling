@@ -2,6 +2,7 @@
 'use strict';
 
 (() => {
+if (window.cbPhone) return;   // a phone gets desktop.js's page pointing to the app
 const $ = (s, el = document) => el.querySelector(s);
 const main = $('#practice');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

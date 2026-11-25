@@ -5,6 +5,7 @@
    a soft budget of 10 kept stacks an hour of shooting. */
 (() => {
 'use strict';
+if (window.cbPhone) return;   // a phone gets desktop.js's page pointing to the app
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -1591,6 +1592,4 @@ function route() {
 window.addEventListener('popstate', route);
 route();
 pump();
-// The service worker keeps the app shell for offline opens; browsers only allow it over HTTPS.
-if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
