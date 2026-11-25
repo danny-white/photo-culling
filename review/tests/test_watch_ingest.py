@@ -8,12 +8,16 @@ import re
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+import photo_cull as pc  # noqa: E402
+
 SCRIPT = ROOT / "ops" / "watch_ingest.sh"
 
 # Stands in for `./venv/bin/python`: the watcher calls `$PY photo_cull.py <command> ...` and
@@ -26,12 +30,17 @@ echo "$*" >> "$STUB_DIR/calls.log"
 cmd=$(basename "$1" .py); shift
 case "$cmd" in
   folder-state)
-    [ -e "$STUB_DIR/folder-state.fail" ] && exit 1
     retry_only=0; folders=()
     while [ $# -gt 0 ]; do
-      case "$1" in --db) shift ;; --retryable-only) retry_only=1 ;; *) folders+=("$1") ;; esac
+      case "$1" in
+        --db) shift ;;
+        --retryable-only) retry_only=1 ;;
+        --print-extensions) cat "$STUB_DIR/extensions.txt"; exit 0 ;;
+        *) folders+=("$1") ;;
+      esac
       shift
     done
+    [ -e "$STUB_DIR/folder-state.fail" ] && exit 1
     if [ "$retry_only" = 1 ]; then
       [ -f "$STUB_DIR/folder-state.tsv" ] && awk -F'\t' '$5 > 0 { print $1 }' "$STUB_DIR/folder-state.tsv"
     else
@@ -76,6 +85,8 @@ class WatcherCase(unittest.TestCase):
         self.py = self.stub / "py"
         self.write_exec(self.py, STUB_PY)
         self.write_exec(self.bin / "msmtp", STUB_MSMTP)
+        # what `folder-state --print-extensions` says: photo_cull's own list
+        (self.stub / "extensions.txt").write_text("".join(e + "\n" for e in sorted(pc.ALL_EXTENSIONS)))
         con = sqlite3.connect(self.db)
         con.execute("CREATE TABLE images(status TEXT)")
         con.commit()
@@ -111,8 +122,11 @@ class WatcherCase(unittest.TestCase):
         os.utime(d, (t, t))
 
     def signature(self, d):
-        files = [p for p in d.rglob("*") if p.is_file()]
-        return "v2 %d %d %d" % (int(d.stat().st_mtime), max(int(p.stat().st_mtime) for p in files), len(files))
+        """The marker a finished folder should hold: its own mtime, and the newest mtime and count
+        of the files photo_cull.py would register."""
+        photos = [p for p in d.rglob("*") if p.is_file() and not p.name.startswith(".")
+                  and p.suffix.lower() in pc.ALL_EXTENSIONS]
+        return "v2 %d %d %d" % (int(d.stat().st_mtime), max(int(p.stat().st_mtime) for p in photos), len(photos))
 
     def set_state(self, d, disk, rows, pending=0, retryable=0, unreadable=0):
         self.states[str(d)] = (disk, rows, pending, retryable, unreadable)
@@ -180,7 +194,7 @@ class NewAndBusyFolders(WatcherCase):
         self.assertEqual(self.log_lines("done: "), [f"done: {d} -> {self.root}/inbox/pending.tsv"])
         # the follow-up steps run in order, then the export, then the check that it is finished
         names = [re.sub(r"^photo_cull\.py ", "", c).split()[0] for c in self.calls()]
-        self.assertEqual(names, ["folder-state", "run", "embed", "embed-images", "geotag", "shotinfo",
+        self.assertEqual(names, ["folder-state", "folder-state", "run", "embed", "embed-images", "geotag", "shotinfo",
                                  "daysum", "review/previews.py", "export", "folder-state"])
 
     def test_a_marked_folder_is_left_alone(self):
@@ -385,7 +399,8 @@ class OldMarkers(WatcherCase):
         return max(int(p.stat().st_mtime) for p in d.rglob("*") if p.is_file())
 
     def state_calls(self):
-        return [c for c in self.calls() if c.startswith("photo_cull.py folder-state") and "--retryable-only" not in c]
+        return [c for c in self.calls() if c.startswith("photo_cull.py folder-state")
+                and "--retryable-only" not in c and "--print-extensions" not in c]
 
     def test_an_old_marker_is_upgraded_without_processing_when_the_counts_match(self):
         d = self.folder("2026-02-02", n=4)
@@ -472,6 +487,149 @@ class OldMarkers(WatcherCase):
         self.assertEqual(self.runs(), [])
         self.assertEqual(self.marker_text(a), self.signature(a))
         self.assertEqual(self.marker_text(b), str(self.newest(b)))
+
+
+class JunkFiles(WatcherCase):
+    """What a Mac, Finder and Lightroom leave in a shoot folder (.DS_Store, ._ files, .xmp
+    sidecars, videos) is not something the ingest registers, so it must not send a finished folder
+    back to Lightroom. A new photo must."""
+    JUNK = (".DS_Store", "._IMG_0000.ARW", "IMG_0000.xmp", "clip.MOV", "clip.mp4", "grade.lua", "edit.psd", "notes")
+
+    def finished(self, **kw):
+        d = self.folder("2026-10-01", **kw)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        self.clear_calls()
+        return d
+
+    def test_junk_added_to_a_finished_folder_does_not_reprocess_it(self):
+        d = self.finished()
+        before = self.marker_text(d)
+        for name in self.JUNK:
+            self.add_file(d, name, 1800)                 # newer than the photos, old enough not to be busy
+        self.touch_dir(d, 1200)                          # the folder's own mtime moved
+        r = self.poll()
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(len(self.log_lines("processing ")), 1)
+        # only the folder's mtime in the marker moved; the photo count and newest photo did not
+        self.assertEqual(self.marker_text(d), self.signature(d))
+        self.assertNotEqual(self.marker_text(d), before)
+        self.assertEqual(self.marker_text(d).split()[2:], before.split()[2:])
+        self.clear_calls()
+        self.poll()
+        self.assertEqual(self.runs(), [])
+
+    def test_a_sidecar_written_in_place_changes_nothing(self):
+        d = self.finished()
+        x = self.add_file(d, "IMG_0000.xmp", 7200)
+        self.touch_dir(d, 7200)
+        self.poll()
+        before = self.marker_text(d)
+        t = self.now - 1200
+        os.utime(x, (t, t))                              # Lightroom rewrote it; the folder's mtime did not move
+        self.poll()
+        self.assertEqual(self.marker_text(d), before)
+        self.assertEqual(len(self.log_lines("processing ")), 1)
+
+    def test_the_marker_counts_only_photos(self):
+        d = self.folder("2026-10-01", n=3)
+        for name in self.JUNK:
+            self.add_file(d, name, 600 * 6)
+        self.add_file(d, "late.xmp", 3600)              # newer than every photo
+        self.touch_dir(d, 3600)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        parts = self.marker_text(d).split()
+        self.assertEqual(parts[0], "v2")
+        self.assertEqual(parts[3], "3")                  # three photos, not 12 files
+        newest_photo = max(int(p.stat().st_mtime) for p in d.glob("IMG_000?.ARW") if not p.name.startswith("."))
+        self.assertEqual(int(parts[2]), newest_photo)    # not the sidecar's time
+
+    def test_a_new_photo_does_reprocess_it(self):
+        for name, ext in (("late.arw", "lower case"), ("late.JPG", "a jpeg"), ("late.Cr3", "mixed case"),
+                          ("late.heic", "a heic")):
+            with self.subTest(ext):
+                self.setUp()
+                d = self.finished()
+                for junk in self.JUNK:
+                    self.add_file(d, junk, 3000)
+                self.add_file(d, name, 6 * 3600 + 5)       # an old camera date, like a late card copy
+                self.touch_dir(d, 1200)
+                self.poll()
+                self.assertEqual(self.runs(), ["2026-10-01"])
+                self.assertTrue(self.marker_text(d).endswith(" 4"))
+
+    def test_a_removed_photo_does_reprocess_it(self):
+        d = self.finished()
+        (d / "IMG_0001.ARW").unlink()
+        self.touch_dir(d, 1200)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+
+    def test_a_new_newest_photo_reprocesses_even_with_the_same_count(self):
+        d = self.finished()
+        t = self.now - 1500
+        os.utime(d / "IMG_0001.ARW", (t, t))             # a photo written again, newer than all
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+
+    def test_a_fresh_junk_file_still_makes_the_folder_busy(self):
+        d = self.folder("2026-10-01")
+        self.add_file(d, ".DS_Store", 90)                # Finder just wrote it
+        self.touch_dir(d, 3600)
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.touch_dir(d, 3600)
+        os.utime(d / ".DS_Store", (self.now - 1200, self.now - 1200))
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+
+    def test_a_folder_with_no_photos_is_skipped(self):
+        d = self.lib / "2026" / "2026-10-05"
+        d.mkdir(parents=True)
+        for name in self.JUNK:
+            self.add_file(d, name, 7200)
+        self.touch_dir(d, 7200)
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.assertIsNone(self.marker_text(d))
+
+    def test_junk_newer_than_the_photos_does_not_stop_an_old_marker_upgrading(self):
+        # The 55 real folders whose newest file is a sidecar or video: the old marker holds that time.
+        d = self.folder("2026-02-02", n=4)
+        x = self.add_file(d, "IMG_0000.xmp", 3 * 3600)
+        self.touch_dir(d, 3 * 3600)
+        self.set_marker(d, f"{int(x.stat().st_mtime)}.0000000000")
+        self.set_state(d, 4, 4)
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(self.marker_text(d), self.signature(d))
+
+    def test_an_old_marker_naming_the_newest_photo_upgrades_when_only_junk_is_newer(self):
+        d = self.folder("2026-02-02", n=4)
+        newest_photo = max(int(p.stat().st_mtime) for p in d.glob("*.ARW"))
+        self.add_file(d, "IMG_0000.xmp", 3 * 3600)       # written after the folder was marked
+        self.touch_dir(d, 3 * 3600)
+        self.set_marker(d, f"{newest_photo}.0000000000")
+        self.set_state(d, 4, 4)
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(self.marker_text(d), self.signature(d))
+
+    def test_the_extension_list_comes_from_photo_cull_not_from_the_script(self):
+        text = SCRIPT.read_text().lower()
+        for ext in pc.ALL_EXTENSIONS:
+            self.assertNotIn(ext, text, f"{ext} is hard-coded in watch_ingest.sh; read it with --print-extensions")
+        self.assertIn("--print-extensions", text)
+
+    def test_no_extensions_means_no_poll(self):
+        self.folder("2026-10-01")
+        (self.stub / "extensions.txt").write_text("")
+        r = self.poll()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.runs(), [])
+        self.assertTrue(self.log_lines("poll skipped"))
 
 
 class DryRun(WatcherCase):

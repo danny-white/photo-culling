@@ -396,6 +396,21 @@ class FolderState(Fixture):
         self.assertEqual(got[0][1:3], ["2", "2"])
         self.assertEqual(got[1][1:3], ["1", "1"])
 
+    def test_junk_files_are_not_counted(self):
+        # What a Mac, Finder and Lightroom leave in a shoot folder: never registered, so never counted.
+        self.put(self.a, "1.ARW")
+        self.put(self.a, "2.arw")                        # case does not matter
+        for junk in (".DS_Store", "._1.ARW", "1.xmp", "clip.MOV", "clip.mp4", "script.lua", "x.psd", "readme"):
+            self.put(self.a, junk)
+        self.register(self.a)
+        self.assertEqual(self.lines(self.a), [[str(self.a), "2", "2", "2", "0", "0"]])
+
+    def test_print_extensions_is_what_a_run_registers(self):
+        code, out, _ = self.cli("folder-state", "--print-extensions")        # needs no DB
+        self.assertEqual(code, 0)
+        self.assertEqual(out.split(), sorted(pc.ALL_EXTENSIONS))
+        self.assertTrue(all(e.startswith(".") and e == e.lower() for e in out.split()))
+
     def test_needs_a_folder(self):
         pc.connect(self.db).close()
         code, _, err = self.cli("folder-state", "--db", self.db)

@@ -1554,6 +1554,10 @@ def cmd_folder_state(args):
     """One line per folder: folder, files_on_disk, db_rows, pending, retryable, unreadable (tab
     separated). The watcher reads it to decide whether a folder is finished: files_on_disk equals
     db_rows, and nothing is pending or retryable. Reads the DB read-only, in one query."""
+    if args.print_extensions:
+        for ext in sorted(ALL_EXTENSIONS):
+            print(ext)
+        return
     if not args.db.exists():
         sys.exit(f"No database at {args.db}.")
     roots = [str(Path(f)) for f in args.folder]
@@ -2465,6 +2469,9 @@ def build_parser() -> argparse.ArgumentParser:
     fs.add_argument("--retryable-only", action="store_true",
                     help="Print only the folders that have retryable rows, one per line (a shoot folder "
                          "under each root given, else the folder holding the file). Reads the DB only.")
+    fs.add_argument("--print-extensions", action="store_true",
+                    help="Print the file extensions a run registers (ALL_EXTENSIONS, lower case, one per "
+                         "line) and exit. The watcher's folder signature counts exactly these files.")
     fs.set_defaults(func=cmd_folder_state)
 
     s = sub.add_parser("status", help="Show counts and error breakdown.")

@@ -18,10 +18,15 @@
 # Safe to run concurrently with a manual `photo_cull.py run` -- both just resume the same DB.
 #
 # A folder is finished when its marker holds its current signature
-# ("v2 <dir mtime> <newest file mtime> <file count>") AND nothing in it is pending or still worth
-# retrying. A folder is looked at again when its signature changes (files copied in late move the
-# folder's own mtime, even if the files keep their camera dates) or while it has failed photos
-# that have tries left (one try per poll, `photo_cull.py` MAX_ATTEMPTS in all).
+# ("v2 <dir mtime> <newest photo mtime> <photo count>") AND nothing in it is pending or still
+# worth retrying. "Photo" means a file photo_cull.py would register (its ALL_EXTENSIONS, any case,
+# no dotfiles): a .DS_Store, an AppleDouble ._ file, a Lightroom .xmp sidecar or a video appearing
+# must not send a finished folder back to Lightroom. A folder is looked at again when a photo has
+# come or gone or the newest photo changed (files copied in late keep their camera dates, but a
+# new one still changes the count), or while it has failed photos that have tries left (one try
+# per poll, `photo_cull.py` MAX_ATTEMPTS in all). If only the folder's own mtime moved, the marker
+# is rewritten and nothing is processed. Busy is wider: the folder's mtime or ANY file's mtime
+# within STABLE_MINUTES, since a copy in progress can show up as any file.
 #
 # Every setting below can be overridden from the environment; the defaults are the live paths.
 # That is how review/tests/test_watch_ingest.py runs this script against a temp library. Try a
@@ -72,17 +77,34 @@ fi
 pending_before=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='pending'" 2>/dev/null || echo 0)
 ok_before=$(sqlite3 "$DB" "SELECT COUNT(*) FROM images WHERE status='ok'" 2>/dev/null || echo 0)
 
-# "<dir mtime> <newest file mtime> <file count>" for a folder, in epoch seconds, from one find.
-# The folder's own mtime is the time files were last copied in or removed (on this CIFS mount a
-# copy keeps each file's camera mtime, so the file times alone can't see a copy in progress).
-# Prints nothing and fails for a folder with no files in it.
+# The extensions a run registers, from photo_cull.py itself so the two can't drift apart. The
+# folder signature counts only these. Without them no signature can be taken, so stop.
+EXTS=$("$PY" photo_cull.py folder-state --print-extensions 2>>"$LOG" | tr '\n' ' ')
+if [ -z "${EXTS// /}" ]; then
+    log "poll skipped: could not read the photo extensions from photo_cull.py"
+    exit 1
+fi
+
+# "<dir mtime> <newest photo mtime> <photo count> <newest mtime of any file>" for a folder, in
+# epoch seconds, from one find. A photo is a file photo_cull.py registers (see EXTS). The folder's
+# own mtime is the time files were last copied in or removed (on this CIFS mount a copy keeps each
+# file's camera mtime, so the file times alone can't see a copy in progress). The last number
+# covers every file: it is for the busy test, and for old markers, which held that number.
+# Prints nothing and fails for a folder with no photos in it.
 folder_signature() {
     local listing
-    listing=$(find "$1" -printf '%d %y %T@\n' 2>/dev/null)
-    awk '
+    listing=$(find "$1" -printf '%d\t%Y\t%T@\t%f\n' 2>/dev/null)
+    awk -F'\t' -v exts="$EXTS" '
+        BEGIN { n = split(exts, e, " "); for (i = 1; i <= n; i++) ok[e[i]] = 1 }
         $1 == 0 && $2 == "d" { dirm = int($3); have = 1 }
-        $2 == "f"            { n++; t = int($3); if (t > newest) newest = t }
-        END { if (have && n > 0) print dirm, newest, n; else exit 1 }' <<< "$listing"
+        $2 == "f" {
+            t = int($3); if (t > anynewest) anynewest = t
+            name = $4; for (i = 5; i <= NF; i++) name = name "\t" $i
+            if (substr(name, 1, 1) != "." && match(name, /\.[^.]*$/) && (tolower(substr(name, RSTART)) in ok)) {
+                photos++; if (t > newest) newest = t
+            }
+        }
+        END { if (have && photos > 0) print dirm, newest, photos, anynewest; else exit 1 }' <<< "$listing"
 }
 
 shopt -s nullglob
@@ -105,25 +127,36 @@ for folder in "$LIBRARY_ROOT"/[0-9][0-9][0-9][0-9]/*/; do
     folder="${folder%/}"
     marker="$MARKERS/$(basename "$folder").done"
 
-    sig=$(folder_signature "$folder") || continue          # empty folder
-    read -r dirm newest count <<< "$sig"
-    # Busy: copied into, or a file written, within the last STABLE_MINUTES (avoids culling a
+    sig=$(folder_signature "$folder") || continue          # no photos in it
+    read -r dirm newest count anynewest <<< "$sig"
+    # Busy: copied into, or any file written, within the last STABLE_MINUTES (avoids culling a
     # shoot mid-copy). Skipped this poll; the next one sees it again.
-    if [ $((now - dirm)) -lt "$window" ] || [ $((now - newest)) -lt "$window" ]; then
+    if [ $((now - dirm)) -lt "$window" ] || [ $((now - anynewest)) -lt "$window" ]; then
         continue
     fi
-    cur="v2 $sig"
+    cur="v2 $dirm $newest $count"
     sig_at_scan["$folder"]="$cur"
     stored=$(cat "$marker" 2>/dev/null || true)
 
     if [ "$stored" = "$cur" ]; then
         # unchanged since it was finished; only failed photos with tries left bring it back
         [ -n "${retryable[$folder]:-}" ] && { todo+=("$folder"); reason["$folder"]="failed photos with tries left"; }
+    elif [[ "$stored" =~ ^v2\ [0-9]+\ ${newest}\ ${count}$ ]]; then
+        # Same photos, same newest photo; only the folder's own mtime moved (a .DS_Store, a
+        # sidecar, a video, something written and removed). Nothing to ingest: note the new mtime.
+        if [ "$DRY_RUN" = 1 ]; then
+            log "DRY RUN: would refresh the marker for $folder (only the folder's own mtime moved)"
+        else
+            printf '%s\n' "$cur" > "$marker"
+        fi
+        [ -n "${retryable[$folder]:-}" ] && { todo+=("$folder"); reason["$folder"]="failed photos with tries left"; }
     elif [[ "$stored" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         if [ -n "${retryable[$folder]:-}" ]; then
             todo+=("$folder"); reason["$folder"]="failed photos with tries left"
-        elif [ "${stored%%.*}" = "$newest" ]; then
-            old_format+=("$folder")                         # same newest file as when it was marked
+        elif [ "${stored%%.*}" = "$anynewest" ] || [ "${stored%%.*}" = "$newest" ]; then
+            # The number is the newest file when it was marked: still the newest file, or the newest
+            # photo with only non-photos (sidecars, videos) newer since. Photos: see the count below.
+            old_format+=("$folder")
         else
             todo+=("$folder"); reason["$folder"]="old marker, newest file changed"
         fi
@@ -177,11 +210,11 @@ for folder in "${todo[@]}"; do
     # is now. A file copied in while we run changes it, so the folder comes round again.
     now=$(date +%s)
     sig=$(folder_signature "$folder") || continue
-    read -r dirm newest count <<< "$sig"
-    if [ $((now - dirm)) -lt "$window" ] || [ $((now - newest)) -lt "$window" ]; then
+    read -r dirm newest count anynewest <<< "$sig"
+    if [ $((now - dirm)) -lt "$window" ] || [ $((now - anynewest)) -lt "$window" ]; then
         continue
     fi
-    cur="v2 $sig"
+    cur="v2 $dirm $newest $count"
 
     log "processing $folder"
     "$PY" photo_cull.py run "$folder" --db "$DB" --retry-failed >> "$LOG" 2>&1

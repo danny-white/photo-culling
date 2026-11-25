@@ -113,14 +113,25 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
 - `tail -f trial_out/ingest_watch.log` — the watcher's own log (what it culled/exported/skipped/
   aborted).
 - `trial_out/ingest_markers/<shoot>.done` — one marker per finished shoot folder, holding its
-  signature, `v2 <folder mtime> <newest file mtime> <file count>` (epoch seconds). The folder's
-  own mtime is the time files were last copied in (a card copy keeps each file's camera date, so
-  the file times can't see it). A folder is looked at again when its signature changes. Delete a
-  marker (or copy a file into that shoot) to force a re-cull + re-export on the next poll.
+  signature, `v2 <folder mtime> <newest photo mtime> <photo count>` (epoch seconds). A "photo" is
+  a file `photo_cull.py` would register: its `ALL_EXTENSIONS` in any case, no dotfiles. The
+  watcher asks `photo_cull.py folder-state --print-extensions` for the list on every poll, so the
+  two can't drift apart. Everything else in a shoot folder (`.DS_Store` and `._` files from the
+  Mac, Lightroom's `.xmp` sidecars, videos) is ignored, so it can't send a finished folder back
+  to Lightroom. The folder's own mtime is the time files were last copied in (a card copy keeps
+  each file's camera date, so the file times can't see it). A folder is looked at again when a
+  photo has come or gone or the newest photo changed. If only the folder's own mtime moved, the
+  marker is quietly rewritten and nothing is processed. A folder is *busy*, and skipped for the
+  poll, while its own mtime or any file's mtime (photo or not) is under 15 minutes old.
+  To force a re-cull + re-export of a folder, delete its marker. Do that after replacing a photo
+  in place with a different file of the same name and camera date (for example a recovered copy
+  of an empty original): the count and newest photo don't change, so the watcher can't see it.
+  A folder with no photos in it is skipped.
   Markers from before 24 Nov 2026 hold a single number (the newest file's mtime). The first poll
   rewrites those in the new form *without* processing, when the number still matches the newest
-  file, the folder's photo count equals its rows in the DB and nothing in it is pending or
-  retryable. Any other old marker is processed, which appends that folder to `pending.tsv` again.
+  file (or the newest photo, with only non-photos newer since), the folder's photo count equals
+  its rows in the DB and nothing in it is pending or retryable. Any other old marker is
+  processed, which appends that folder to `pending.tsv` again.
 - **Failed photos.** `run` is called with `--retry-failed`. A photo that failed to tag is tried
   again on every poll, up to 4 tries in all (`MAX_ATTEMPTS` in `photo_cull.py`), and a folder
   with such photos stays unmarked, so the next poll comes back to it. Empty files (0 bytes) and
