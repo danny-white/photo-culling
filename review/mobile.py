@@ -162,15 +162,17 @@ def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
                    ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
-                   raw_decoder=None, region_decoder=None) -> Blueprint:
+                   raw_decoder=None, region_decoder=None, backup_status: Path | None = None) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
     the narrow AICullInbox mount (tests turn it off and pass a temp dir). raw_decoder(path) ->
     PIL image replaces the rawpy decode (tests pass a fast fake); region_decoder(path, x, y, w, h)
-    -> (image, box) replaces region_decode.decode_region for the offline crops."""
+    -> (image, box) replaces region_decode.decode_region for the offline crops. backup_status: the file
+    ops/backup.sh writes after each run, read by the pipeline-health alerts (default: next to the DB)."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
     ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
+    backup_status = backup_status if backup_status is not None else state_dir.parent / "backup-status.json"
     state_dir.mkdir(parents=True, exist_ok=True)
     pano_file = state_dir / "pano.json"
     practice_file = state_dir / "practice.json"
@@ -1384,12 +1386,56 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             if open_:
                 alert("bad", f"Ingest {step} failing", f"{len(open_)} failure{'s' if len(open_) > 1 else ''} this week, last for "
                       f"{os.path.basename(open_[-1]['folder'])}; it retries every 15 minutes.", "tail ~/photo-culling/trial_out/ingest_watch.log")
+        # The nightly backup (ops/backup.sh) leaves what it did in backup_status.
+        backup = {"at": None, "ok": None, "last_ok_at": None, "folder": None, "push_ok": None}
+        backup_fix = "tail ~/photo-culling/trial_out/backup.log"
+        run_now = "systemctl --user start culling-bay-backup.service"
+        try:
+            bk = json.loads(backup_status.read_text(encoding="utf-8"))
+            if not isinstance(bk, dict):
+                raise ValueError("not an object")
+        except FileNotFoundError:
+            bk = None
+            alert("warn", "No backup yet", "Phone decisions and the photo index are on this PC's disk only.", run_now)
+        except (OSError, ValueError):
+            bk = None
+            alert("warn", "Backup status unreadable", f"{backup_status.name} is not valid, so nothing says whether "
+                  "the last backup worked.", run_now)
+        if bk is not None:
+            def when(v):
+                try:
+                    t = datetime.fromisoformat(v)
+                except (TypeError, ValueError):
+                    return None
+                return t if t.tzinfo else t.astimezone()
+            push = bk.get("push") if isinstance(bk.get("push"), dict) else {}
+            ran = when(bk.get("at"))
+            good = when(bk.get("last_ok_at")) or (ran if bk.get("ok") is True else None)
+            backup.update({"at": bk.get("at"), "ok": bk.get("ok"), "folder": bk.get("folder"),
+                           "last_ok_at": good.isoformat(timespec="seconds") if good else None,
+                           "push_ok": push.get("ok")})
+            if bk.get("ok") is False:
+                alert("bad", f"Last backup failed: {bk.get('error') or 'no reason recorded'}"[:200],
+                      "Nothing new was saved by that run." + (f" The last good backup was on {good.date().isoformat()}."
+                                                              if good else " No backup has worked yet."),
+                      f"{backup_fix}, then {run_now}")
+            if good is not None:
+                days = (datetime.now().astimezone() - good).days
+                if days >= 2:
+                    alert("bad" if days >= 4 else "warn", f"Backup is {days} days old",
+                          f"The last good backup was on {good.date().isoformat()}. The timer runs a backup every "
+                          "night the PC is on.", f"{backup_fix}, then {run_now}")
+            if push.get("ok") is False:
+                alert("warn", f"GitHub push didn't go through: {push.get('message') or 'no reason recorded'}"[:200],
+                      "The newest commits are on this PC only.",
+                      "cd ~/photo-culling && git status -sb  (the reason is also in trial_out/backup.log)")
         status = "bad" if any(a["level"] == "bad" for a in alerts) else "warn" if alerts else "ok"
         return jsonify({
             "status": status, "alerts": alerts, "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "index": {"ok": ok, "unindexed": unindexed, "no_picture": nopic, "no_shot_info": noshot, "ungeotagged": ungeo, "unsummarised": len(unsummed),
                       "days": len(folders), "caption_errors": errored},
             "model": model, "last_ingest": last, "recent": recent[-8:],
+            "backup": backup,
         })
 
     # ---------------------------------------------------------------- routes: timing

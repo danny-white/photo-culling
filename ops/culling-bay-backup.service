@@ -1,0 +1,13 @@
+[Unit]
+Description=Culling Bay backup: databases and state to the NAS, code to GitHub
+# Local project: /home/danny/photo-culling
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/danny/photo-culling
+ExecStart=/home/danny/photo-culling/ops/backup.sh
+# A backup should never get in the way of the review server, the ingest or a tagging run.
+Nice=10
+IOSchedulingClass=idle
+# The databases are a few hundred MB; an hour only passes when the NAS has stopped answering.
+TimeoutStartSec=1h

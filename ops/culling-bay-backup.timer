@@ -1,0 +1,12 @@
+[Unit]
+Description=Culling Bay backup, every night
+
+[Timer]
+OnCalendar=*-*-* 03:17
+# The PC is often off or in Windows at 03:17: a missed run is made up at the next boot.
+Persistent=true
+# Spreads the make-up run after a boot, so it does not start while everything else is starting.
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

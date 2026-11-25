@@ -63,13 +63,18 @@ edit the one in `ops/`.
 | `photo-review.service` | The review server: Culling Bay's web pages and API on port 8000, the desktop monitor. Starts at login, restarts on failure. `KillMode=process`, so a tagging run it started survives a restart. |
 | `photo-cull-ingest.service` | One poll of the ingest watcher (`watch_ingest.sh`). A oneshot with a 12-hour limit, so a run stuck on a stale NAS mount is stopped instead of blocking every later poll. |
 | `photo-cull-ingest.timer` | Starts the poll 5 minutes after boot, then every 15 minutes. |
+| `culling-bay-backup.service` | One run of `backup.sh`: the databases and small state to the NAS, then the code to GitHub (see "Backups"). Low CPU and disk priority, 1-hour limit. |
+| `culling-bay-backup.timer` | Runs it every night at 03:17. If the PC was off then, it runs once at the next boot. |
 
 ```bash
 ln -sf ~/photo-culling/ops/photo-review.service ~/.config/systemd/user/
 ln -sf ~/photo-culling/ops/photo-cull-ingest.service ~/.config/systemd/user/
 ln -sf ~/photo-culling/ops/photo-cull-ingest.timer ~/.config/systemd/user/
+ln -sf ~/photo-culling/ops/culling-bay-backup.service ~/.config/systemd/user/
+ln -sf ~/photo-culling/ops/culling-bay-backup.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now photo-cull-ingest.timer     # timers: enable --now
+systemctl --user enable --now culling-bay-backup.timer
 systemctl --user enable --now photo-review.service        # first install only
 ```
 
@@ -122,3 +127,95 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
 Recursive `inotifywait` on a big passport-drive tree is expensive and fragile across mounts/
 unmounts. A 15-minute poll plus a 15-minute stability window is cheap (nothing to do if no
 folder's newest file changed) and tolerant of the drive being unplugged between imports.
+
+## Backups
+
+`culling-bay-backup.timer` runs `ops/backup.sh` every night at 03:17 (and once at the next boot if
+the PC was off then). It copies what cannot be rebuilt cheaply to the NAS, then pushes the code to
+GitHub.
+
+**What is saved.** One folder per day, `/mnt/nas_drive/backups/culling-bay/<YYYY-MM-DD>/`
+(Drive share; in FileBrowser it is `My Drive` > `backups` > `culling-bay`). The newest 14 days are
+kept; older dated folders are deleted. Each folder holds:
+
+| File | What it is |
+|---|---|
+| `annotations.db` | Every phone decision, the day states and the Practice progress. |
+| `trial.db` | The photo index: weeks of GPU tagging, embeddings, GPS and shot info. |
+| `state.tar.gz` | `trial_out/mobile` (`practice.json`, `pano.json`), `trial_out/ingest_markers`, `trial_out/known-unreadable.txt`, the eval labels, grades, runs and audits (`eval/set.json`, `labels/`, `grades/`, `runs/`, `audits/`, `report.json`; not `eval/images/`), `ops/*.service` and `ops/*.timer`, and `systemd-user/`: what the units in `~/.config/systemd/user/` resolve to. |
+
+Both databases are WAL databases that the server writes to while the backup runs, so they are copied
+with SQLite's own backup (never `cp`), and each copy must pass `PRAGMA quick_check` or the run fails.
+The script refuses to write unless `/mnt/nas_drive` is mounted from `//mycloud/Drive`, and it waits up
+to 2 minutes for the share (just after a boot). A day's folder is built under a hidden
+`.incoming-...` name and renamed into place, so a run that dies never leaves half a backup. A second
+run on the same day replaces that day's folder.
+
+**Run one now:**
+
+```bash
+systemctl --user start culling-bay-backup.service
+cat ~/photo-culling/trial_out/backup-status.json
+tail -3 ~/photo-culling/trial_out/backup.log
+```
+
+`backup-status.json` says when it ran, whether it worked (`ok`, `error`), the folder and file sizes,
+and how the push went (`push.ok`, `push.message`). `last_ok_at` is the last run that worked, kept
+across failed runs. `GET /m/api/pipeline-health` (the Pi status page) reads it and warns: "No backup
+yet"; "Backup is N days old" (2 days or more is a warning, 4 or more is bad); "Last backup failed: ...";
+"GitHub push didn't go through: ...".
+
+**Restore `annotations.db`.** Pick the day, stop the server, put the old files aside, copy the backup in:
+
+```bash
+B=/mnt/nas_drive/backups/culling-bay/2026-11-24        # the day to restore
+systemctl --user stop photo-review.service
+cd ~/photo-culling/trial_out
+mkdir -p before-restore && mv annotations.db* before-restore/    # keeps the live file and its -wal/-shm
+cp "$B/annotations.db" annotations.db
+sqlite3 annotations.db "PRAGMA quick_check"                      # must print: ok
+systemctl --user start photo-review.service
+```
+
+Deleting the old `-wal` and `-shm` files matters: a leftover `-wal` from the old file would be
+applied on top of the restored one. Decisions made since that night's backup are gone.
+
+**Restore `trial.db`.** The same, but the ingest watcher also writes to it, so stop that first and make
+sure no tagging run is going (`pgrep -af photo_cull.py` prints nothing):
+
+```bash
+B=/mnt/nas_drive/backups/culling-bay/2026-11-24
+systemctl --user stop photo-cull-ingest.timer photo-cull-ingest.service photo-review.service
+cd ~/photo-culling/trial_out
+mkdir -p before-restore && mv trial.db* before-restore/
+cp "$B/trial.db" trial.db
+sqlite3 trial.db "PRAGMA quick_check"                            # must print: ok
+systemctl --user start photo-review.service photo-cull-ingest.timer
+```
+
+**Restore small state.** Unpack into a scratch folder and copy back only what is needed (unpacking
+straight into the project would overwrite `ops/` and `eval/`):
+
+```bash
+mkdir -p /tmp/restore && tar -xzf "$B/state.tar.gz" -C /tmp/restore && ls /tmp/restore
+```
+
+**GitHub.** After the copy, `backup.sh` pushes `main` to `origin` (a plain push of that one branch;
+never `--force`, never other branches). **The GitHub repo is public.** So first it scans every line
+the unpushed commits add, in all of them (a token added in one commit and removed in the next would
+still go public), for secret-shaped text: private-key headers, `ghp_`/`github_pat_` tokens, `sk-`
+keys, Slack `xox` tokens, AWS `AKIA` keys, a password being set (the word, then `=` or `:`, then a value), and long quoted values after `api_key`,
+`token` or `secret`. On a match nothing is pushed; the status and the health page name the file and
+the kind of match, never the text. The backup itself still counts as done.
+
+If a push is blocked: read the commits (`git log -p origin/main..main`). A real secret has to come out
+of those commits (rewrite them, and treat the secret as leaked and replace it). A false alarm is a
+human call: push by hand with `git push origin main`, which also clears the block, since the scan
+only looks at commits GitHub does not have yet. If `origin/main` has commits that this copy lacks, the
+push is skipped ("diverged") and left for a human. The push uses the git credentials already set up
+for github.com on this PC. It is recorded, not retried, until the next night.
+
+**Settings** (environment variables, for tests and odd cases; defaults in the script): `PROJ`, `DEST`,
+`DEST_MOUNT`, `DEST_SOURCE`, `KEEP`, `CHECK_MOUNT` (0 only in tests), `PUSH` (0 turns the push off),
+`REMOTE`, `BRANCH`, `STATUS`, `LOG`, `UNIT_DIR`, `MOUNTS_FILE`, `MOUNT_WAIT`. The tests
+(`review/tests/test_backup.py`) run the script against temp directories and a temp bare repo.

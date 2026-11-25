@@ -45,6 +45,22 @@ class OpsUnits(unittest.TestCase):
         self.assertEqual(t["OnUnitActiveSec"], "15min")
         self.assertNotIn("Persistent", t)
 
+    def test_backup_service_is_a_low_priority_oneshot_with_a_limit(self):
+        s = unit("culling-bay-backup.service")["Service"]
+        self.assertEqual(s["Type"], "oneshot")
+        self.assertEqual(s["ExecStart"], "/home/danny/photo-culling/ops/backup.sh")
+        self.assertEqual(s["WorkingDirectory"], "/home/danny/photo-culling")
+        self.assertEqual((s["Nice"], s["IOSchedulingClass"], s["TimeoutStartSec"]), ("10", "idle", "1h"))
+        self.assertTrue(OPS.joinpath("backup.sh").stat().st_mode & 0o111, "backup.sh must be executable")
+
+    def test_backup_timer_runs_nightly_and_catches_up_after_a_missed_run(self):
+        cp = unit("culling-bay-backup.timer")
+        t = cp["Timer"]
+        self.assertEqual(t["OnCalendar"], "*-*-* 03:17")
+        self.assertEqual(t["Persistent"], "true")        # the PC is often off or in Windows
+        self.assertEqual(t["RandomizedDelaySec"], "10m")
+        self.assertEqual(cp["Install"]["WantedBy"], "timers.target")
+
 
 if __name__ == "__main__":
     unittest.main()
