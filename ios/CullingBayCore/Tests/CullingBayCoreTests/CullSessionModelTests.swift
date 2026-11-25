@@ -374,13 +374,60 @@ struct CullSessionModelTests {
 
     @Test func theProgressUsesTheStackIDAndLeadOfTheStackWhenMatchesCameFirst() async {
         let (model, rig) = await open(matched(), match: CullMatch(ids: [131], label: "“x”"))
-        model.go(1)
+        model.keep()                                                          // a decision saves the position
         #expect(await rig.sleeper.waitFor(progressDelay))
         await rig.sleeper.release(progressDelay)
         await rig.settle()
         let body = progressCalls(rig).first?.json
         #expect(body?["cursor"] as? Int == 0)                                // the stack after the match is stack 0
         #expect(body?["lead"] as? Int == 100)
+    }
+
+    @Test func browsingTheMatchesOfASearchSavesNoPosition() async {
+        // The day was opened from a search: it starts on its matches, and walking through them must
+        // not replace the place the last session got to (the saved cursor is stack 4).
+        let (model, rig) = await open(matched(), match: CullMatch(ids: [131, 110], label: "“x”"))
+        model.go(1); model.go(1); model.go(-1)
+        await rig.settle()
+        #expect(!(await rig.sleeper.requested.contains(progressDelay)))      // no save was even scheduled
+        #expect(progressCalls(rig).isEmpty && rig.queue.pending == 0)
+        // Going on from the review to a card and browsing is the same.
+        model.open(stackAt: 3); model.go(1)
+        await rig.settle()
+        #expect(progressCalls(rig).isEmpty)
+    }
+
+    @Test func aDecisionInAMatchedDayStillSavesThePositionAndLaterBrowsingDoesNotReplaceIt() async throws {
+        let (model, rig) = await open(matched(), match: CullMatch(ids: [131, 110], label: "“x”"))
+        model.keep()                                                          // stack 1; on to stack 3
+        model.go(1); model.go(1)                                              // browsing after it
+        #expect(await rig.sleeper.waitFor(progressDelay))
+        await rig.sleeper.release(progressDelay)
+        await rig.settle()
+        let saved = progressCalls(rig)
+        #expect(saved.count == 1)                                             // the decision's, not the browsing's
+        let body = try #require(saved.first).json
+        #expect(body["cursor"] as? Int == 3 && body["lead"] as? Int == 130)
+    }
+
+    @Test func undoInAMatchedDaySavesThePositionOfTheTapItTookBack() async throws {
+        let (model, rig) = await open(matched(), match: CullMatch(ids: [131, 110], label: "“x”"))
+        model.keep()
+        model.undo()
+        #expect(await rig.sleeper.waitFor(progressDelay))
+        await rig.sleeper.release(progressDelay)
+        await rig.settle()
+        let body = try #require(progressCalls(rig).last).json
+        #expect(body["cursor"] as? Int == 1 && body["lead"] as? Int == 110)  // back on the stack that was kept
+    }
+
+    @Test func browsingADayNotOpenedFromASearchStillSavesThePosition() async {
+        let (model, rig) = await open(matched())                              // starts on the saved stack, 4
+        model.go(-1)
+        #expect(await rig.sleeper.waitFor(progressDelay))
+        await rig.sleeper.release(progressDelay)
+        await rig.settle()
+        #expect(progressCalls(rig).first?.json["cursor"] as? Int == 3)
     }
 
     @Test func decidingTheLastOpenStackFinishesTheDayAtOnce() async throws {

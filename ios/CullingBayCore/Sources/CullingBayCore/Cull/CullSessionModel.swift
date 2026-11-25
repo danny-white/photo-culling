@@ -508,7 +508,7 @@ public final class CullSessionModel {
             return
         }
         cursor = max(0, min(n - 1, cursor + delta))
-        saveProgress()
+        saveProgress(browsing: true)
     }
 
     /// From the review, the cards at one stack (a kept one, or the one a reject is in), to look
@@ -765,8 +765,12 @@ public final class CullSessionModel {
 
     /// `saveProgress`: the position is saved 600 ms after the last move, or at once for the move
     /// that finishes the day. The save goes to the queue with the stack's `lead`.
-    private func saveProgress(finished: Bool = false) {
-        guard day != nil else { return }
+    ///
+    /// A day opened from a search starts on its matches, not on where the last session stopped, so
+    /// browsing through them (`browsing`) must not replace that saved place. A decision still
+    /// saves it, as in any day.
+    private func saveProgress(finished: Bool = false, browsing: Bool = false) {
+        guard day != nil, !(browsing && matches != nil) else { return }
         progressTask?.cancel()
         progressTask = nil
         let stack = currentStack
