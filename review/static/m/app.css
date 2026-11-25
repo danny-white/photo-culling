@@ -1,5 +1,5 @@
-/* Culling Bay Mobile. A darkroom in every theme: a neutral surround for judging photos.
-   Ported from the planning mock (same tokens and class names, minus the drawn phone). */
+/* Culling Bay. A darkroom in every theme: a neutral surround for judging photos. The base
+   styles; desktop.css lays them out beside the rail (the only layout since 2026-11-24). */
 :root{
   --bg:#0C0D0E; --panel:#1A1C1F; --raise:#272A2E; --ink:#F2F3F4; --muted:#9BA1A8; --line:#30343A;
   --keep:#41D18A; --reject:#FF5D52; --hint:#F3C04B; --accent:#93B4FF; --on-accent:#0B1020;
@@ -10,11 +10,11 @@
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overscroll-behavior:none}
-body{font:400 14px/1.35 var(--body);-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
+body{font:400 14px/1.35 var(--body);-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit}
 [hidden]{display:none!important}
-#app{position:fixed;inset:0;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);user-select:none;-webkit-user-select:none}
-#view{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;max-width:640px;width:100%;margin:0 auto}
+#app{position:fixed;inset:0;display:flex;flex-direction:column;user-select:none;-webkit-user-select:none}
+#view{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;width:100%;margin:0 auto}
 
 .top{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 10px 8px;min-height:48px;flex:none}
 .top .t{text-align:center;font-weight:700;font-size:15px;min-width:0;flex:1}
@@ -34,20 +34,11 @@ button{font:inherit;color:inherit}
 .budget.over .budget-bar i{background:var(--hint)}
 .net{flex:none;text-align:center;font-size:11px;color:var(--hint);padding:2px 0}
 
-/* card */
-.stage{flex:1;min-height:0;display:flex;flex-direction:column;justify-content:center;gap:8px;position:relative;touch-action:none;overflow:hidden}
-/* A card is as tall as a landscape photo needs (its own ratio, set inline); a vertical photo
-   takes all the height there is. The photo box inside is sized to the photo by app.js. */
-.card{position:relative;width:100%;will-change:transform;max-height:100%}
-.card.k-land{aspect-ratio:3/2}
-.card.k-fill{flex:1 1 0;min-height:0}
-.card.k-fill.is-stack{margin-top:14px}
+/* card: the photo box is sized to the photo's own shape by app.js (fitPhoto) */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.card{position:relative;width:100%}
 .photo{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#000}
 .photo>img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;-webkit-user-drag:none}
-.card.is-stack .photo::before,.card.is-stack .photo::after{content:"";position:absolute;border-radius:5px 5px 0 0;pointer-events:none}
-.card.is-stack .photo::before{left:12px;right:12px;top:-7px;height:7px;background:#3A3D42}
-.card.is-stack .photo::after{left:26px;right:26px;top:-13px;height:6px;background:#26282C}
-.tint{position:absolute;inset:0;opacity:0;pointer-events:none}
 /* a decided stack: outlined in its colour, rejects greyed, and a status line along the bottom */
 .card.st-keep .photo{outline:3px solid var(--keep);outline-offset:-3px}
 .card.st-hero .photo{outline:3px solid var(--hint);outline-offset:-3px}
@@ -59,44 +50,20 @@ button{font:inherit;color:inherit}
 .stline.keep i{background:var(--keep)} .stline.hero i{background:var(--hint)} .stline.reject i{background:var(--reject);color:#fff}
 .stline span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .stline em{font-style:normal;color:var(--hint);letter-spacing:.05em;flex:none}
-.stline~.chip{bottom:40px}
-/* where the camera focused, and the RAW at 1:1 there in the space under a landscape photo */
-.af{position:absolute;width:9%;aspect-ratio:3/2;transform:translate(-50%,-50%);border:2px solid var(--hint);border-radius:2px;box-shadow:0 0 0 1px rgba(0,0,0,.45);pointer-events:none;transition:opacity .2s}
-#view.no-chrome .af{opacity:0}
+/* where the camera focused, and the RAW at 1:1 there (in the rail) */
+.af{position:absolute;width:9%;aspect-ratio:3/2;transform:translate(-50%,-50%);border:2px solid var(--hint);border-radius:2px;box-shadow:0 0 0 1px rgba(0,0,0,.45);pointer-events:none}
 html.hide-af .af{display:none}
 .af-tgl{font:700 11px/1 var(--body);color:var(--muted);letter-spacing:.02em}
 .af-tgl[aria-pressed="true"]{color:var(--hint)}
-.stage.has-band{justify-content:flex-start;gap:6px}
-.stage.has-band .fname{display:none}
-.stage.has-band .card.is-stack{margin-top:14px}
-.band{position:relative;flex:1 1 0;min-height:0;background:#000;overflow:hidden}
+.band{position:relative;background:#000;overflow:hidden}
 .band img{width:100%;height:100%;object-fit:cover;display:block}
-.band .bd{position:absolute;left:8px;top:8px;transition:opacity .2s}
-#view.no-chrome .band .bd{opacity:0}
-.band-load,.lk-load{position:absolute;inset:0;display:grid;place-items:center;font-size:12.5px;color:var(--muted)}
-.badges{position:absolute;left:8px;top:8px;display:flex;flex-wrap:wrap;gap:4px;max-width:70%;transition:opacity .2s}
+.band .bd{position:absolute;left:8px;top:8px}
+.band-load{position:absolute;inset:0;display:grid;place-items:center;font-size:12.5px;color:var(--muted)}
+.badges{position:absolute;left:8px;top:8px;display:flex;flex-wrap:wrap;gap:4px;max-width:70%}
 .bd{display:inline-flex;align-items:center;gap:5px;font:600 11px/1 var(--body);padding:5px 8px;border-radius:999px;background:rgba(0,0,0,.62);color:var(--hint)}
 .bd-dot::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--hint)}
 .bd-lr{color:#fff;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.55)}
-.chip{position:absolute;right:8px;bottom:8px;display:flex;align-items:center;gap:5px;font:700 12px/1 var(--body);padding:7px 10px;border-radius:999px;border:0;background:rgba(0,0,0,.62);color:#fff;cursor:pointer;transition:opacity .2s}
-.chip svg{width:15px;height:15px}
-.chip.static{cursor:default;font-weight:600;font-family:var(--mono);font-size:10px}
-.stamp{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;opacity:0}
-.stamp span{font:850 32px/1 var(--display);letter-spacing:.08em;padding:6px 14px;border:3px solid currentColor;border-radius:8px;transform:rotate(-8deg);background:rgba(0,0,0,.3)}
-.stamp[data-a="keep"] span,.stamp[data-a="all"] span{color:var(--keep)}
-.stamp[data-a="hero"] span{color:var(--hint)}
-.stamp[data-a="reject"] span{color:var(--reject)}
-.fname{text-align:center;font:500 10.5px/1 var(--mono);color:var(--muted);transition:opacity .2s}
-#view.no-chrome .badges,#view.no-chrome .stline,#view.no-chrome .chip,#view.no-chrome .fname{opacity:0}
-#view.no-chrome .card.st-reject .photo>img{filter:none}
 
-.strip{flex:none;height:50px;margin:6px 12px 4px;display:flex;align-items:center;gap:4px;padding:6px 8px;border-radius:12px;background:var(--panel);border:0;cursor:pointer;overflow:hidden}
-.strip img{width:36px;height:24px;object-fit:contain;background:#000;border-radius:3px;flex:none}
-.strip img.m-reject{opacity:.3}
-.strip img.m-pick{box-shadow:0 0 0 2px var(--keep)}
-.strip .more{font-size:11px;color:var(--muted);flex:none}
-.strip-l{margin-left:auto;font-size:12.5px;font-weight:600;color:var(--accent);flex:none;padding-left:6px}
-.strip.empty{background:transparent;cursor:default}
 .bar{display:flex;gap:8px;padding:6px 12px 2px;flex:none}
 .pb{flex:1;min-height:58px;border-radius:16px;border:0;background:var(--panel);font:600 12px/1 var(--body);display:grid;place-items:center;align-content:center;gap:5px;cursor:pointer;padding:0}
 .pb svg{width:23px;height:23px}
@@ -114,41 +81,12 @@ html.hide-af .af{display:none}
 .stars button.on{color:var(--hint)}
 .stars svg{width:19px;height:19px}
 .rcol{display:contents}
-.ov{display:none}
-
-/* a tap hides every control: the photo gets the whole screen, and swipes still work */
-#view[data-screen="cull"].no-chrome>.top,#view[data-screen="cull"].no-chrome>.net,#view[data-screen="cull"].no-chrome>.prog,
-#view[data-screen="cull"].no-chrome>.budget,#view[data-screen="cull"].no-chrome>.strip,#view[data-screen="cull"].no-chrome>.rcol,
-#view[data-screen="cull"].no-chrome>.hint,#view.no-chrome .band{display:none!important}
-#view.no-chrome .card{flex:1 1 0;min-height:0;max-height:none;aspect-ratio:auto!important;margin-top:0}
-#view.no-chrome .card .photo::before,#view.no-chrome .card .photo::after{display:none}
-
-/* turned sideways: the photo fills the height, Keep and Reject down the right edge */
-@media (orientation:landscape) and (max-height:520px){
-  #view[data-screen="cull"]{flex-direction:row;max-width:none}
-  #view[data-screen="cull"]>.top,#view[data-screen="cull"]>.prog,#view[data-screen="cull"]>.budget,
-  #view[data-screen="cull"]>.strip,#view[data-screen="cull"]>.hint,#view[data-screen="cull"] .fname,#view[data-screen="cull"] .band{display:none!important}
-  #view[data-screen="cull"] .stage{padding:6px 0}
-  #view[data-screen="cull"] .card{flex:1 1 0;min-height:0;max-height:none;aspect-ratio:auto!important;margin-top:0}
-  #view[data-screen="cull"] .card .photo::before,#view[data-screen="cull"] .card .photo::after{display:none}
-  #view[data-screen="cull"] .rcol{display:flex;flex-direction:column;gap:6px;width:104px;flex:none;padding:8px 8px 8px 6px}
-  #view[data-screen="cull"] .rcol .stars{flex-direction:column;padding:0;gap:3px}
-  #view[data-screen="cull"] .rcol .stars button{max-width:none;height:26px;flex:none}
-  #view[data-screen="cull"] .rcol .bar{flex-direction:column;flex:1;padding:0;gap:6px}
-  #view[data-screen="cull"] .rcol .pb{min-height:0}
-  #view[data-screen="cull"] .ov{display:flex;position:absolute;z-index:3;align-items:center;gap:2px;border:0;border-radius:999px;background:rgba(0,0,0,.62);font:600 12px/1 var(--body);padding:6px 10px}
-  #view[data-screen="cull"] .ov-back{left:8px;top:8px;color:var(--accent);cursor:pointer}
-  #view[data-screen="cull"] .ov-back svg{width:14px;height:14px}
-  #view[data-screen="cull"] .ov-left{left:8px;bottom:8px;color:#fff}
-  #view[data-screen="cull"].no-chrome .ov{display:none}
-  #view[data-screen="cull"] .badges{top:40px}
-}
 
 /* days */
 .head{padding:8px 16px 4px;flex:none}
 .head h1{margin:0;font:800 30px/1.05 var(--display);letter-spacing:-.01em}
 .head span{font-size:12px;color:var(--muted)}
-.scroll{flex:1;min-height:0;overflow-y:auto;padding:0 12px 16px;-webkit-overflow-scrolling:touch}
+.scroll{flex:1;min-height:0;overflow-y:auto;padding:0 12px 16px}
 .sec{margin:16px 4px 8px;font:700 11px/1 var(--body);letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
 .day{width:100%;display:flex;align-items:center;gap:12px;padding:10px;margin-bottom:8px;border:0;border-radius:14px;background:var(--panel);text-align:left;cursor:pointer}
 .mos{display:grid;grid-template-columns:34px 30px;grid-template-rows:26px 26px;gap:2px;flex:none;border-radius:8px;overflow:hidden;background:#000}
@@ -204,13 +142,8 @@ html.hide-af .af{display:none}
 .gv-tools .seg button{flex:1}
 
 /* burst picker */
-.pk-main{flex:1;min-height:0;position:relative;background:#000;touch-action:pan-y}
+.pk-main{flex:1;min-height:0;position:relative;background:#000}
 .pk-box{position:absolute;inset:0}
-.pk-11{font:700 12px/1 var(--mono);padding:7px 9px;border-radius:8px;border:1.5px solid var(--accent);background:none;color:var(--accent);cursor:pointer}
-.pk-11.on{background:var(--accent);color:var(--on-accent)}
-.pk-box.lk img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
-.pk-cap{position:absolute;left:8px;bottom:14px}
-.pk-main.is-linked .pk-id{bottom:40px}
 .pk-flag{position:absolute;right:8px;top:8px;font:700 11px/1 var(--body);padding:5px 8px;border-radius:999px}
 .pk-flag.keep{background:var(--keep);color:#05140C} .pk-flag.hero{background:var(--hint);color:#1A1200} .pk-flag.reject{background:var(--reject);color:#fff}
 .pk-tick{position:absolute;right:12px;bottom:12px;width:46px;height:46px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);color:transparent;display:grid;place-items:center;cursor:pointer;padding:0}
@@ -235,23 +168,13 @@ html.hide-af .af{display:none}
 .pb2.on-keep{background:var(--keep);color:#05140C}
 .link{background:none;border:0;padding:0;color:var(--muted);font:500 13px/1.3 var(--body);text-decoration:underline;cursor:pointer}
 
-/* knock-out grid: bursts of more than six */
-.ko{flex:1;min-height:0;overflow-y:auto;padding:4px 10px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;align-content:start;-webkit-overflow-scrolling:touch}
-.ko-t{position:relative;border:0;padding:0;background:#000;border-radius:5px;overflow:hidden;cursor:pointer}
-.ko-t img{width:100%;height:100%;object-fit:cover;display:block;transition:opacity .15s}
-.ko-t b{position:absolute;inset:0;display:none;place-items:center}
-.ko-t b svg{width:26px;height:26px;padding:5px;border-radius:50%;background:var(--reject);color:#fff}
-.ko-t.out img{opacity:.22}
-.ko-t.out b{display:grid}
-.ko-t .dot{position:absolute;left:5px;bottom:5px;width:7px;height:7px;border-radius:50%;background:var(--hint)}
-
 /* a reject, large, from the review */
-.lg{flex:1;min-height:0;position:relative;background:#000;touch-action:pan-y}
+.lg{flex:1;min-height:0;position:relative;background:#000}
 .lg .pk-box{position:absolute;inset:0}
 .lg-note{position:absolute;left:10px;bottom:12px;font:600 12px/1.2 var(--body);padding:5px 9px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff}
 
 /* focus */
-.fz{flex:1;min-height:0;position:relative;overflow:hidden;background:#000;touch-action:none}
+.fz{flex:1;min-height:0;position:relative;overflow:hidden;background:#000}
 .fz img{position:absolute;left:0;top:0;transform-origin:0 0;max-width:none;-webkit-user-drag:none;pointer-events:none}
 .fz-load{position:absolute;inset:0;display:grid;place-items:center;font-size:12.5px;color:var(--muted);background:rgba(0,0,0,.6)}
 .fz-st{flex:none;text-align:center;font:700 12.5px/1 var(--body);padding:0 0 8px}
@@ -276,26 +199,19 @@ html.hide-af .af{display:none}
 
 /* sheet and toast */
 .sheet-wrap{position:absolute;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;z-index:20}
-.sheet{background:var(--panel);border-radius:22px 22px 0 0;width:100%;padding:12px 18px calc(24px + env(safe-area-inset-bottom));display:grid;gap:8px;max-height:80%;overflow-y:auto}
-.sh-grab{width:36px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 6px}
+.sheet{background:var(--panel);border-radius:22px 22px 0 0;width:100%;padding:12px 18px 24px;display:grid;gap:8px;max-height:80%;overflow-y:auto}
 .sh-id{font:600 12.5px/1.3 var(--mono)}
 .sh-muted{font-size:12.5px;color:var(--muted)}
 .sh-cap{font-size:14px}
 .sh-why{font-size:13px;background:var(--raise);border-radius:10px;padding:8px 10px}
 .sh-q{font-weight:700;font-size:16px;margin:0}
 .sh-row{display:flex;gap:8px;margin-top:6px}
-.toast{position:absolute;left:12px;right:12px;top:calc(env(safe-area-inset-top) + 96px);z-index:25;max-width:616px;margin:0 auto;background:rgba(44,47,52,.97);border-radius:14px;padding:11px 12px;display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:13px;opacity:0;transform:translateY(-8px);transition:opacity .18s,transform .18s;pointer-events:none}
+.toast{position:absolute;left:12px;right:12px;top:96px;z-index:25;max-width:616px;margin:0 auto;background:rgba(44,47,52,.97);border-radius:14px;padding:11px 12px;display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:13px;opacity:0;transform:translateY(-8px);transition:opacity .18s,transform .18s;pointer-events:none}
 .toast.show{opacity:1;transform:none;pointer-events:auto}
 .toast button{background:none;border:0;color:var(--accent);font:700 13px/1 var(--body);cursor:pointer;padding:4px 2px;flex:none}
 .empty-state{flex:1;display:grid;place-items:center;text-align:center;color:var(--muted);padding:24px}
 
-@keyframes enterUp{from{opacity:0;transform:translateY(16px) scale(.98)}to{opacity:1;transform:none}}
-@keyframes enterNext{from{opacity:0;transform:translateX(42px)}to{opacity:1;transform:none}}
-@keyframes enterPrev{from{opacity:0;transform:translateX(-42px)}to{opacity:1;transform:none}}
-.card.enter-dec{animation:enterUp .1s ease-out}
-.card.enter-next{animation:enterNext .1s ease-out}
-.card.enter-prev{animation:enterPrev .1s ease-out}
-@media (prefers-reduced-motion:reduce){.card,.toast,.prog i{animation:none!important;transition:none!important}}
+@media (prefers-reduced-motion:reduce){.toast,.prog i{transition:none!important}}
 
 /* the way over to the gallery (gallery.html): search and show photos rather than cull */
 .head{position:relative}

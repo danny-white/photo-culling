@@ -14,10 +14,8 @@ html.wide .wide-header{grid-area:header;min-width:0;padding:8px 12px 12px}
 html.wide .wide-header .top .t{text-align:left;padding-left:18px;font-size:17px}
 html.wide .wide-header .budget{max-width:650px;margin-left:auto}
 html.wide #view .stage,html.wide #view .pk-main{grid-area:stage;min-width:0;min-height:0;margin:0;background:var(--bg);padding:0;display:block}
-html.wide #view .stage .card{position:absolute;inset:12px;width:auto;height:auto;max-height:none;margin:0;aspect-ratio:auto!important;animation:none;will-change:auto}
+html.wide #view .stage .card{position:absolute;inset:12px;width:auto;height:auto;margin:0}
 html.wide #view .photo>img{position:absolute;inset:0;object-fit:contain}
-html.wide #view .card .photo::before,html.wide #view .card .photo::after{display:none}
-html.wide #view .stage .fname,html.wide #view .stage .ov,html.wide #view .photo .chip{display:none}
 html.wide #view .photo{cursor:zoom-in}
 html.wide #view .pk-box{inset:12px}
 html.wide .detail-rail{grid-area:rail;min-height:0;min-width:0;display:flex;flex-direction:column;gap:10px;overflow:auto;padding:18px 16px;background:var(--panel);border-left:1px solid var(--line);user-select:text;-webkit-user-select:text}
@@ -91,7 +89,6 @@ html.wide .viewer .vbtn{padding:8px;color:var(--ink);font-size:12px}
 html.wide .viewer .gallery-details{margin:18px 0;display:grid;gap:6px;overflow-wrap:anywhere}
 html.wide .gallery-details dt{color:var(--muted);font-size:12px}
 html.wide .gallery-details dd{margin:0 0 8px}
-html.wide .viewer.bare .chrome{opacity:1;pointer-events:auto}
 html.wide body>.sheet{align-items:center}
 html.wide .sheet-card{border:1px solid var(--line);border-radius:4px}
 html.wide .sheet-list figcaption{flex-direction:column;gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}

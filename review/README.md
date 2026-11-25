@@ -44,18 +44,19 @@ agent) gets a short page pointing to the iPhone app and `/m/ios/`, where its bui
 desktop layout needs 900 px; a narrower window scrolls sideways. There is no service worker or
 web app manifest any more (`desktop.js` removes one an older version registered).
 
-- **One pass of cards:** one stack per card. Swipe up to keep, down to reject the stack,
-  sideways to browse; tap to give the photo the whole screen, double-tap for the 1:1 focus check.
-  Vertical photos use the full height. Under a landscape photo, an upright phone shows the RAW at
-  1:1 where the camera focused (Sony, Canon and Nikon AF points), with a box on the photo marking
-  the spot. Turned sideways, the photo fills the height with the buttons down the right edge.
+- **One pass of cards:** one stack per card, the photo beside a rail with its details, the RAW at
+  1:1 where the camera focused (Sony, Canon and Nikon AF points) and the buttons, and the day's
+  filmstrip below. Lightroom's keys: P keep, X reject, 1-5 keep with stars, arrows to browse, Z
+  (or a click on the photo) for the 1:1 focus check, Ctrl/Cmd+Z undo, ? for the full list. A
+  mouse drag never decides. The AF button shows a box on the photo where the camera focused.
 - **Stars:** a row of five under a single photo keeps it with that rating in one tap (5 is Hero).
 - **Stacks** follow the camera where it says: on the Sony, one shutter press is one stack, and
   brackets are exact (`photo_cull.py shotinfo` reads the tags). Other cameras use a 2-second gap.
-- **Bursts:** a swipe up or Choose opens the burst on its first frame. The filmstrip (up to 6
-  frames) has a 1:1 toggle that shows every frame at the same spot, and a star row that rates the
-  frame you're on; bigger bursts open as a knock-out grid (tap the weak ones out, keep the rest).
-  Keeping some frames rejects the others with the note `Burst reject · kept DSC05039`.
+- **Bursts:** P or Choose opens the burst picker on its first frame, and a number key on a burst
+  opens it and rates the frame. The rail's 1:1 shows every frame at the lead frame's AF point,
+  and a star row rates the frame you're on; bursts over six open with every frame in (press X on
+  the weak ones). Keeping some frames rejects the others with the note
+  `Burst reject · kept DSC05039`.
 - **Going back** through a day, each decided stack shows it on the photo: a green, gold or red
   outline, rejects greyed, a line such as "Kept DSC04776 · 1 other rejected ★★★", and the button
   that made the decision pressed.
@@ -63,19 +64,19 @@ web app manifest any more (`desktop.js` removes one an older version registered)
   5), counted per stack, so a whole panorama or bracket is one. A "Kept 7 of 10" bar turns amber
   over budget, and if you finish over, the review lists your kept stacks to trim. Stacks you kept
   in Lightroom count toward it and are skipped.
-- **Review:** tap a reject to see it large, swipe through the day's rejects, and Rescue any.
+- **Review:** click a reject to see it large, step through the day's rejects with the arrows, and Rescue any.
 - **Day grid:** the grid button on the cards or the review toggles to every photo of the day:
   picks outlined (Hero in gold), rejects greyed, your Lightroom stars shown, filters for All /
-  Picks / Rejects / Unflagged. Each photo shows the phone's decision, or your Lightroom flag where
-  the phone has none (or yours won). Tap a photo to open its card.
+  Picks / Rejects / Unflagged. Each photo shows Culling Bay's decision, or your Lightroom flag where
+  it has none (or yours won). Click a photo to open its card.
 - **Start over:** "Start this day over", at the foot of the day grid and the review, clears the
-  day's phone decisions and starts it again from the first stack. It works until anything from
+  day's Culling Bay decisions and starts it again from the first stack. It works until anything from
   the day has reached Lightroom; rows already queued in the inbox are taken back out.
 - **Send:** queues the day into `AICullInbox/cull-decisions.tsv`. The AI Cull plugin applies it
   on the next **Sync AI Cull Data**, or (v2.1) offers it when Lightroom starts, and leaves a
   receipt, which the app reads back: landed, your own flag kept, or not found.
 
-The AI's keep/review/reject verdicts never reach the phone. What it shows is measured: each
+The AI's keep/review/reject verdicts are never shown. What the app shows is measured: each
 burst leads with its sharpest frame, exposure brackets and likely panoramas suggest Keep all,
 and badges mark Blown, Dark and Softer (than the burst's sharpest) frames. Rules in
 [`stacks.py`](stacks.py); routes in [`mobile.py`](mobile.py); the app in [`static/m`](static/m).
@@ -113,8 +114,8 @@ caption line per burst in shot order, the GPS towns and the commonest subjects. 
 only when its facts change. Search matches the summaries too.
 
 **Lightroom read-back:** each sync, the plugin reports every selected photo's flag and rating.
-A stack you picked, or rated, in Lightroom counts as done on the phone (a reject flag still
-rejects), and a phone decision that loses to your own flag shows under "Your Lightroom flag won".
+A stack you picked, or rated, in Lightroom counts as done in Culling Bay (a reject flag still
+rejects), and a Culling Bay decision that loses to your own flag shows under "Your Lightroom flag won".
 
 ## Timing (`trial_out/perf.jsonl`)
 

@@ -39,7 +39,7 @@
 <div class="selbar" id="selbar" hidden>
   <span id="sel-n">0 selected</span>
   <button class="btn" id="sel-clear">Clear</button>
-  <button class="btn primary" id="sel-save">Save to phone</button>
+  <button class="btn primary" id="sel-save">Save</button>
 </div>
 
 <div class="viewer" id="viewer" hidden>
@@ -51,7 +51,7 @@
     <span class="count" id="v-count"></span>
     <span class="hd" id="v-hd" hidden>HD…</span>
   </div>
-  <div class="vbottom chrome">
+  <div class="vbottom chrome" role="complementary" aria-label="Photo details">
     <div class="meta"><b id="v-when"></b><span id="v-where"></span></div>
     <div class="cap" id="v-cap"></div>
     <div class="vbtns">
@@ -67,15 +67,13 @@
 
 <div class="sheet" id="sheet" hidden>
   <div class="sheet-card">
-    <div class="sheet-head"><b id="sheet-title">Save to phone</b><button class="ico" id="sheet-close" aria-label="Close">
+    <div class="sheet-head"><b id="sheet-title">Save photo</b><button class="ico" id="sheet-close" aria-label="Close">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
-    <p class="hint">Press and hold a photo, then tap <b>Save to Photos</b> (or <b>Share</b> to send it). Each is the full-size picture, dated when it was taken.</p>
-    <p class="hint" id="sheet-raw" hidden><b>RAW</b> downloads the original file to the Files app. Open it from there in Lightroom, Darkroom or Photos to edit.</p>
+    <p class="hint">Download the full-size picture or its original RAW file.</p>
     <div class="sheet-list" id="sheet-list"></div>
   </div>
 </div>
 
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="perf-client.js"></script>
 <script src="gallery.js"></script>
 </body>

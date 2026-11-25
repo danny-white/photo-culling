@@ -145,8 +145,8 @@ function detailView(c) {
       esc(p.day || '') + '</b> › <b>' + esc(p.file || '') + '</b>.</div>' +
       (first ? '<a class="p-pair-link p-companion-link" href="' + linkTo(first.id) + '">On the go version › ' + linkStatus(first) + '</a>' : '')
     : '<a class="p-download" href="' + esc(exportUrl(p.id)) + '" download data-action="download">' + esc(downloadText) + '</a>' +
-      '<ol class="p-howto"><li>Safari asks to download: tap <b>Download</b>. It goes to Files › Downloads.</li>' +
-      '<li>In Lightroom, tap the add-photos button, choose Files, and pick the file.</li>' +
+      '<ol class="p-howto"><li>The file goes to your Downloads folder.</li>' +
+      '<li>In Lightroom, import it (File › Import, or drag it in).</li>' +
       '<li>Edit with only the tools above, then come back and mark it done.</li></ol>';
   return '<article class="practice-detail" data-cid="' + esc(c.id) + '">' + errorHTML() +
     '<a class="p-list-back" href="/m/practice.html">‹ Challenges</a>' +
@@ -207,7 +207,7 @@ main.addEventListener('click', e => {
   const c = byId(hashId());
   if (!c) return;
   if (action === 'download') {
-    // Do not prevent the anchor's normal Safari download. State tracking happens separately.
+    // Do not prevent the anchor's normal download. State tracking happens separately.
     updateState(c, 'downloaded');
   } else if (action === 'done') updateState(c, 'done', true);
   else if (action === 'skip') updateState(c, 'skipped');

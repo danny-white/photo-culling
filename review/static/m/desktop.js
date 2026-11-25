@@ -17,14 +17,13 @@
   const root = document.documentElement;
   if (!touchFirst) {
     root.classList.add('wide');
-    window.cbWide = () => true;
     return;
   }
   window.cbPhone = true;
   root.classList.add('phone');
   const style = document.createElement('style');
   style.textContent =
-    'html.phone,html.phone body{height:auto;min-height:100%;margin:0;background:#0C0D0E;color:#F2F3F4;overflow:auto}' +
+    'html.phone,html.phone body{height:auto;min-height:100%;min-width:0;margin:0;background:#0C0D0E;color:#F2F3F4;overflow:auto}' +
     'html.phone body>:not(.cb-phone){display:none!important}' +
     '.cb-phone{box-sizing:border-box;max-width:30rem;margin:0 auto;padding:max(48px,env(safe-area-inset-top)) 24px 32px;' +
     'font:400 17px/1.5 system-ui,-apple-system,sans-serif;display:grid;gap:14px;justify-items:start}' +

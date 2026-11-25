@@ -1,4 +1,4 @@
-/* Culling Bay Gallery: search the library and show photos on the phone. Read-only: nothing here
+/* Culling Bay Gallery: search the library and show photos, on a computer. Read-only: nothing here
    changes a cull decision. Routes live in the hash so Back works:
      #/            recent days and On this day
      #/q/<query>   photos for a search, best match first   (/m/api/gallery/search)
@@ -10,7 +10,6 @@
 if (window.cbPhone) return;   // a phone gets desktop.js's page pointing to the app
 
 const $ = s => document.querySelector(s);
-const wide = () => window.cbWide();
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const img = (id, size) => '/m/api/img/' + id + '?s=' + size;
 const exportUrl = (id, extra) => '/m/api/export/' + id + (extra ? '?' + extra : '');
@@ -43,15 +42,6 @@ async function getJSON(url) {
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
   return body;
-}
-
-let toastT = 0;
-function toast(msg, ms = 2200) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.classList.add('on');
-  clearTimeout(toastT);
-  toastT = setTimeout(() => t.classList.remove('on'), ms);
 }
 
 /* ---------------------------------------------------------------- dates */
@@ -265,7 +255,7 @@ function markYear(year) {
   for (const b of bar.querySelectorAll('.ypill')) {
     const on = b.dataset.year === year;
     if (on && b.getAttribute('aria-current') !== 'true')   // keep the lit pill in view, without moving the page
-      bar.scrollTo({ left: b.offsetLeft - bar.clientWidth / 2 + b.offsetWidth / 2, behavior: wide() ? 'auto' : 'smooth' });
+      bar.scrollTo({ left: b.offsetLeft - bar.clientWidth / 2 + b.offsetWidth / 2 });
     b.setAttribute('aria-current', on);
   }
 }
@@ -323,51 +313,20 @@ function updateSelbar() {
 }
 
 /* ---------------------------------------------------------------- saving */
-// Over plain http the share sheet with files isn't available, so the usual path is a sheet of
-// full-size pictures: press and hold one, Save to Photos. Where files can be shared (https),
-// the share sheet comes up directly.
-async function save(photos) {
-  if (!photos.length) return;
-  if (wide()) return openSheet(photos);
-  if (navigator.canShare && window.isSecureContext) {
-    try {
-      toast('Preparing ' + photos.length + ' full-size photo' + (photos.length > 1 ? 's' : '') + '…', 10000);
-      const files = await Promise.all(photos.map(async p => {
-        const r = await fetch(exportUrl(p.id));
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const blob = await r.blob();   // a RAW comes back as a JPEG; a JPEG or HEIC as it is
-        return new File([blob], p.raw ? p.file.replace(/\.[^.]+$/, '') + '.jpg' : p.file, { type: blob.type || 'image/jpeg' });
-      }));
-      toast('', 1);
-      if (navigator.canShare({ files })) { await navigator.share({ files }); return; }
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-    }
-  }
-  openSheet(photos);
-}
-
-const phoneSaveHint = $('#sheet .hint').innerHTML;
-let sheetPhotos = null;
+// A sheet of download links: the full-size picture, and the original for a RAW.
+const save = photos => { if (photos.length) openSheet(photos); };
 // The full-size export preserves HEIC/HEIF originals; label those truthfully too.
 const downloadLabel = p => 'Download ' + (/\.(heic|heif)$/i.exec(p.file)?.[1].toUpperCase() || 'JPEG');
 function openSheet(photos) {
-  sheetPhotos = photos;
-  $('#sheet .hint').innerHTML = wide() ? 'Download the full-size picture or its original RAW file.' : phoneSaveHint;
-  $('#sheet-title').textContent = photos.length > 1 ? 'Save ' + photos.length + ' photos' : wide() ? 'Save photo' : 'Save to phone';
+  $('#sheet-title').textContent = photos.length > 1 ? 'Save ' + photos.length + ' photos' : 'Save photo';
   $('#sheet-list').innerHTML = photos.map(p =>
-    '<figure>' + (wide() ? '' : '<img src="' + exportUrl(p.id) + '" alt="Preparing the full-size picture…">') +
-    '<figcaption><span>' + esc(p.file) + ' · ' + esc(shortDate(p.date)) + '</span><span class="dl">' +
-    '<a href="' + exportUrl(p.id, wide() ? 's=full&dl=1' : 'dl=1') + '" download>' + (wide() ? downloadLabel(p) : p.raw ? 'JPEG' : 'Download') + '</a>' +
-    (p.raw ? '<a href="' + exportUrl(p.id, 's=original') + '" download>' + (wide() ? 'Download RAW' : 'RAW') + ' · ' + esc(mb(p.bytes)) + '</a>' : '') +
+    '<figure><figcaption><span>' + esc(p.file) + ' · ' + esc(shortDate(p.date)) + '</span><span class="dl">' +
+    '<a href="' + exportUrl(p.id, 's=full&dl=1') + '" download>' + downloadLabel(p) + '</a>' +
+    (p.raw ? '<a href="' + exportUrl(p.id, 's=original') + '" download>Download RAW · ' + esc(mb(p.bytes)) + '</a>' : '') +
     '</span></figcaption></figure>').join('');
-  $('#sheet-raw').hidden = wide() || !photos.some(p => p.raw);
   $('#sheet').hidden = false;
-  const first = $('#sheet-list img'), perfT = performance.now();
-  if (first && window.cbPerf) first.addEventListener('load', () =>
-    cbPerf.mark('save_ready', performance.now() - perfT, { name: first.getAttribute('src'), n: photos.length }), { once: true });
 }
-function closeSheet() { $('#sheet').hidden = true; $('#sheet-list').innerHTML = ''; sheetPhotos = null; }
+function closeSheet() { $('#sheet').hidden = true; $('#sheet-list').innerHTML = ''; }
 
 /* ---------------------------------------------------------------- viewer */
 const viewer = $('#viewer'), stage = $('#stage'), vimg = $('#vimg');
@@ -375,7 +334,6 @@ const viewer = $('#viewer'), stage = $('#stage'), vimg = $('#vimg');
 function openViewer(i) {
   S.v = { i, s: 1, tx: 0, ty: 0, base: null, hd: false, dir: 1, sharp: false, pre: [] };
   viewer.hidden = false;
-  viewer.classList.remove('bare');
   document.body.style.overflow = 'hidden';
   if (!(history.state && history.state.v)) history.pushState({ v: 1 }, '');
   show(i);
@@ -398,7 +356,7 @@ function show(i) {
   vimg.style.transition = 'none';
   vimg.style.opacity = '1';
   applyTransform();
-  // The grid's thumbnail is already on the phone, so it goes up at once (soft, same shape), and
+  // The grid's thumbnail is already here, so it goes up at once (soft, same shape), and
   // the 1616 px view replaces it when it arrives, unless the zoom picture got there first.
   const perfT = performance.now();
   v.sharp = false;
@@ -423,11 +381,10 @@ function show(i) {
   sharp.src = img(p.id, 'view');
   $('#v-count').textContent = (i + 1) + ' / ' + S.photos.length;
   $('#v-when').textContent = [longDate(p.date), timeOf(p.ts)].filter(Boolean).join(' · ');
-  $('#v-where').textContent = [town(p.place), p.camera, p.stars ? '★'.repeat(Math.min(p.stars, 5)) : ''].filter(Boolean).join(' · ');
   $('#v-cap').textContent = p.caption || '';
   viewerDetails();
   $('#v-day').hidden = S.route.kind === 'day';
-  // Preload two ahead in the direction you're swiping, and one behind. The Image objects are kept
+  // Preload two ahead in the direction you're stepping, and one behind. The Image objects are kept
   // so the requests aren't dropped.
   v.pre = [i + v.dir, i + 2 * v.dir, i - v.dir].filter(j => S.photos[j]).map(j => {
     const im = new Image();
@@ -437,16 +394,9 @@ function show(i) {
 }
 
 function viewerDetails() {
-  const rail = $('.vbottom');
   const old = $('.gallery-details'); if (old) old.remove();
   if (!S.v) return;
   const p = S.photos[S.v.i];
-  if (!wide()) {
-    rail.removeAttribute('role'); rail.removeAttribute('aria-label');
-    $('#v-where').textContent = [town(p.place), p.camera, p.stars ? '★'.repeat(Math.min(p.stars, 5)) : ''].filter(Boolean).join(' · ');
-    return;
-  }
-  rail.setAttribute('role', 'complementary'); rail.setAttribute('aria-label', 'Photo details');
   $('#v-where').textContent = '';
   const fields = [['File', p.file], ['Camera', p.camera], ['Lens', p.lens], ['Place', p.place], ['Stars', p.stars ? '★'.repeat(Math.min(p.stars, 5)) : '']];
   $('#v-cap').insertAdjacentHTML('beforebegin', '<dl class="gallery-details">' + fields.filter(([, v]) => v).map(([k, v]) => '<dt>' + k + '</dt><dd>' + esc(v) + '</dd>').join('') + '</dl>');
@@ -478,11 +428,10 @@ function clampPan() {
   v.ty = h <= b.H ? (b.H - h) / 2 - b.top : Math.min(-b.top, Math.max(b.H - h - b.top, v.ty));
 }
 
-function zoomAt(s, x, y, from) {   // keep the point (x, y) on screen under the finger
+function zoomAt(s, x, y) {   // keep the point (x, y) on screen under the pointer
   const v = S.v, b = v.base;
   if (!b) return;
-  const f = from || v;
-  const lx = (x - b.left - f.tx) / f.s, ly = (y - b.top - f.ty) / f.s;
+  const lx = (x - b.left - v.tx) / v.s, ly = (y - b.top - v.ty) / v.s;
   v.s = Math.min(6, Math.max(1, s));
   v.tx = x - b.left - lx * v.s;
   v.ty = y - b.top - ly * v.s;
@@ -510,133 +459,40 @@ function loadHD() {   // the 3000-px picture, decoded from the original, when yo
 
 function step(d) {
   const v = S.v, j = v.i + d;
-  if (j < 0 || j >= S.photos.length) { snapBack(); return; }
+  if (j < 0 || j >= S.photos.length) return;
   v.dir = d > 0 ? 1 : -1;
-  if (wide()) return show(j);
-  const b = v.base, out = d > 0 ? -(b ? b.W : 400) : (b ? b.W : 400);
-  vimg.style.transition = 'transform .16s ease-out';
-  v.tx = out; applyTransform();
-  setTimeout(() => { if (S.v) show(j); }, 160);
-}
-function snapBack() {
-  const v = S.v;
-  vimg.style.transition = wide() ? 'none' : 'transform .16s ease-out, opacity .16s';
-  vimg.style.opacity = '1';
-  if (v.s === 1) { v.tx = 0; v.ty = 0; } else clampPan();
-  applyTransform();
+  show(j);
 }
 
-// Gestures: one finger swipes between photos (or pans when zoomed) and swipes down to close;
-// two fingers pinch; a double tap zooms; a single tap hides everything but the photo.
-const pts = new Map();
-let g = null, lastTap = null, tapT = 0;
-
+// The mouse: the wheel zooms where the pointer is, and a drag pans a zoomed photo.
+let drag = null;
 stage.addEventListener('pointerdown', e => {
-  if (!S.v) return;
-  if (wide() && e.button !== 0) return;
+  if (!S.v || e.button !== 0) return;
   stage.setPointerCapture(e.pointerId);
-  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
   vimg.style.transition = 'none';
-  const v = S.v;
-  if (pts.size === 2) {
-    const [a, b] = [...pts.values()];
-    g = { kind: 'pinch', d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, from: { s: v.s, tx: v.tx, ty: v.ty },
-          mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
-  } else if (pts.size === 1) {
-    g = { kind: 'one', x0: e.clientX, y0: e.clientY, t0: Date.now(), tx0: v.tx, ty0: v.ty, axis: null, moved: false };
-  }
+  drag = { x0: e.clientX, y0: e.clientY, tx0: S.v.tx, ty0: S.v.ty };
 });
-
 stage.addEventListener('pointermove', e => {
-  if (!S.v || !pts.has(e.pointerId) || !g) return;
-  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
   const v = S.v;
-  if (g.kind === 'pinch' && pts.size >= 2) {
-    const [a, b] = [...pts.values()];
-    const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    zoomAt(g.from.s * d / g.d0, g.mx, g.my, g.from);
-    v.tx += mx - g.mx; v.ty += my - g.my;   // the pinch also drags
-    if (v.s > 1) clampPan();
-    applyTransform();
-    return;
-  }
-  if (g.kind !== 'one') return;
-  const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
-  if (Math.hypot(dx, dy) > 8) g.moved = true;
-  if (v.s > 1) { v.tx = g.tx0 + dx; v.ty = g.ty0 + dy; clampPan(); applyTransform(); return; }
-  if (wide()) return;
-  if (!g.axis && g.moved) g.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-  if (g.axis === 'x') { v.tx = dx; applyTransform(); }
-  else if (g.axis === 'y' && dy > 0) {
-    v.ty = dy; applyTransform();
-    vimg.style.opacity = String(Math.max(0.3, 1 - dy / 500));
-  }
+  if (!v || !drag || v.s <= 1) return;
+  v.tx = drag.tx0 + e.clientX - drag.x0; v.ty = drag.ty0 + e.clientY - drag.y0;
+  clampPan(); applyTransform();
 });
-
-function endPointer(e) {
-  if (!pts.has(e.pointerId)) return;
-  pts.delete(e.pointerId);
-  if (!S.v || !g) return;
-  const v = S.v;
-  if (g.kind === 'pinch') {
-    if (pts.size === 0) { g = null; if (v.s < 1.05) { v.s = 1; snapBack(); } }
-    else if (pts.size === 1) {   // one finger left: carry on as a pan
-      const [p] = [...pts.values()];
-      g = { kind: 'one', x0: p.x, y0: p.y, t0: Date.now(), tx0: v.tx, ty0: v.ty, axis: null, moved: true };
-    }
-    return;
-  }
-  const dx = e.clientX - g.x0, dy = e.clientY - g.y0, quick = Date.now() - g.t0 < 300;
-  const kind = g.axis;
-  const moved = g.moved;
-  g = null;
-  if (wide()) return;
-  if (!moved && quick) return tap(e.clientX, e.clientY);
-  if (v.s > 1) return;
-  if (kind === 'x' && Math.abs(dx) > 60) return step(dx < 0 ? 1 : -1);
-  if (kind === 'y' && dy > 110) return closeViewer(true);
-  snapBack();
-}
-stage.addEventListener('pointerup', endPointer);
-stage.addEventListener('pointercancel', endPointer);
-
-function tap(x, y) {
-  if (wide()) return;
-  const now = Date.now();
-  if (lastTap && now - lastTap.t < 280 && Math.hypot(x - lastTap.x, y - lastTap.y) < 30) {
-    clearTimeout(tapT);
-    lastTap = null;
-    vimg.style.transition = 'transform .2s ease-out';
-    if (S.v.s > 1) { S.v.s = 1; S.v.tx = 0; S.v.ty = 0; applyTransform(); }
-    else zoomAt(2.5, x, y);
-    return;
-  }
-  lastTap = { t: now, x, y };
-  tapT = setTimeout(() => { lastTap = null; viewer.classList.toggle('bare'); }, 280);
-}
+stage.addEventListener('pointerup', () => { drag = null; });
+stage.addEventListener('pointercancel', () => { drag = null; });
 
 window.addEventListener('resize', () => { if (S.v) { fit(); S.v.s = 1; S.v.tx = 0; S.v.ty = 0; applyTransform(); } });
 stage.addEventListener('wheel', e => {
-  if (!wide() || !S.v) return;
+  if (!S.v) return;
   e.preventDefault(); vimg.style.transition = 'none';
   const r = stage.getBoundingClientRect();
   zoomAt(S.v.s * Math.exp(-e.deltaY * (e.deltaMode === 1 ? .03 : .002)), e.clientX - r.left, e.clientY - r.top);
 }, { passive: false });
-window.addEventListener('cbwidechange', () => {
-  clearTimeout(tapT); lastTap = null; pts.clear(); g = null;
-  viewer.classList.remove('bare'); viewerDetails();
-  if (S.v) { fit(); S.v.s = 1; S.v.tx = 0; S.v.ty = 0; applyTransform(); }
-  if (sheetPhotos) openSheet(sheetPhotos);
-  $('#sel-save').textContent = wide() ? 'Save' : 'Save to phone';
-});
-if (wide()) $('#sel-save').textContent = 'Save';
 document.addEventListener('keydown', e => {
-  if (wide()) {
-    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, [contenteditable="true"]')) return;
-    if (!$('#sheet').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeSheet(); } return; }
-    if (S.v && ['ArrowRight', 'ArrowLeft', 'Escape'].includes(e.key)) e.preventDefault();
-  }
-  if (!S.v) { if (e.key === 'Escape') closeSheet(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, textarea, [contenteditable="true"]')) return;
+  if (!$('#sheet').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeSheet(); } return; }
+  if (S.v && ['ArrowRight', 'ArrowLeft', 'Escape'].includes(e.key)) e.preventDefault();
+  if (!S.v) return;
   if (e.key === 'ArrowRight') step(1);
   else if (e.key === 'ArrowLeft') step(-1);
   else if (e.key === 'Escape') closeViewer(true);
