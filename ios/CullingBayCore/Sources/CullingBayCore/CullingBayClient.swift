@@ -156,6 +156,44 @@ public actor CullingBayClient {
         }
     }
 
+    // MARK: Decode-ahead
+
+    /// Photos one `warm` request may name; the PC takes no more.
+    public static let maxWarmIDs = 4
+    /// How long the PC gets to answer `warm`, in seconds. It is only a hint, so it fails fast.
+    public static let warmTimeout: TimeInterval = 3
+
+    /// Asks the PC to decode these RAWs in the background (`GET /m/api/warm?ids=a,b`, most urgent
+    /// first), so a 1:1 check of them does not wait for a cold decode. A card the phone shows from
+    /// its own saved copy never asks the PC for its picture, which is what normally starts that
+    /// decode. The PC answers 204 with no body; any 2xx counts.
+    ///
+    /// One try with a 3 s timeout, no retry, no cache and no queue: a failure throws and the caller
+    /// forgets it. It goes straight to the PC even with days kept on the phone.
+    public func warm(ids: [Int]) async throws {
+        let ids = Array(ids.prefix(Self.maxWarmIDs))
+        guard !ids.isEmpty else { return }
+        var request = URLRequest(url: URLBuilding.url(
+            base: baseURL, path: "/m/api/warm",
+            query: [("ids", ids.map(String.init).joined(separator: ","))]))
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = Self.warmTimeout
+        let response: HTTPURLResponse
+        do {
+            (_, response) = try await transport.send(request)
+        } catch let error as CullingBayError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw CullingBayError.transport(error.localizedDescription)
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw CullingBayError.http(status: response.statusCode, message: nil)
+        }
+    }
+
     // MARK: Writes
 
     /// Which cached GETs a successful write makes stale.

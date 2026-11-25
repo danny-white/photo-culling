@@ -56,6 +56,16 @@ struct RecordedCall: Sendable {
     let method: String
     let path: String
     let body: Data
+    /// The query string, percent-encoded, without the `?`.
+    var query = ""
+    /// The request's timeout, in seconds.
+    var timeout: TimeInterval = 60
+
+    /// The photo ids a `GET /m/api/warm?ids=a,b` named, in order.
+    var warmIDs: [Int] {
+        let items = URLComponents(string: "http://x/?" + query)?.queryItems ?? []
+        return (items.first { $0.name == "ids" }?.value ?? "").split(separator: ",").compactMap { Int($0) }
+    }
 
     var json: [String: Any] {
         ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any]) ?? [:]
@@ -114,7 +124,9 @@ final class CullServer: Sendable {
             key = method + " " + path
         }
         let (responder, count, day) = state.withLock { state in
-            state.calls.append(RecordedCall(method: method, path: path, body: request.httpBody ?? Data()))
+            state.calls.append(RecordedCall(
+                method: method, path: path, body: request.httpBody ?? Data(),
+                query: request.url?.query ?? "", timeout: request.timeoutInterval))
             let count = state.counts[key, default: 0]
             state.counts[key] = count + 1
             return (state.responders[key], count, state.day)
@@ -126,6 +138,8 @@ final class CullServer: Sendable {
             reply = Reply(body: day)
         } else if key == "POST send" {
             reply = Reply(body: #"{"ok":true,"queued":0,"file_rows":0}"#)
+        } else if key == "GET /m/api/warm" {
+            reply = Reply(status: 204, body: "")
         } else {
             reply = Reply()
         }
@@ -208,16 +222,41 @@ struct CullRig {
         queue = CullWriteQueue(client: client, store: store, sleep: sleeper.sleep)
     }
 
-    func session(match: CullMatch? = nil) -> CullSessionModel {
+    /// `warmer`: the session asks the PC to decode ahead (see `warmer()`).
+    func session(match: CullMatch? = nil, warmer: CullWarmer? = nil) -> CullSessionModel {
         let ids = self.ids
         return CullSessionModel(
             day: "2026/2026-10-01", client: client, queue: queue, match: match,
-            sleep: sleeper.sleep, newActionID: { ids.next() })
+            sleep: sleeper.sleep, warmer: warmer, newActionID: { ids.next() })
+    }
+
+    func warmer() -> CullWarmer {
+        CullWarmer(client: client, queue: queue, sleep: sleeper.sleep)
     }
 
     /// Waits until the queue has nothing left (the server answers at once).
     func settle() async {
         #expect(await eventually { await queue.pending == 0 })
+    }
+
+    /// The photo ids of every `warm` request the server got, in order.
+    var warmed: [[Int]] { server.calls("/m/api/warm").map(\.warmIDs) }
+
+    /// Lets the wait before a `warm` request run out, until the server has `count` requests in
+    /// all (a few seconds at most). A wait that was replaced meanwhile sends nothing when it ends.
+    func sendWarm(requests count: Int) async -> Bool {
+        let server = server
+        for _ in 0..<2000 {
+            await sleeper.release(CullWarmer.delay)
+            if server.calls("/m/api/warm").count >= count { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return false
+    }
+
+    /// Whether anything ever began waiting to ask the PC; false when nothing wanted to.
+    var wantedToWarm: Bool {
+        get async { await sleeper.requested.contains(CullWarmer.delay) }
     }
 }
 

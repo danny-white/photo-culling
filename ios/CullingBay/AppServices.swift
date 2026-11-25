@@ -70,7 +70,8 @@ final class AppServices {
     func makeCullSession(day: String, match: CullMatch? = nil) -> CullSessionModel {
         CullSessionModel(
             day: day, client: client, queue: cullQueue, match: match,
-            keepsDaysOffline: { OfflinePreferences.isEnabled })
+            keepsDaysOffline: { OfflinePreferences.isEnabled },
+            warmer: CullWarmer(client: client, queue: cullQueue))
     }
 
     /// A Save or Share for these photos, to show in an `ExportSheet`. `rawChoice` settles JPEG or

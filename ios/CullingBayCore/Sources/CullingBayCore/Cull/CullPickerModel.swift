@@ -42,12 +42,15 @@ public final class CullPickerModel {
     /// stays as you left it for the next time focus opens.
     public var linkedFocus = false
 
+    @ObservationIgnored private let warmer: CullWarmer?
+
     /// `openPicker`. A card's Choose and a swipe up open on the sharpest frame (`fromStart`;
     /// the strip below shows the rest of the burst); the strip under the card opens on the frame
     /// the card shows. Coming back to a decided burst, the strip starts with its kept frames
     /// ticked, and their stars.
-    init(stack: Stack, board: CullBoard, fromStart: Bool) {
+    init(stack: Stack, board: CullBoard, fromStart: Bool, warmer: CullWarmer? = nil) {
         self.stack = stack
+        self.warmer = warmer
         let picked = stack.frames.filter { CullBoard.isPick(board.decisions[$0.id]) }
         frames = stack.frames.enumerated().map { index, frame in
             var badges: [CullBadge] = []
@@ -67,6 +70,7 @@ public final class CullPickerModel {
         })
         let opening = fromStart ? stack.lead : board.shown(stack).id
         viewIndex = stack.frames.firstIndex { $0.id == opening } ?? 0
+        warm()
     }
 
     // MARK: Strip
@@ -75,7 +79,15 @@ public final class CullPickerModel {
 
     /// `stripView`: shows frame `index`, stopping at the ends.
     public func show(_ index: Int) {
+        let before = viewIndex
         viewIndex = min(max(index, 0), frames.count - 1)
+        if viewIndex != before { warm() }
+    }
+
+    /// Asks the PC to decode the frame on the big picture and the next one in the strip, ahead of
+    /// the 1:1 check that is likely next.
+    private func warm() {
+        warmer?.warm(frames[viewIndex...].prefix(2).map(\.frame))
     }
 
     /// A swipe: the next frame (`1`) or the one before (`-1`).

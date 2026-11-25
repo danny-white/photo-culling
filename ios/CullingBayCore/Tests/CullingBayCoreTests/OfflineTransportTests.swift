@@ -230,6 +230,26 @@ struct OfflineTransportTests {
         #expect(sent.map { $0.url?.absoluteString } == routes.map { $0.url?.absoluteString })
     }
 
+    @Test func aWarmRequestAlwaysGoesToThePCQuicklyAndNothingIsSavedFromIt() async throws {
+        let root = TempRoot()
+        let store = root.store()
+        try store.writeImage(Data("saved".utf8), kind: .view, id: 5)
+        let before = store.totalBytes
+        let base = network(status: 204, body: "")
+        let client = CullingBayClient(baseURL: testBaseURL, transport: transport(base, store))
+        try await client.warm(ids: [5, 6])                          // photo 5 is saved on the phone
+        let sent = await base.requests
+        #expect(sent.count == 1)
+        #expect(sent[0].url?.path == "/m/api/warm")
+        #expect(queryItems(sent[0]) == ["ids": "5,6"])
+        #expect(sent[0].timeoutInterval == CullingBayClient.warmTimeout)    // not the 6 s of a day
+        #expect(store.totalBytes == before && store.records.isEmpty)
+
+        // With the PC out of reach it fails; nothing on the phone answers for it.
+        let lost = CullingBayClient(baseURL: testBaseURL, transport: transport(network(fails: true), store))
+        await #expect(throws: CullingBayError.self) { try await lost.warm(ids: [5]) }
+    }
+
     @Test func aPutIsNotAGetEvenOnADayRoute() async throws {
         let root = TempRoot()
         let store = root.store()

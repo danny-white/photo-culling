@@ -96,6 +96,7 @@ public final class CullSessionModel {
     @ObservationIgnored private let match: CullMatch?
     @ObservationIgnored private let sleep: CullSleep
     @ObservationIgnored private let keepsDaysOffline: @MainActor () -> Bool
+    @ObservationIgnored private let warmer: CullWarmer?
     @ObservationIgnored private let newActionID: @Sendable () -> String
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var edits = 0
@@ -116,12 +117,14 @@ public final class CullSessionModel {
 
     /// `match` is the search hit the day was opened from: its stacks go first. `keepsDaysOffline`
     /// says whether the app keeps days on the phone: if so, a day that cannot be loaded because
-    /// the PC cannot be reached is a day that was not saved. `newActionID` makes the ids of
-    /// `decide`; tests pin it.
+    /// the PC cannot be reached is a day that was not saved. `warmer` asks the PC to decode the
+    /// card on screen and the next one ahead of their 1:1 checks; nil asks for nothing.
+    /// `newActionID` makes the ids of `decide`; tests pin it.
     public init(
         day: String, client: CullingBayClient, queue: CullWriteQueue, match: CullMatch? = nil,
         sleep: @escaping CullSleep = CullClock.system,
         keepsDaysOffline: @escaping @MainActor () -> Bool = { false },
+        warmer: CullWarmer? = nil,
         newActionID: @escaping @Sendable () -> String = { CullingBayClient.newActionID() }
     ) {
         self.dayID = day
@@ -130,6 +133,7 @@ public final class CullSessionModel {
         self.match = match
         self.sleep = sleep
         self.keepsDaysOffline = keepsDaysOffline
+        self.warmer = warmer
         self.newActionID = newActionID
         queue.observeDrops(self) { [weak self] drop in self?.queueDropped(drop) }
     }
@@ -137,6 +141,7 @@ public final class CullSessionModel {
     /// Call when the day's screen goes away. A position save still waiting goes out anyway.
     public func close() {
         queue.stopObservingDrops(self)
+        warmer?.cancel()
     }
 
     // MARK: Opening
@@ -251,6 +256,7 @@ public final class CullSessionModel {
         }
         refreshError = nil
         phase = .loaded
+        warmCards()
     }
 
     /// Taps for this day still in the queue (made offline, or not saved yet): the copy just
@@ -299,6 +305,7 @@ public final class CullSessionModel {
             focus = nil
             screen = board.stacks.isEmpty ? .summary : .cards
         }
+        warmCards()
     }
 
     // MARK: Reading
@@ -516,6 +523,7 @@ public final class CullSessionModel {
         }
         cursor = max(0, min(n - 1, cursor + delta))
         saveProgress(browsing: true)
+        warmCards()
     }
 
     /// From the review, the cards at one stack (a kept one, or the one a reject is in), to look
@@ -524,6 +532,7 @@ public final class CullSessionModel {
         guard board.stacks.indices.contains(index) else { return }
         cursor = index
         screen = .cards
+        warmCards()
     }
 
     /// The position of the stack a frame is in, for a review thumbnail of a reject.
@@ -535,6 +544,7 @@ public final class CullSessionModel {
     public func backToCards() {
         if let i = board.firstOpen(from: cursor) { cursor = i }
         screen = .cards
+        warmCards()
     }
 
     /// The toast for the "N matches first" chip.
@@ -583,7 +593,7 @@ public final class CullSessionModel {
     /// (`fromStart: false`). Nothing is decided or saved by opening it. A single does not open.
     public func openPicker(fromStart: Bool = true) {
         guard screen == .cards, let stack = currentStack, stack.frames.count > 1 else { return }
-        picker = CullPickerModel(stack: stack, board: board, fromStart: fromStart)
+        picker = CullPickerModel(stack: stack, board: board, fromStart: fromStart, warmer: warmer)
         screen = .picker
     }
 
@@ -592,6 +602,7 @@ public final class CullSessionModel {
         guard screen == .picker else { return }
         picker = nil
         screen = .cards
+        warmCards()
     }
 
     /// `pk-keep` and `ko-keep`: keeps what the picker has ticked (or, in the knock-out, whatever
@@ -668,6 +679,7 @@ public final class CullSessionModel {
     public func look(at index: Int) {
         guard screen == .cards, board.stacks.indices.contains(index) else { return }
         cursor = index
+        warmCards()
     }
 
     /// `keepFrames`: keeps `keeps` and rejects the rest of the stack with the burst note.
@@ -727,6 +739,7 @@ public final class CullSessionModel {
             cursor = i
             screen = .cards
             saveProgress()
+            warmCards()
         } else {
             screen = .summary
             saveProgress(finished: true)
@@ -752,6 +765,7 @@ public final class CullSessionModel {
         focus = nil
         screen = .cards
         saveProgress()
+        warmCards()
     }
 
     /// A write the server refused. A refused undo means the tap is still in force, so its
@@ -766,6 +780,18 @@ public final class CullSessionModel {
         } else {
             showToast(drop.message)
         }
+    }
+
+    // MARK: Decode-ahead
+
+    /// Asks the PC to decode what the 1:1 check will want: the frame the card on screen shows
+    /// (the one `openFocus` opens) and the same for the next card in browse order. Nothing to ask
+    /// when no card is on screen; the picker asks for its own frames.
+    private func warmCards() {
+        guard let warmer, screen == .cards, let stack = currentStack else { return }
+        var frames = [board.shown(stack)]
+        if board.stacks.indices.contains(cursor + 1) { frames.append(board.shown(board.stacks[cursor + 1])) }
+        warmer.warm(frames)
     }
 
     // MARK: Progress
