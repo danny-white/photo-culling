@@ -112,6 +112,7 @@ PracticeChallenge contains the challenge file's fields other than `path`, plus:
 | `desktop_reason` | string? | One line saying which tool needs the desktop; `null` when absent |
 | `companion_of` | string? | Id of the Needs Desktop challenge this is the on-the-go version of. `null` when the file has none **or the parent is not in this answer** (its photo is missing), so it then stands alone |
 | `companions` | [string] | Ids, in file order, of the challenges in this answer whose `companion_of` is this id; usually empty |
+| `lightroom` | object? | Absent when nobody has checked. Whether the photo is already in Lightroom on the phone, read **once** from Lightroom Classic's catalog when the challenge was written (nothing keeps it current): `albums` [string] are the synced albums it is in, smallest first (`[]` = not on the phone); `find_in` string? is the album to look in (the smallest), `null` when `albums` is empty; `captured` string? is Lightroom's capture time (local, no zone; it can be a day off Culling Bay's for photos whose time was shifted in Classic); `edited` bool says Classic already has edits on it; `checked` is the date of the check. With albums, show where to find it and that edits made there change the photo in Classic, and keep the download behind a tap; without, offer the download |
 
 A Needs Desktop challenge and its companions are the same photo, each with its own status and note.
 A *group* is a challenge without `companion_of` plus its companions, in file order. Place a group in
@@ -122,6 +123,8 @@ The three new fields are optional in `practice.json`. A violation makes the whol
 `needs_desktop` must be a bool and `desktop_reason` a string when present (`null` is not accepted);
 `companion_of` must name another challenge in the file that has `needs_desktop: true` and no
 `companion_of` of its own; a challenge with `companion_of` must not have `needs_desktop: true`.
+`lightroom`, when present, must be an object with `albums` a list of strings, `find_in` one of them or `null`,
+`edited` a bool, `checked` a string and `captured` a string or `null`.
 
 POST accepts `status` and/or `note`. Setting `downloaded` records the first download time. It does
 not move a `done` challenge back; moving off `done` clears `done_at`. Setting `done` preserves its

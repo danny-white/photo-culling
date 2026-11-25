@@ -449,6 +449,42 @@ class MobileApi(unittest.TestCase):
         case("companion of a companion",
              lambda p, c: [dict(self.practice_challenge("second", path=p["path"]), companion_of="aurora-phone")])
 
+    def test_practice_lightroom_passes_through_and_is_optional(self):
+        self.addCleanup(self.clear_practice)
+        lr = {"albums": ["Sun Peaks", "3+", "Picked"], "find_in": "Sun Peaks", "captured": "2025-01-18T13:13:02",
+              "edited": True, "checked": "2026-11-25"}
+        synced = dict(self.practice_challenge("synced"), lightroom=lr)
+        local = dict(self.practice_challenge("local"),
+                     lightroom={"albums": [], "find_in": None, "captured": None, "edited": False, "checked": "2026-11-25"})
+        unknown = self.practice_challenge("unknown")
+        self.write_practice([synced, local, unknown])
+        body = self.client.get("/m/api/practice").get_json()
+        by_id = {c["id"]: c for c in body["challenges"]}
+        self.assertEqual(by_id["synced"]["lightroom"], lr)
+        self.assertEqual(by_id["local"]["lightroom"]["albums"], [])
+        self.assertNotIn("lightroom", by_id["unknown"])          # nobody checked: the app offers the download
+        self.assertNotIn("path", by_id["synced"])
+
+    def test_practice_lightroom_file_rules(self):
+        self.addCleanup(self.clear_practice)
+        good = {"albums": ["Picked"], "find_in": "Picked", "captured": None, "edited": False, "checked": "2026-11-25"}
+
+        def case(name, lr):
+            self.write_practice([dict(self.practice_challenge(), lightroom=lr)])
+            body = self.client.get("/m/api/practice").get_json()
+            with self.subTest(name):
+                self.assertEqual(body["challenges"], [])
+                self.assertEqual(body["error"], "practice.json is malformed")
+
+        case("not an object", ["Picked"])
+        case("albums not a list", dict(good, albums="Picked"))
+        case("album not a string", dict(good, albums=["Picked", 3]))
+        case("find_in not one of the albums", dict(good, find_in="Edited"))
+        case("edited missing", {k: v for k, v in good.items() if k != "edited"})
+        case("edited not a bool", dict(good, edited="yes"))
+        case("checked missing", {k: v for k, v in good.items() if k != "checked"})
+        case("captured not a string", dict(good, captured=20250118))
+
     def test_practice_table_created_in_fresh_annotations_db(self):
         import mobile
         import photo_cull as pc

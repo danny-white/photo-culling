@@ -420,6 +420,21 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                         for key, kind in (("needs_desktop", bool), ("desktop_reason", str), ("companion_of", str)):
                             if key in item and not isinstance(item[key], kind):
                                 raise ValueError(f"challenge {key} must be a {kind.__name__}")
+                        # Whether the photo is already in Lightroom on the phone, read once from Classic's
+                        # catalog when the challenge was written (passive: nothing keeps it current).
+                        if "lightroom" in item:
+                            lr = item["lightroom"]
+                            if not isinstance(lr, dict):
+                                raise ValueError("challenge lightroom must be an object")
+                            albums = lr.get("albums")
+                            if not isinstance(albums, list) or any(not isinstance(a, str) for a in albums):
+                                raise ValueError("lightroom albums must be a list of strings")
+                            if lr.get("find_in") is not None and lr["find_in"] not in albums:
+                                raise ValueError("lightroom find_in must be one of its albums")
+                            if not isinstance(lr.get("edited"), bool) or not isinstance(lr.get("checked"), str):
+                                raise ValueError("lightroom edited must be true or false and checked a date")
+                            if lr.get("captured") is not None and not isinstance(lr["captured"], str):
+                                raise ValueError("lightroom captured must be a string")
                         items.append(dict(item))
                     # A companion names a Needs Desktop challenge in this file, which is not itself a companion.
                     by_id = {i["id"]: i for i in items}
