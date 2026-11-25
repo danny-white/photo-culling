@@ -265,6 +265,7 @@ const copy = d => (d ? Object.assign({}, d) : null);
 function act(label, changes, extra) {
   const before = changes.map(c => [c.id, copy(S.dec[c.id])]);
   for (const c of changes) S.dec[c.id] = decisionOf(c);
+  S.edits++;
   const action_id = newId();
   const at = S.stacks[S.cursor];
   S.hist.push(Object.assign({ action_id, label, before, changes, day: S.day.day, cursor: S.cursor, stack: at ? at.id : null, pass: S.pass, screen: 'cull' }, extra || {}));
@@ -281,6 +282,7 @@ function undo() {
   h.at = S.hist.length;
   h.undoneFrom = h.before.map(([id]) => [id, copy(S.dec[id])]);
   for (const [id, d] of h.before) { if (d) S.dec[id] = d; else delete S.dec[id]; }
+  S.edits++;
   S.undone[h.action_id] = h;
   send('POST', '/m/api/undo', { action_id: h.action_id }, h.day);
   S.pass = h.pass;
@@ -303,6 +305,7 @@ function undoRefused(actionId, err) {
   const list = histOf(h.day);
   if (list) list.splice(Math.min(h.at, list.length), 0, h);
   if (S.day && S.day.day === h.day) {
+    S.edits++;
     const was = new Map(h.before);
     for (const [id, d] of h.undoneFrom) if (sameDecision(S.dec[id], was.get(id))) { if (d) S.dec[id] = d; else delete S.dec[id]; }
     if (DAY_SCREENS.includes(S.screen)) draw();
@@ -320,6 +323,7 @@ function decideRefused(actionId) {
     if (i < 0) continue;
     const h = list.splice(i, 1)[0], was = new Map(h.before);
     if (!S.day || S.day.day !== h.day) return;   // that day shows the server's rows when it opens
+    S.edits++;
     for (const c of h.changes) if (sameDecision(S.dec[c.id], decisionOf(c))) { const d = was.get(c.id); if (d) S.dec[c.id] = d; else delete S.dec[c.id]; }
     if (DAY_SCREENS.includes(S.screen)) draw();
     return;
@@ -925,9 +929,11 @@ function vSummary() {
     '<span class="sm-lab">' + esc(lrShort(f)) + '</span></div>').join('') + '</div>';
   const skipped = lrDone();
   const fromBurst = rejects.filter(f => S.dec[f.id].note), outright = rejects.filter(f => !S.dec[f.id].note);
-  const order = fromBurst.concat(outright).map(f => f.id);   // the large view steps through them in this order
-  const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="look" data-id="' + f.id + '" data-order="' + order.join(',') + '" aria-label="Look at ' + esc(f.file) + '">' +
-    thumb(f) + '<b>' + IC.x + '</b></button>').join('') + '</div>';
+  // The large view steps through the rejects in this order. It is kept once here, not on each
+  // thumbnail (that made the markup grow with the square of the rejects: 6.5 MB for 939).
+  S.rejectOrder = fromBurst.concat(outright).map(f => f.id);
+  const grid = list => '<div class="sm-grid">' + list.map(f => '<button class="sm-th" data-act="look" data-id="' + f.id +
+    '" aria-label="Look at ' + esc(f.file) + '">' + thumb(f) + '</button>').join('') + '</div>';
   const open = firstOpen(0);
   const decided = all.map(f => S.dec[f.id]).filter(Boolean);
   const by = st => decided.filter(d => d.state === st).length;
@@ -938,9 +944,10 @@ function vSummary() {
   if (by('missing')) lr.push(by('missing') + ' not found in the last sync, will go again');
   if (skipped) lr.push(skipped + ' stack' + (skipped > 1 ? 's were' : ' was') + ' already flagged or rated in Lightroom and skipped');
   const b = budgetOf(), keptN = keptCount(), over = b ? keptN - b : 0;
-  const mine = S.stacks.filter(s => { const st = status(s); return st.done && st.v !== 'reject' && st.src !== 'lr'; });
-  const trim = over > 0 ? '<p class="sec">Kept · ' + keptN + ' of ' + b + '</p><div class="sm-grid">' + mine.map(s => '<button class="sm-th kept" data-act="drop" data-stack="' + S.stacks.indexOf(s) +
-      '" aria-label="Drop ' + esc(stem(shown(s).file)) + '"><img src="' + img(shown(s).id, 'thumb') + '" alt="" loading="lazy"><b>' + IC.x + '</b>' +
+  const mine = [];
+  S.stacks.forEach((s, i) => { const st = status(s); if (st.done && st.v !== 'reject' && st.src !== 'lr') mine.push([s, i]); });
+  const trim = over > 0 ? '<p class="sec">Kept · ' + keptN + ' of ' + b + '</p><div class="sm-grid">' + mine.map(([s, i]) => '<button class="sm-th kept" data-act="drop" data-stack="' + i +
+      '" aria-label="Drop ' + esc(stem(shown(s).file)) + '"><img src="' + img(shown(s).id, 'thumb') + '" alt="" loading="lazy">' +
       (s.frames.length > 1 ? '<span class="sm-lab">' + s.frames.filter(f => isPick(S.dec[f.id])).length + ' of ' + s.frames.length + '</span>' : '') + '</button>').join('') +
       '</div><p class="note">' + over + ' over this shoot’s budget of ' + b + ' (' + S.day.budget.per_hour + ' stacks an hour of shooting). ' + 'Click a stack to drop it.</p>'
     : b ? '<p class="note">Kept ' + keptN + ' of this shoot’s budget of ' + b + '.</p>' : '';
@@ -986,6 +993,7 @@ function draw() {
   rememberStrip();
   const list = view.dataset.screen === 'days' && $('#days-list', view);
   if (list) S.daysScroll = list.scrollTop;   // where you were in the days, for coming back
+  const was = view.dataset.screen, sc = $(':scope > .scroll', view), keepTop = sc && was === S.screen ? sc.scrollTop : 0;
   const active = lastInputKey && view.contains(document.activeElement) ? { ...document.activeElement.dataset } : null;
   if (S.screen === 'picker' && !S.picker) S.screen = 'cull';
   if ((S.screen === 'cull' || S.screen === 'picker') && !S.stacks[S.cursor]) S.screen = 'summary';
@@ -996,6 +1004,8 @@ function draw() {
     : scr === 'summary' ? vSummary() : scr === 'focus' ? vFocus() : scr === 'grid' ? vGrid() : scr === 'large' ? vLarge() : vCull();
   view.dataset.screen = scr;
   if (scr === 'days' && S.daysScroll) { const l = $('#days-list', view); if (l) l.scrollTop = S.daysScroll; }
+  if (keepTop) { const l = $(':scope > .scroll', view); if (l) l.scrollTop = keepTop; }   // a drop or rescue redraws the review
+  if (scr === 'summary' && ['cull', 'picker', 'focus'].includes(was)) refreshDay();
   layoutWide();
   bindPhotos(view, perfT);
   restoreStrip();
@@ -1400,6 +1410,44 @@ function layQueued(day) {
   }
   return at;
 }
+// The day's stacks, a search's matches first, and its decisions with the queued taps laid over
+// them. Returns the newest position still queued for the day.
+function arrange(body) {
+  S.stacks = body.stacks; S.dec = {}; S.matches = null;
+  for (const s of S.stacks) for (const f of s.frames) if (f.decision) S.dec[f.id] = f.decision;
+  const queuedAt = layQueued(body.day), match = S.match;
+  if (match) {
+    const ids = new Set(match.ids), first = S.stacks.filter(s => s.frames.some(f => ids.has(f.id)));
+    if (first.length && first.length < S.stacks.length) {
+      S.stacks = first.concat(S.stacks.filter(s => !first.includes(s)));
+      S.matches = { n: first.length, label: match.label };
+    }
+  }
+  S.daySig = JSON.stringify(body);
+  return queuedAt;
+}
+// The review reloads the day when it opens, so Lightroom's receipts (landed, conflict, missing)
+// and "Your Lightroom flag won" are current, as on the iPhone (CullSessionModel.refresh). It
+// waits up to 3 s for this day's taps to reach the PC first, and drops the answer if you
+// decided something meanwhile or left. The cursor stays on the same stack.
+let refreshSeq = 0;
+S.edits = 0;
+async function refreshDay() {
+  const seq = ++refreshSeq, day = S.day && S.day.day, seen = S.edits;
+  if (!day) return;
+  const mine = () => qRead().some(it => it.day === day || (it.body && it.body.day === day));
+  pump();
+  for (let i = 0; i < 12 && mine(); i++) await sleep(250);
+  let body;
+  try { body = await getJSON('/m/api/day/' + dayPath(day)); } catch (_) { return; }
+  if (seq !== refreshSeq || !S.day || S.day.day !== day || seen !== S.edits || JSON.stringify(body) === S.daySig) return;
+  const lead = S.stacks[S.cursor] && S.stacks[S.cursor].lead;
+  S.day = body;
+  arrange(body);
+  const i = S.stacks.findIndex(s => s.lead === lead);
+  S.cursor = i >= 0 ? i : Math.max(0, Math.min(S.cursor, S.stacks.length - 1));
+  if (S.screen === 'summary') draw();
+}
 async function openDay(day, match) {   // match: {ids, label} from a search, whose stacks go first
   const seq = ++openSeq;
   S.perfDay = performance.now();
@@ -1412,16 +1460,8 @@ async function openDay(day, match) {   // match: {ids, label} from a search, who
     S.screen = 'error'; S.error = 'Could not load ' + day + ': ' + e.message; return draw();
   }
   if (seq !== openSeq || S.screen !== 'loading') return;   // you went back, or opened another day
-  S.day = body; S.stacks = body.stacks; S.dec = {}; S.hist = S.hists.get(body.day) || []; S.picker = null; S.matches = null;
-  for (const s of S.stacks) for (const f of s.frames) if (f.decision) S.dec[f.id] = f.decision;
-  const queuedAt = layQueued(body.day);
-  if (match) {
-    const ids = new Set(match.ids), first = S.stacks.filter(s => s.frames.some(f => ids.has(f.id)));
-    if (first.length && first.length < S.stacks.length) {
-      S.stacks = first.concat(S.stacks.filter(s => !first.includes(s)));
-      S.matches = { n: first.length, label: match.label };
-    }
-  }
+  S.day = body; S.hist = S.hists.get(body.day) || []; S.picker = null; S.match = match || null;
+  const queuedAt = arrange(body);
   const p = body.progress;
   S.pass = 2;                       // one pass now; the server still records pass and position
   S.cursor = S.matches || !p ? 0 : Math.max(0, S.stacks.findIndex(s => s.id === p.cursor));
@@ -1459,6 +1499,7 @@ async function sendDay(btn) {
   try { body = await writeNow('/m/api/day/' + dayPath(S.day.day) + '/send', {}); }
   catch (e) { btn.disabled = false; return toast(notSent(e)); }
   for (const id in S.dec) if (S.dec[id].state === 'draft' || S.dec[id].state === 'missing') S.dec[id].state = 'queued';
+  S.edits++;
   toast(body.queued ? 'Queued ' + body.queued + ' for Lightroom. On the Mac: Sync AI Cull Data.' : 'Nothing new to send.');
   draw();
 }
@@ -1586,7 +1627,12 @@ document.addEventListener('click', e => {
       return draw();
     }
     case 'back-cull': { const i = firstOpen(S.cursor); if (i >= 0) S.cursor = i; S.screen = 'cull'; return draw(); }
-    case 'look': S.large = { ids: b.dataset.order.split(',').map(Number), i: 0 }; S.large.i = S.large.ids.indexOf(+b.dataset.id); S.screen = 'large'; return draw();
+    case 'look': {
+      const ids = (S.rejectOrder || []).slice();
+      S.large = { ids, i: Math.max(0, ids.indexOf(+b.dataset.id)) };
+      S.screen = 'large';
+      return draw();
+    }
     case 'close-large': S.large = null; S.screen = 'summary'; return draw();
     case 'rescue': {
       const f = frameById(+b.dataset.id);

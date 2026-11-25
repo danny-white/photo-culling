@@ -69,6 +69,8 @@ web app manifest any more (`desktop.js` removes one an older version registered)
   over budget, and if you finish over, the review lists your kept stacks to trim. Stacks you kept
   in Lightroom count toward it and are skipped.
 - **Review:** click a reject to see it large, step through the day's rejects with the arrows, and Rescue any.
+  Opening the review reloads the day, so what Lightroom's last sync said (landed, your own flag
+  kept, not found) is current, as on the iPhone.
 - **Day grid:** the grid button on the cards or the review toggles to every photo of the day:
   picks outlined (Hero in gold), rejects greyed, your Lightroom stars shown, filters for All /
   Picks / Rejects / Unflagged. Each photo shows Culling Bay's decision, or your Lightroom flag where

@@ -211,8 +211,7 @@ html.hide-af .af{display:none}
 .sm-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
 .sm-th{position:relative;padding:0;border:0;background:#000;aspect-ratio:3/2;cursor:pointer;border-radius:4px;overflow:hidden}
 .sm-th img{width:100%;height:100%;object-fit:cover;opacity:.55;display:block}
-.sm-th b{position:absolute;right:3px;top:3px;width:17px;height:17px;border-radius:50%;background:var(--reject);color:#fff;display:grid;place-items:center}
-.sm-th b svg{width:10px;height:10px}
+.sm-th[data-act]::after{content:"✕";position:absolute;right:3px;top:3px;width:17px;height:17px;border-radius:50%;background:var(--reject);color:#fff;display:grid;place-items:center;font:700 9px/1 var(--body)}
 .sm-th.kept img{opacity:1}
 .sm-th.won{cursor:default}
 .sm-th.won img{opacity:.8}
