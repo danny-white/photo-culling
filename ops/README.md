@@ -112,9 +112,27 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
 - `journalctl --user -u photo-cull-ingest.service -f` — watch it fire.
 - `tail -f trial_out/ingest_watch.log` — the watcher's own log (what it culled/exported/skipped/
   aborted).
-- `trial_out/ingest_markers/<shoot>.done` — one marker per exported shoot folder, storing the
-  folder's newest-file mtime at last export. Delete a marker (or touch a new file into that
-  shoot) to force a re-cull + re-export on the next poll.
+- `trial_out/ingest_markers/<shoot>.done` — one marker per finished shoot folder, holding its
+  signature, `v2 <folder mtime> <newest file mtime> <file count>` (epoch seconds). The folder's
+  own mtime is the time files were last copied in (a card copy keeps each file's camera date, so
+  the file times can't see it). A folder is looked at again when its signature changes. Delete a
+  marker (or copy a file into that shoot) to force a re-cull + re-export on the next poll.
+  Markers from before 24 Nov 2026 hold a single number (the newest file's mtime). The first poll
+  rewrites those in the new form *without* processing, when the number still matches the newest
+  file, the folder's photo count equals its rows in the DB and nothing in it is pending or
+  retryable. Any other old marker is processed, which appends that folder to `pending.tsv` again.
+- **Failed photos.** `run` is called with `--retry-failed`. A photo that failed to tag is tried
+  again on every poll, up to 4 tries in all (`MAX_ATTEMPTS` in `photo_cull.py`), and a folder
+  with such photos stays unmarked, so the next poll comes back to it. Empty files (0 bytes) and
+  photos that used all their tries are "unreadable": they stop holding the folder back. The log
+  says `retry pending for <folder>: N photos` while it waits. If Ollama isn't answering, `run`
+  exits 3 and the watcher logs `run deferred: Ollama not answering` and ends that poll.
+- **Trying it safely.** Every path is an environment variable with the live value as its default:
+  `PROJ`, `DB`, `LIBRARY_ROOT`, `INBOX`, `INBOX_SOURCE`, `MARKERS`, `LOG`, `PY`, `STABLE_MINUTES`,
+  `NOTIFY_EMAIL`, and `CHECK_MOUNT=0` (skips the two mount checks; tests only). `DRY_RUN=1` logs
+  what it would do (to stdout and the log) and runs no step and writes no marker. Never run the
+  script with the defaults to "see what happens": that is the live run. `review/tests/test_watch_ingest.py`
+  runs the real script against a temp library with a stub Python.
 - `systemctl --user start photo-cull-ingest.service` — run a poll right now instead of waiting.
 - `/mnt/Passport_AICullInbox/pending.tsv` accumulates every shoot processed since the last applied
   Lightroom sync (merged by shoot folder + filename, not overwritten) — one sync catches up
@@ -125,8 +143,8 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
 ## Why polling instead of inotify
 
 Recursive `inotifywait` on a big passport-drive tree is expensive and fragile across mounts/
-unmounts. A 15-minute poll plus a 15-minute stability window is cheap (nothing to do if no
-folder's newest file changed) and tolerant of the drive being unplugged between imports.
+unmounts. A 15-minute poll plus a 15-minute stability window is tolerant of the drive being
+unplugged between imports, and needs nothing running between polls.
 
 ## Backups
 
