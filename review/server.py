@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import signal
@@ -48,6 +49,7 @@ CACHE = HERE / "cache"
 CACHE.mkdir(exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
+log = logging.getLogger(__name__)
 
 # ---- config (populated in main) ----
 CFG = {
@@ -127,7 +129,7 @@ def api_thumb(rowid):
             with perf.stage("encode"):
                 im.save(cached, "JPEG", quality=86)
         except Exception as e:  # unreadable file -> 1x1 so the grid still lays out
-            return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
+            return mobile.decode_failed(pc, rowid, path, e)
     return send_file(cached, mimetype="image/jpeg", max_age=3600)
 
 
@@ -459,6 +461,14 @@ def api_intervene():
 
 
 # ---------------------------------------------------------------- main
+def configure_logging():
+    """Warnings, errors and tracebacks go to stderr, where journald keeps them (it adds the
+    timestamps). perf.jsonl is the access log: perf's own logger doesn't propagate here, and
+    werkzeug's line for every request would only repeat it."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", type=Path, default=Path("trial_out/trial.db"))
@@ -476,6 +486,7 @@ def main():
     ap.add_argument("--embed-base-url", default="http://localhost:11434/v1",
                     help="OpenAI-compatible base URL for embedding semantic-search queries (default: local Ollama).")
     a = ap.parse_args()
+    configure_logging()
     CFG["db"] = a.db
     CFG["annotations"] = a.annotations or a.db.with_suffix(".annotations.db")
     CFG["log"] = a.log

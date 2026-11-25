@@ -11,7 +11,8 @@ Each line in the log (trial_out/perf.jsonl by default, rotated at 20 MB, three k
   bytes    response size, when known
   client   the caller's address (100.91.65.36 is the phone on the tailnet)
   stages   {name: ms} for the parts a handler timed with stage(), e.g. decode or encode
-  attrs    facts about the request set with note(), e.g. cache=hit or miss
+  attrs    facts about the request set with note(), e.g. cache=hit or miss; error=<reason> when a
+           photo wouldn't decode (the 415 routes), which the journal has in full as a warning
 
 The phone pages send their own measurements to /m/api/perf, which logs them through
 client_lines() with kind "client". review/perf_report.py summarises the file.

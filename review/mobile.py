@@ -175,6 +175,25 @@ def tsv_row(path: str, d: dict) -> tuple[tuple[str, str], str]:
     return (p.parent.name, p.name), "\t".join((p.parent.name, p.name, d["flag"], stars, note))
 
 
+def failure_reason(pc, e: Exception) -> tuple[str, bool]:
+    """(one line saying what went wrong, whether it is a type of failure nobody expected). An
+    unreadable or unsupported file (LoadError, OSError: the NAS, a bad RAW) says enough in a
+    line; anything else is a bug, and its log entry keeps the traceback. The line is plain ASCII
+    with no quotes, so it can also go in the Server-Timing header."""
+    text = " ".join(pc._exc_text(e).replace('"', "'").split()).encode("ascii", "replace").decode()
+    return f"{type(e).__name__}: {text}"[:120], not isinstance(e, (OSError, getattr(pc, "LoadError", OSError)))
+
+
+def decode_failed(pc, rowid: int, path: str | None, e: Exception):
+    """The 415 for a photo that would not decode. The phone gets the reason as before; the
+    journal gets a warning naming the photo, and the request's timing line gets `error`."""
+    reason, unexpected = failure_reason(pc, e)
+    log.warning("decode failed for photo %s (%s): %s", rowid, Path(path).name if path else "unknown file",
+                reason, exc_info=e if unexpected else None)
+    perf.note(error=reason)
+    return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
+
+
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
                    known_unreadable: Path = KNOWN_UNREADABLE, ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
@@ -324,7 +343,9 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             try:
                 full_decode(path, background=True)
             except Exception as e:  # noqa: BLE001 - a failed decode-ahead is retried when asked for
-                log.info("decode-ahead failed for %s: %s", Path(path).name, pc._exc_text(e)[:120])
+                reason, unexpected = failure_reason(pc, e)
+                log.warning("decode-ahead failed for %s: %s", Path(path).name, reason,
+                            exc_info=e if unexpected else None)
 
     for _ in range(WARM_WORKERS):
         threading.Thread(target=warm_worker, daemon=True, name="decode-ahead").start()
@@ -1198,7 +1219,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             # keep=0 otherwise: the whole frame decoded aside, not cached
             im = offline_decode(r["path"]) if request.args.get("keep") == "0" else full_decode(r["path"])
         except Exception as e:
-            return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
+            return decode_failed(pc, rowid, r["path"], e)
         W, H = im.size
         w, h = min(w, W), min(h, H)
         cx = min(max(x, 0.0), 1.0) * W
@@ -1709,6 +1730,18 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         return jsonify({"day": day, "date": day_date(day), "summary": day_summaries().get(f"{LIBRARY_ROOT}/{day}"),
                         "photos": gallery_items([r["rowid"] for r in rows], best=best, bursts=False)})
 
+    def photo_path(rowid: int) -> str | None:
+        """A photo's path, for a log line about a failure; None if it can't be read."""
+        try:
+            con = db_ro()
+            try:
+                r = con.execute("SELECT path FROM images WHERE rowid=?", (rowid,)).fetchone()
+            finally:
+                con.close()
+            return r["path"] if r else None
+        except Exception:  # noqa: BLE001 - the log line is a courtesy
+            return None
+
     def export_jpeg(rowid: int, edge: int | None) -> tuple[bytes, str] | None:
         """A JPEG of the whole frame for the camera roll, carrying the capture time and
         place so it lands on the right day in Photos. edge: longest side, None = full size."""
@@ -1771,7 +1804,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         try:
             made = export_jpeg(rowid, edge)
         except Exception as e:
-            return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
+            return decode_failed(pc, rowid, photo_path(rowid), e)
         if made is None:
             return jsonify({"error": "not found"}), 404
         data, name = made
@@ -1804,7 +1837,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 with perf.stage("encode"):
                     previews.write_atomic(im, cached)
             except Exception as e:
-                return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
+                return decode_failed(pc, rowid, r["path"], e)
         return send_file(cached, mimetype="image/jpeg", max_age=86400)
 
     return bp
