@@ -11,11 +11,33 @@ struct CullDaysView: View {
     private var model: CullDaysModel { services.cullDays }
     @State private var sendAll: CullSendAllLaunch?
     @State private var openingSendAll = false
+    /// The row a day was opened from, so the list can come back to it (see `scrollBack`).
+    @State private var openedFrom: OpenedFrom?
+
+    private struct OpenedFrom {
+        let day: String
+        let section: CullDaysModel.ListSection
+    }
+
+    /// A row's place to scroll to. The same day can have a row in more than one part of the list.
+    private struct RowID: Hashable {
+        let section: CullDaysModel.ListSection?
+        let day: String
+    }
+
+    private static let topID = "days-top"
 
     var body: some View {
+        ScrollViewReader { proxy in
+            list(proxy)
+        }
+    }
+
+    private func list(_ proxy: ScrollViewProxy) -> some View {
         @Bindable var days = services.cullDays
-        ScrollView {
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                Color.clear.frame(height: 0).id(Self.topID)
                 CullOfflineBanner(queue: services.cullQueue)
                 if model.isServedOffline && model.phase == .loaded {
                     Text("Offline · saved days open from this phone")
@@ -52,6 +74,7 @@ struct CullDaysView: View {
         }
         .task {
             await days.load()
+            await scrollBack(proxy)
             if LaunchOptions.openSendAll && sendAll == nil { openSendAll() }
         }
         .sheet(item: $sendAll) { launch in
@@ -60,6 +83,24 @@ struct CullDaysView: View {
                 // What was sent no longer needs keeping, which may make room for other days.
                 services.offline.sync()
             })
+        }
+    }
+
+    // MARK: Coming back
+
+    /// Back from a day, culling may have moved its row (into In progress, or out of it when the
+    /// day is finished) while the list kept its old offset, so the day is off screen. Take the
+    /// list to the row's new place; a row that did not move leaves the list as it was.
+    private func scrollBack(_ proxy: ScrollViewProxy) async {
+        guard let from = openedFrom else { return }
+        openedFrom = nil
+        guard !model.isShowingSearch else { return }
+        // The rows are laid out after the load, so let that happen before asking for one.
+        await Task.yield()
+        switch model.returnTarget(for: from.day, openedFrom: from.section) {
+        case .stay: break
+        case .top: proxy.scrollTo(Self.topID, anchor: .top)
+        case .row(let section): proxy.scrollTo(RowID(section: section, day: from.day), anchor: .center)
         }
     }
 
@@ -146,11 +187,11 @@ struct CullDaysView: View {
         sendAllRow
         if !model.inProgress.isEmpty {
             sectionLabel("In progress")
-            rows(model.inProgress)
+            rows(model.inProgress, in: .inProgress)
         }
         if !model.onThisDay.isEmpty {
             sectionLabel("On this day · earlier years")
-            rows(model.onThisDay)
+            rows(model.onThisDay, in: .onThisDay)
         }
         ForEach(model.years) { year in
             yearSection(year)
@@ -190,7 +231,7 @@ struct CullDaysView: View {
                         .padding(.vertical, 4)
                         .padding(.horizontal, 4)
                 }
-                rows(result.rows)
+                rows(result.rows, in: nil)
             }
             // An answer to an older query stays up, dimmed, until the new one arrives.
             .opacity(model.isSearching ? 0.5 : 1)
@@ -223,21 +264,27 @@ struct CullDaysView: View {
             if open {
                 ForEach(year.months) { month in
                     sectionLabel(month.title)
-                    rows(month.rows)
+                    rows(month.rows, in: .year(year.year))
                 }
             }
         }
     }
 
-    private func rows(_ rows: [CullDayRow]) -> some View {
+    /// `section` is where the rows are, so the list can come back to one after its day is open;
+    /// nil for a search's hits, which come back as they were.
+    private func rows(_ rows: [CullDayRow], in section: CullDaysModel.ListSection?) -> some View {
         // Decisions only on the phone so far, by day: the row says so until the PC has them.
         let pending = services.cullQueue.pendingByDay
         return ForEach(rows) { row in
-            Button { router.open(row.day.day, match: row.match, services: services) } label: {
+            Button {
+                openedFrom = section.map { OpenedFrom(day: row.day.day, section: $0) }
+                router.open(row.day.day, match: row.match, services: services)
+            } label: {
                 CullDayRowView(row: row, pendingTaps: pending[row.day.day] ?? 0)
             }
             .buttonStyle(.plain)
             .padding(.bottom, 8)
+            .id(RowID(section: section, day: row.day.day))
         }
     }
 

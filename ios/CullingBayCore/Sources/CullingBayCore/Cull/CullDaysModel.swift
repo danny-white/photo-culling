@@ -171,6 +171,46 @@ public final class CullDaysModel {
         hasOpenState = true
     }
 
+    // MARK: Coming back from a day
+
+    /// A part of the list that holds day rows.
+    public enum ListSection: Sendable, Hashable {
+        case inProgress
+        case onThisDay
+        /// The months of one year (`2026`).
+        case year(String)
+    }
+
+    /// What the list should do when it comes back from a day.
+    public enum ReturnTarget: Sendable, Hashable {
+        /// The row is where it was: leave the list as it is.
+        case stay
+        /// The row is gone from the list, or hidden: go to the top.
+        case top
+        /// Show the row, which is now in this part of the list.
+        case row(ListSection)
+    }
+
+    /// Where to take the list after a day opened from a row in `section`. Culling moves a day
+    /// into In progress, and finishing it moves it out again, so the row may have gone from where
+    /// the list was left. A row that is still in the same part stays where it is.
+    public func returnTarget(for day: String, openedFrom section: ListSection) -> ReturnTarget {
+        if hasRow(day, in: section) { return .stay }
+        if hasRow(day, in: .inProgress) { return .row(.inProgress) }
+        let year = String(day.prefix(4))
+        if isYearOpen(year), hasRow(day, in: .year(year)) { return .row(.year(year)) }
+        return .top
+    }
+
+    private func hasRow(_ day: String, in section: ListSection) -> Bool {
+        switch section {
+        case .inProgress: inProgress.contains { $0.day.day == day }
+        case .onThisDay: onThisDay.contains { $0.day.day == day }
+        case .year(let year):
+            years.first { $0.year == year }?.months.contains { $0.rows.contains { $0.day.day == day } } ?? false
+        }
+    }
+
     private func fetch() async {
         generation += 1
         let mine = generation

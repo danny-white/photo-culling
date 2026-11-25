@@ -325,6 +325,69 @@ struct CullDaysModelTests {
         #expect(model.inProgress.map(\.day.day) == ["2026/2026-10-02"])
         #expect(model.refreshError == nil)
     }
+
+    // MARK: Coming back from a day
+
+    /// A model whose first answer is `before` and every later one `after`, loaded and then refreshed.
+    private func comingBack(before: [Day], after: [Day]) async -> CullDaysModel {
+        let step = FakeTransport { request, index in
+            jsonResponse(daysJSON(index == 0 ? before : after), for: request)
+        }
+        let model = CullDaysModel(
+            client: CullingBayClient(baseURL: testBaseURL, transport: step), now: { today }, timeZone: pacific)
+        await model.load()
+        await model.refresh()
+        return model
+    }
+
+    @Test func aDayCulledFromItsYearComesBackInProgress() async {
+        let model = await comingBack(
+            before: [listDay("2026-10-10"), listDay("2026-09-03")],
+            after: [listDay("2026-10-10", decided: 5), listDay("2026-09-03")])
+        #expect(model.returnTarget(for: "2026/2026-10-10", openedFrom: .year("2026")) == .row(.inProgress))
+    }
+
+    @Test func aDayThatDidNotMoveLeavesTheListWhereItIs() async {
+        let model = await comingBack(
+            before: [listDay("2026-10-10"), listDay("2026-09-03")],
+            after: [listDay("2026-10-10"), listDay("2026-09-03")])
+        #expect(model.returnTarget(for: "2026/2026-09-03", openedFrom: .year("2026")) == .stay)
+        // One that was in progress and still is: it keeps its row too.
+        let busy = await comingBack(
+            before: [listDay("2026-10-10", decided: 5)], after: [listDay("2026-10-10", decided: 9)])
+        #expect(busy.returnTarget(for: "2026/2026-10-10", openedFrom: .inProgress) == .stay)
+    }
+
+    @Test func aDayOnThisDayHasARowInItsYearToo() async {
+        // 16 Oct 2025 is within three days of the 17th: it is under On this day and under 2025.
+        let day = listDay("2025-10-16")
+        let model = await comingBack(before: [listDay("2026-10-10"), day], after: [listDay("2026-10-10"), day])
+        #expect(model.onThisDay.map(\.day.day) == ["2025/2025-10-16"])
+        #expect(model.returnTarget(for: "2025/2025-10-16", openedFrom: .onThisDay) == .stay)
+        #expect(model.returnTarget(for: "2025/2025-10-16", openedFrom: .year("2025")) == .stay)
+        // Culled from On this day, it moves into In progress.
+        let culled = await comingBack(
+            before: [listDay("2026-10-10"), day], after: [listDay("2026-10-10"), listDay("2025-10-16", decided: 4)])
+        #expect(culled.returnTarget(for: "2025/2025-10-16", openedFrom: .onThisDay) == .row(.inProgress))
+    }
+
+    @Test func aFinishedDayGoesBackToItsYearWhenThatIsOpen() async {
+        let model = await comingBack(
+            before: [listDay("2026-10-10", decided: 5), listDay("2026-09-03")],
+            after: [listDay("2026-10-10", decided: 80, finished: true), listDay("2026-09-03")])
+        #expect(model.isYearOpen("2026"))
+        #expect(model.returnTarget(for: "2026/2026-10-10", openedFrom: .inProgress) == .row(.year("2026")))
+    }
+
+    @Test func aRowInAClosedYearOrNoRowAtAllGoesToTheTop() async {
+        // 2026 is the newest year, so it starts open and 2025 closed.
+        let model = await comingBack(
+            before: [listDay("2026-10-10"), listDay("2025-03-03", decided: 5)],
+            after: [listDay("2026-10-10"), listDay("2025-03-03", decided: 80, finished: true)])
+        #expect(!model.isYearOpen("2025"))
+        #expect(model.returnTarget(for: "2025/2025-03-03", openedFrom: .inProgress) == .top)
+        #expect(model.returnTarget(for: "2024/2024-01-01", openedFrom: .year("2024")) == .top)
+    }
 }
 
 func listDay(
