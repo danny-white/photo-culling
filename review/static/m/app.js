@@ -16,7 +16,6 @@ let lastInputKey = false;   // after a mouse click focus stays off the controls,
 addEventListener('keydown', () => { lastInputKey = true; }, true);
 addEventListener('pointerdown', () => { lastInputKey = false; }, true);
 const NOTE_PREFIX = 'Burst reject · kept ';
-const PICKER_STRIP_MAX = 6; // bursts up to this size open as a filmstrip; bigger ones as a knock-out grid
 const BAND_MIN = 80;        // px: a 1:1 band shorter than this isn't worth showing
 
 const IC = {
@@ -577,21 +576,22 @@ function vCull() {
     '<div class="hint">' + (burst ? 'P choose · A keep all' : 'P keep · 1–5 stars') + ' · X reject · ← → browse · Z focus</div>';
 }
 
+// The burst picker, as the iPhone's (CullPickerModel): a filmstrip whatever the burst's size, a
+// tick on each frame to keep, and stars. Saving keeps what is ticked and rejects the rest.
 function vStrip() {
-  const s = S.stacks[S.cursor], fr = s.frames, pk = S.picker, f = fr[pk.view], on = pickerSelected(f.id);
-  const n = pk.m === 'knock' ? fr.length - pk.out.size : pk.sel.size, m = frameMark(f);
-  const knock = pk.m === 'knock';
+  const s = S.stacks[S.cursor], fr = s.frames, pk = S.picker, f = fr[pk.view], on = pk.sel.has(f.id);
+  const n = pk.sel.size, m = frameMark(f);
   const lrBadge = lrMark(f) && !(m && m.text.endsWith('in Lightroom')) ? '<span class="bd bd-lr">' + esc(lrWord(f)) + '</span>' : '';
   // The rail's 1:1 shows every frame at the same spot, the lead frame's AF point (loadBand).
-  return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, knock ? 'Press X on the weaker frames' : 'Tick the keepers') +
+  return top('<button class="tbtn" data-act="close-picker">Cancel</button>', 'Burst of ' + fr.length, 'Tick the keepers') +
     '<div class="pk-main" id="pk-main"><div class="pk-box">' + photo(f, afBox(f)) + '</div>' +
       '<div class="pk-bd">' + (f.id === s.lead ? '<span class="bd bd-dot">Sharpest</span>' : '') + f.badges.map(b => '<span class="bd">' + esc(b) + '</span>').join('') + lrBadge + '</div>' +
       (m ? '<span class="pk-flag ' + m.v + '">' + esc(m.text) + (m.stars ? ' ' + starText(m.stars) : '') + '</span>' : '') +
       '<button class="pk-tick' + (on ? ' on' : '') + '" data-act="tick" aria-pressed="' + on + '" aria-label="Keep ' + esc(f.file) + '">' + IC.check + '</button>' +
       '<span class="pk-id">' + esc(stem(f.file)) + ' · ' + (pk.view + 1) + '/' + fr.length + '</span></div>' +
     '<div class="pk-strip">' + fr.map((x, i) => '<button class="pk-th' + (i === pk.view ? ' cur' : '') + '" data-act="view" data-i="' + i + '" aria-label="Show ' + esc(x.file) + '">' +
-      thumb(x) + (x.id === s.lead ? '<i class="dot"></i>' : '') + (pickerSelected(x.id) ? '<b>' + IC.check + '</b>' : '') + '</button>').join('') + '</div>' +
-    starRow(pk.rate[f.id] || (isPick(S.dec[f.id]) && S.dec[f.id].stars) || 0, 'Rate this frame') +
+      thumb(x) + (x.id === s.lead ? '<i class="dot"></i>' : '') + (pk.sel.has(x.id) ? '<b>' + IC.check + '</b>' : '') + '</button>').join('') + '</div>' +
+    starRow(pk.rate[f.id] || 0, 'Rate this frame') +
     '<p class="pk-note">← → browse · 1–5 rate · P keep · X leave out · Z focus · Enter save</p>' +
     '<div class="foot"><button class="pb2" data-act="pk-reject">Reject all ' + fr.length + '</button>' +
       '<button class="pb2 pri" data-act="pk-keep"' + (n ? '' : ' disabled') + '>' + (n ? 'Keep ' + n + ' · reject ' + (fr.length - n) : 'Tick a keeper') + '</button></div>';
@@ -610,6 +610,8 @@ function openFocus(id, u, v) {
   S.screen = 'focus';
   draw();
 }
+// From a card: Reject rejects the stack (all of a burst's frames). On a burst, Keep opens the
+// picker on this frame rather than keeping it and rejecting the rest unseen.
 function vFocus() {
   const f = frameById(S.focus.id), fromCard = S.focus.ret === 'cull', m = frameMark(f);
   const atAF = f.af && Math.abs(f.af[0] - S.focus.u) < 1e-3 && Math.abs(f.af[1] - S.focus.v) < 1e-3;
@@ -617,7 +619,8 @@ function vFocus() {
     (m ? '<div class="fz-st ' + m.v + '">' + (m.v === 'reject' ? '✕ ' : '✓ ') + esc(m.text) + (m.stars ? ' ' + starText(m.stars) : '') + '</div>' : '') +
     '<div class="fz" id="fz"><img alt="" draggable="false"><div class="fz-load">Decoding the RAW…</div></div>' +
     '<div class="fz-cap">Wheel to zoom · drag to pan · Esc to go back</div>' +
-    (fromCard ? '<div class="foot"><button class="pb2' + (m && m.v === 'reject' ? ' on-rej' : '') + '" data-act="reject">Reject</button>' +
+    (fromCard ? '<div class="foot"><button class="pb2' + (m && m.v === 'reject' ? ' on-rej' : '') + '" data-act="reject">' +
+      (isBurst() ? 'Reject all ' + S.stacks[S.cursor].frames.length : 'Reject') + '</button>' +
       '<button class="pb2 pri' + (m && m.v !== 'reject' ? ' on-keep' : '') + '" data-act="keep">Keep</button></div>' : '');
 }
 function loadFocus() {
@@ -847,10 +850,7 @@ function layoutWide() {
     const strip = $('.pk-strip', view);
     strip.dataset.stripKey = S.day.day + ':picker:' + s.id;
     strip.setAttribute('aria-label', 'Burst frames');
-    for (const b of strip.children) {
-      b.setAttribute('aria-current', b.classList.contains('cur'));
-      b.classList.toggle('excluded', S.picker.m === 'knock' && S.picker.out.has(s.frames[+b.dataset.i].id));
-    }
+    for (const b of strip.children) b.setAttribute('aria-current', b.classList.contains('cur'));
   } else {
     const line = $('.stline', view); if (line) rail.insertBefore(line, body);
     const col = $('.rcol', view); rail.append(col);
@@ -1032,14 +1032,9 @@ function bindPickerSwipe() {
   if (m) bindPhotoClick(m, S.stacks[S.cursor].frames[S.picker.view]);
 }
 function stripView(i) { const n = S.stacks[S.cursor].frames.length; S.picker.view = Math.max(0, Math.min(n - 1, i)); draw(); }
-const pickerSelected = id => S.picker.m === 'knock' ? !S.picker.out.has(id) : S.picker.sel.has(id);
-function selectFrame(id, on) {
-  const pk = S.picker;
-  if (pk.m === 'knock') on ? pk.out.delete(id) : pk.out.add(id);
-  else on ? pk.sel.add(id) : pk.sel.delete(id);
-}
-function savePicker(s) {
-  const keeps = s.frames.filter(f => pickerSelected(f.id));
+function selectFrame(id, on) { if (on) S.picker.sel.add(id); else S.picker.sel.delete(id); }
+function savePicker(s) {   // with nothing ticked, nothing happens
+  const keeps = s.frames.filter(f => S.picker.sel.has(f.id));
   if (keeps.length) keepFrames(s, keeps, S.picker.rate, 'burst');
 }
 function rateFrame(n) {
@@ -1056,7 +1051,7 @@ function showKeys() {
   const el = $('#sheet');
   el.innerHTML = '<div class="sheet key-sheet" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">' +
     '<p class="sh-q">Keyboard shortcuts</p><dl>' + rows.map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('') +
-    '</dl><p class="sh-muted">In a burst: P keeps the frame, X leaves it out, Enter saves.</p>' +
+    '</dl><p class="sh-muted">In a burst: P ticks the frame, X unticks it, Enter keeps what is ticked and rejects the rest.</p>' +
     '<button class="pb2" data-act="close-sheet">Close</button></div>';
   S.sheet = true; el.hidden = false;
   $('[data-act="close-sheet"]', el).focus();
@@ -1135,16 +1130,17 @@ function onKey(e) {
   if (['p', 'k', 'ArrowUp', 'x', 'ArrowDown', 'a', 'b', 'Enter'].includes(k) || /^[1-5]$/.test(k)) {
     e.preventDefault();
     if (['a', 'b', 'Enter'].includes(k) && !isBurst()) return;
+    const at = focusCull ? S.focus.id : null;   // a burst's picker opens on the frame in focus
     if (focusCull) { S.focus = null; S.screen = 'cull'; }
-    if (['p', 'k', 'ArrowUp'].includes(k)) return isBurst() ? openPicker(true) : decide('keep');
+    if (['p', 'k', 'ArrowUp'].includes(k)) return isBurst() ? openPicker(at === null, at) : decide('keep');
     if (['x', 'ArrowDown'].includes(k)) return decide('reject');
     if (/^[1-5]$/.test(k)) {   // on a burst this must not keep one frame and reject the rest unseen
       if (!isBurst()) return decide('keep', +k);
-      openPicker();
+      openPicker(false, at);
       return rateFrame(+k);
     }
     if (k === 'a' && isBurst()) return decide('all');
-    if (k === 'b' || k === 'Enter') return openPicker();
+    if (k === 'b' || k === 'Enter') return openPicker(false, at);
     if (focusCull) draw();
   }
 }
@@ -1235,17 +1231,18 @@ async function resetDo(btn) {
 }
 
 const isBurst = () => { const s = S.stacks[S.cursor]; return !!s && s.frames.length > 1; };
-// A swipe up or Choose opens a burst on its first frame in shooting order: you see every frame
-// before keeping one (the Sharpest was your pick in only 41% of one-pick bursts).
-function openPicker(fromStart) {
+// openPicker, as the iPhone's CullPickerModel: Choose and P open a burst on its sharpest frame
+// (the stack's lead; the strip shows the rest), Enter, B and a number key on the frame the card
+// shows, and the focus check's Keep on the frame in focus (`at`, a frame id). A burst not yet
+// decided opens with nothing ticked; coming back to a decided one, its kept frames start ticked,
+// with their stars. Opening it decides nothing.
+function openPicker(fromStart, at) {
   const s = S.stacks[S.cursor];
   if (!s || s.frames.length < 2) return;
-  const picked = s.frames.filter(f => isPick(S.dec[f.id]));
-  if (s.frames.length <= PICKER_STRIP_MAX) {
-    S.picker = { m: 'strip', sel: new Set(picked.map(f => f.id)), view: fromStart ? 0 : s.frames.indexOf(shown(s)), rate: {} };
-  } else {   // coming back to a decided burst, the frames you didn't keep start out
-    S.picker = { m: 'knock', view: fromStart ? 0 : s.frames.indexOf(shown(s)), rate: {}, out: new Set(picked.length ? s.frames.filter(f => !isPick(S.dec[f.id])).map(f => f.id) : []) };
-  }
+  const picked = s.frames.filter(f => isPick(S.dec[f.id])), rate = {};
+  for (const f of picked) if (S.dec[f.id].stars > 0) rate[f.id] = S.dec[f.id].stars;
+  const open = at != null ? at : fromStart ? s.lead : shown(s).id;
+  S.picker = { sel: new Set(picked.map(f => f.id)), view: Math.max(0, s.frames.findIndex(f => f.id === open)), rate };
   S.screen = 'picker';
   draw();
 }
@@ -1286,7 +1283,11 @@ document.addEventListener('click', e => {
       return decide('keep', n);
     }
     case 'keep': case 'reject':
-      if (S.screen === 'focus') { S.focus = null; S.screen = 'cull'; return a === 'keep' && isBurst() ? openPicker(true) : decide(a); }
+      if (S.screen === 'focus') {   // on a burst, Keep opens the picker on the frame in focus
+        const at = S.focus.id;
+        S.focus = null; S.screen = 'cull';
+        return a === 'keep' && isBurst() ? openPicker(false, at) : decide(a);
+      }
       return decide(a);
     case 'keep-all': return decide('all');
     case 'undo': return undo();
@@ -1311,7 +1312,7 @@ document.addEventListener('click', e => {
     case 'picker': return openPicker();
     case 'close-picker': S.picker = null; S.screen = 'cull'; return draw();
     case 'view': return stripView(+b.dataset.i);
-    case 'tick': { const f = s.frames[S.picker.view]; selectFrame(f.id, !pickerSelected(f.id)); return draw(); }
+    case 'tick': { const f = s.frames[S.picker.view]; selectFrame(f.id, !S.picker.sel.has(f.id)); return draw(); }
     case 'pk-keep': return savePicker(s);
     case 'pk-reject': return decide('reject');
     case 'drop': {

@@ -52,11 +52,12 @@ web app manifest any more (`desktop.js` removes one an older version registered)
 - **Stars:** a row of five under a single photo keeps it with that rating in one tap (5 is Hero).
 - **Stacks** follow the camera where it says: on the Sony, one shutter press is one stack, and
   brackets are exact (`photo_cull.py shotinfo` reads the tags). Other cameras use a 2-second gap.
-- **Bursts:** P or Choose opens the burst picker on its first frame, and a number key on a burst
-  opens it and rates the frame. The rail's 1:1 shows every frame at the lead frame's AF point,
-  and a star row rates the frame you're on; bursts over six open with every frame in (press X on
-  the weak ones). Keeping some frames rejects the others with the note
-  `Burst reject · kept DSC05039`.
+- **Bursts** open in the burst picker, as on the iPhone: a filmstrip whatever the burst's size,
+  opening on the sharpest frame (P or Choose) with nothing ticked, or on the frame you were
+  looking at (Enter, a number key, or Keep on the 1:1 focus check, whose Reject reads "Reject all
+  N"). The rail's 1:1 shows every frame at the lead frame's AF point, and a star row rates the
+  frame you're on and ticks it. "Keep 2 · reject 3" keeps what is ticked and rejects the rest with
+  the note `Burst reject · kept DSC05039, DSC05040`; with nothing ticked, Enter does nothing.
 - **Going back** through a day, each decided stack shows it on the photo: a green, gold or red
   outline, rejects greyed, a line such as "Kept DSC04776 · 1 other rejected ★★★", and the button
   that made the decision pressed.
