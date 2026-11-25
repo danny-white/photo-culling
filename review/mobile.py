@@ -57,6 +57,7 @@ FULL_CACHE_FRAMES = 16   # full decodes kept in memory (~127 MB each for 42 MP, 
 DECODES_AT_ONCE = 2      # decodes someone is waiting for (a 1:1 check, an HD zoom, a save)
 WARM_WORKERS = 2         # decode-ahead: RAWs decoded in the background once their picture is asked for
 WARM_QUEUE = 4           # decode-ahead requests waiting; swiping fast drops the oldest
+WARM_ASK = 4             # photos one /m/api/warm request may name (the card on screen, the next ones)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cull_decisions(
@@ -1817,6 +1818,38 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         resp.headers["Content-Disposition"] = f'{how}; filename="{name}"'
         resp.headers["Cache-Control"] = "max-age=3600"
         return resp
+
+    @bp.route("/api/warm")
+    def api_warm():
+        """Decode-ahead on request. A day saved on the phone (offline days) shows its cards from
+        the phone's own copy, so their pictures never reach this server and nothing starts the
+        RAWs' full decodes: the first 1:1 check of each card then waited ~1.4 s for one. The app
+        names the photo on screen and the next one instead (`ids=12,13`, most urgent first, at
+        most WARM_ASK). Each known RAW is queued for decode-ahead exactly as a picture request
+        would queue it; unknown ids, other files and junk are skipped. 204, no body."""
+        ids = []
+        for part in request.args.get("ids", "").split(",")[:WARM_ASK]:
+            try:
+                rid = int(part)
+            except ValueError:
+                continue
+            if 0 < rid < 2 ** 63 and rid not in ids:
+                ids.append(rid)
+        queued = 0
+        if ids:
+            con = db_ro()
+            try:
+                found = dict(con.execute(
+                    f"SELECT rowid, path FROM images WHERE status='ok' AND rowid IN ({','.join('?' * len(ids))})",
+                    ids).fetchall())
+            finally:
+                con.close()
+            for rid in ids:
+                if rid in found:
+                    warm_decode(found[rid])
+                    queued += 1
+        perf.note(warm=queued)
+        return "", 204
 
     @bp.route("/api/img/<int:rowid>")
     def api_img(rowid):

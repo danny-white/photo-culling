@@ -1277,6 +1277,48 @@ class DecodeAhead(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(len(self.calls), 1)
 
+    def test_warm_starts_the_decodes_a_saved_day_never_asks_for(self):
+        # a day saved on the phone never asks for its cards' pictures; the app names them instead
+        a, b = self.raws[0], self.raws[1]
+        r = self.client.get(f"/m/api/warm?ids={a},{b}")
+        self.assertEqual((r.status_code, r.data), (204, b""))
+        self.assertTrue(self.wait_for_calls(2), "both photos should be decoded ahead")
+        time.sleep(0.6)
+        before = len(self.calls)
+        for rid in (a, b):                                  # the 1:1 checks come from those decodes
+            self.assertEqual(self.client.get(f"/m/api/crop/{rid}?x=0.5&y=0.5&w=64&h=64").status_code, 200)
+        self.assertEqual(len(self.calls), before)
+
+    def test_warm_takes_the_most_urgent_first(self):
+        self.client.get(f"/m/api/warm?ids={self.raws[2]},{self.raws[0]}")
+        self.assertTrue(self.wait_for_calls(1))
+        con = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
+        try:
+            first = con.execute("SELECT filename FROM images WHERE rowid=?", (self.raws[2],)).fetchone()[0]
+        finally:
+            con.close()
+        self.assertEqual(self.calls[0], first)
+
+    def test_warm_skips_what_it_cannot_use(self):
+        con = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
+        try:
+            jpeg = con.execute("SELECT rowid FROM images WHERE status='ok' AND lower(filename) LIKE '%.jpg' LIMIT 1").fetchone()[0]
+        finally:
+            con.close()
+        for query in ("", "ids=", "ids=abc,,-3", f"ids={2 ** 70}", "ids=999999999", f"ids={jpeg}"):
+            with self.subTest(query=query):
+                self.assertEqual(self.client.get(f"/m/api/warm?{query}").status_code, 204)
+        time.sleep(0.5)
+        self.assertEqual(self.calls, [])
+
+    def test_warm_names_at_most_four_photos(self):
+        self.decode_seconds = 0
+        ids = ",".join(str(i) for i in self.many_raws[:6])
+        self.client.get(f"/m/api/warm?ids={ids}")
+        self.wait_for_calls(4)
+        time.sleep(0.5)
+        self.assertEqual(len(self.calls), 4)
+
     def test_thumbnails_do_not_start_a_decode(self):
         self.client.get(f"/m/api/img/{self.raws[2]}?s=thumb")
         time.sleep(0.5)

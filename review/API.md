@@ -307,6 +307,7 @@ per day. Opening a day, both lay the queued taps for it over what `day/<day>` re
 |---|---|
 | `GET /m/api/img/<id>?s=thumb` | JPEG, longest side 320 |
 | `GET /m/api/img/<id>?s=view` | JPEG, longest side 1616 (a RAW's embedded preview) ; asking for it starts the RAW's full decode in the background (decode-ahead) unless `&warm=0` |
+| `GET /m/api/warm?ids=<id>,<id>` | `204`, no body. Queues the named RAWs' full decodes in the background, most urgent first, at most 4, as a `view` picture request would. For cards the phone shows from its own saved copy (offline days), whose pictures never reach the server. Unknown ids, non-RAW files and junk are skipped. |
 | `GET /m/api/export/<id>?s=large` | JPEG, longest side 3000, decoded from the original (about 1.5 s for a cold RAW) |
 | `GET /m/api/crop/<id>?x=&y=&w=&h=` | JPEG crop at full resolution: centre `x`,`y` as fractions of the upright frame, `w`,`h` in source pixels (64–2400). Header `X-Crop-Box: left,top,w,h of WxH` gives the box actually cut and the full size. |
 | `GET /m/api/export/<id>` | Full-size JPEG for saving: a RAW is decoded, with capture time and GPS in its EXIF; a JPEG or HEIC original is sent as it is. `?dl=1` makes it a download. |
