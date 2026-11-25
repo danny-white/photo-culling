@@ -62,6 +62,8 @@ class Server:
         self.state = self.tmp / "state"
         self.state.mkdir()
         self.anno_path = self.tmp / "annotations.db"
+        self.cache = ROOT / "review" / "cache"     # pictures made from the RAWs (gitignored), when not stubbed
+        self.cache.mkdir(exist_ok=True)
         self.write_practice()
 
         def db_ro():
@@ -77,7 +79,7 @@ class Server:
         logging.getLogger("werkzeug").setLevel(logging.ERROR)
         app = Flask(__name__)
         app.register_blueprint(mobile.make_blueprint(
-            db_ro=db_ro, anno=anno, pc=pc, cache_dir=ROOT / "review" / "cache",
+            db_ro=db_ro, anno=anno, pc=pc, cache_dir=self.cache,
             static_dir=Path(os.environ.get("CB_WEB_STATIC", ROOT / "review" / "static" / "m")), state_dir=self.state,
             inbox=self.inbox, check_mount=False, ingest_log=self.tmp / "ingest.log",
             ollama_url="http://127.0.0.1:9"))   # nothing listens there: search never reaches Ollama

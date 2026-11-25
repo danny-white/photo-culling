@@ -1,6 +1,7 @@
 """A desktop pass through the app with keys and the mouse, the gallery and Practice, at 1280 px.
 Any console error or uncaught exception fails the test (BrowserCase)."""
 import unittest
+from pathlib import Path
 
 from webharness import DAY, BrowserCase
 
@@ -120,6 +121,17 @@ class GalleryAndPractice(BrowserCase):
         self.assertIn("Downloads folder", self.text(".p-howto"))
         self.assertNotIn("Safari", self.text(".practice-detail"))
         self.assertTrue(page.get_attribute(".p-download", "href").endswith("?s=original"))
+
+
+@unittest.skipUnless(Path("/mnt/passport/Pictures").is_dir(), "needs the NAS for the real pictures")
+class RealPictures(BrowserCase):
+    real_pictures = True
+
+    def test_a_card_shows_the_real_photo(self):
+        self.open_day()
+        self.page.wait_for_function("[...document.querySelectorAll('.card img, .day-filmstrip img')].slice(0, 4)"
+                                    ".every(i => i.complete && i.naturalWidth > 0)", timeout=60000)
+        self.assertGreater(self.page.eval_on_selector(".card img", "i => i.naturalWidth"), 600)
 
 
 if __name__ == "__main__":
