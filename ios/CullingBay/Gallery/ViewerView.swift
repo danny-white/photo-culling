@@ -261,7 +261,9 @@ private struct ViewerButton: View {
         Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: systemImage).font(.title3)
-                Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.7)
+                // One size for the whole row: scaling each label to fit made the same word a
+                // different size from one photo to the next, as the row gained or lost a button.
+                Text(title).font(.caption2).lineLimit(1)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)

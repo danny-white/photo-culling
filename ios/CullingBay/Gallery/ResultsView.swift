@@ -126,7 +126,7 @@ struct ResultsView: View {
                 let on = !feed.best
                 Task { await feed.setBest(on) }
             }
-            FilterChip(title: "1 per burst", isOn: feed.bursts) {
+            FilterChip(title: "1/burst", spoken: "1 per burst", isOn: feed.bursts) {
                 startTiming()
                 let on = !feed.bursts
                 Task { await feed.setBursts(on) }
@@ -186,16 +186,19 @@ struct ResultsView: View {
 /// A small on/off button for the toolbar.
 private struct FilterChip: View {
     let title: String
+    /// What VoiceOver says, when the chip is too short to spell it out.
+    var spoken: String?
     let isOn: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(title).font(.footnote.weight(isOn ? .bold : .regular))
+            Text(title).font(.footnote.weight(isOn ? .bold : .regular)).lineLimit(1).fixedSize()
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
         .tint(isOn ? Color.accentColor : Color.gray)
+        .accessibilityLabel(spoken ?? title)
         .accessibilityAddTraits(.isToggle)
         .accessibilityValue(isOn ? "On" : "Off")
     }
