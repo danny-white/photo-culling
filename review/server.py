@@ -14,7 +14,8 @@ its own state in a separate annotations DB, so there's zero write-contention wit
         --db trial_out/trial.db --log trial_out/run.log \
         --folders /mnt/passport/Pictures/2024 /mnt/passport/Pictures/2025
 
-Then open http://127.0.0.1:8000
+Then open http://127.0.0.1:8000. It is served by waitress (connections stay open, 16 threads);
+--dev uses Flask's development server instead, for debugging.
 """
 import argparse
 import hashlib
@@ -34,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
+import waitress
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 # Reuse the culler's image loading / thresholds.
@@ -50,6 +52,13 @@ CACHE.mkdir(exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
 log = logging.getLogger(__name__)
+
+# How the app is served (waitress, which keeps connections open). The phone fires many picture
+# requests at once, and a 1:1 crop can hold a thread for 1-2.5 s on a NAS read; the old
+# development server gave every connection its own thread. 16 is well above what the app and
+# the web pages open at once (a handful of connections each), so a decide never queues behind
+# a burst of slow crops. Idle connections are dropped after a minute.
+WAITRESS = {"threads": 16, "channel_timeout": 60, "connection_limit": 200}
 
 # ---- config (populated in main) ----
 CFG = {
@@ -481,6 +490,9 @@ def main():
     ap.add_argument("--folders", nargs="*", default=[], help="source folders, to enable resume/redrive from the UI")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--dev", action="store_true",
+                    help="serve with Flask's development server (a thread per connection, no keep-alive) "
+                         "instead of waitress, for debugging.")
     ap.add_argument("--perf-log", type=Path, default=None,
                     help="Where request timings go, one JSON line each (default: perf.jsonl next to --db).")
     ap.add_argument("--embed-base-url", default="http://localhost:11434/v1",
@@ -502,7 +514,10 @@ def main():
         a.server_pidfile.write_text(str(os.getpid()))
         print(f"Review server PID {os.getpid()} -> {a.server_pidfile}")
     print(f"Review UI on http://{a.host}:{a.port}  (db={a.db}, annotations={CFG['annotations']})")
-    app.run(host=a.host, port=a.port, threaded=True)
+    if a.dev:
+        app.run(host=a.host, port=a.port, threaded=True)
+    else:
+        waitress.serve(app, host=a.host, port=a.port, **WAITRESS)
 
 
 if __name__ == "__main__":
