@@ -219,9 +219,13 @@ def shooting_hours(rows: list[dict]) -> float:
     return sum(min(b - a, SHOOTING_GAP_CAP_S) for a, b in zip(ts, ts[1:])) / 3600
 
 
-def keep_budget(rows: list[dict]) -> int:
-    """The soft limit: KEEP_PER_HOUR stacks per hour of shooting, at least KEEP_FLOOR."""
-    return max(KEEP_FLOOR, math.ceil(KEEP_PER_HOUR * shooting_hours(rows)))
+def keep_budget(rows: list[dict], stack_count: int | None = None) -> int:
+    """The soft limit: KEEP_PER_HOUR stacks per hour of shooting, at least KEEP_FLOOR, and never more
+    than the day has stacks (a one-photo day asks for one, not five), so at least 1 for any day
+    with photos. stack_count: the day's stacks, when the caller has built them already."""
+    if stack_count is None:
+        stack_count = len(build_stacks(rows))
+    return min(stack_count, max(KEEP_FLOOR, math.ceil(KEEP_PER_HOUR * shooting_hours(rows))))
 
 
 def build_stacks(rows: list[dict]) -> list[dict]:

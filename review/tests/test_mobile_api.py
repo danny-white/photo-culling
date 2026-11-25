@@ -108,6 +108,16 @@ class MobileApi(unittest.TestCase):
         self.assertTrue(all(f["decision"] is None for s in st for f in s["frames"]))
         self.assertNotIn("path", st[0]["frames"][0])            # library paths stay on the server
 
+    def test_a_small_day_never_asks_to_keep_more_stacks_than_it_has(self):
+        small = [d for d in self.client.get("/m/api/days").get_json()["days"] if 0 < d["stacks"] < 5]
+        if not small:
+            self.skipTest("no day with fewer than five stacks in this library")
+        for d in small[:6]:
+            with self.subTest(d["day"]):
+                body = self.client.get(f"/m/api/day/{d['day']}").get_json()
+                self.assertEqual(len(body["stacks"]), d["stacks"])
+                self.assertEqual(body["budget"]["stacks"], d["stacks"])   # not the floor of 5
+
     H = {"X-Culling-Bay": "1"}
 
     def frames(self):
