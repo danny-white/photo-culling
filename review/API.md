@@ -13,7 +13,9 @@ cacheable for a day (`max-age=86400`) and support `If-Modified-Since`.
 
 **Timing.** Every response has a `Server-Timing` header (`total;dur=12.3, full_decode;dur=...`,
 facts as `cache;desc="hit"`). The app can report its own measurements to `POST /m/api/perf`
-(see `review/perf.py`).
+(see `review/perf.py`). The server tells the app's lines from the web pages' by the User-Agent
+URLSession sends (`CullingBay/<build> CFNetwork/...`): its timing lines get `app: "ios"`, and
+its reports are logged as `device: "iphone"`, `app: "ios"`.
 
 `?` after a type means it can be `null`.
 

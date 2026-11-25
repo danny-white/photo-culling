@@ -10,12 +10,15 @@ Each line in the log (trial_out/perf.jsonl by default, rotated at 20 MB, three k
            a big picture over Tailscale shows up here rather than in ms
   bytes    response size, when known
   client   the caller's address (100.91.65.36 is the phone on the tailnet)
+  app      "ios" when the request came from the native iPhone app (its User-Agent is CFNetwork's,
+           not Safari's); left out for everything else
   stages   {name: ms} for the parts a handler timed with stage(), e.g. decode or encode
   attrs    facts about the request set with note(), e.g. cache=hit or miss; error=<reason> when a
            photo wouldn't decode (the 415 routes), which the journal has in full as a warning
 
-The phone pages send their own measurements to /m/api/perf, which logs them through
-client_lines() with kind "client". review/perf_report.py summarises the file.
+The phone pages and the native app send their own measurements to /m/api/perf, which logs them
+through client_lines() with kind "client", a device (iphone, ipad, android, desktop) and an app
+("ios" for the native app, "web" for a browser). review/perf_report.py summarises the file.
 
 stage() and note() do nothing outside a request, so modules like search.py can call them
 from tests and scripts as well.
@@ -23,6 +26,7 @@ from tests and scripts as well.
 import json
 import logging
 import logging.handlers
+import re
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -92,7 +96,8 @@ def _line(p, status, ms, size) -> dict:
             "kind": "server", "method": request.method, "route": rule,
             "path": request.path + ("?" + qs if qs else ""), "status": status,
             "ms": round(ms, 1), "bytes": size, "client": request.remote_addr,
-            "stages": {k: round(v, 1) for k, v in p["stages"].items()}, "attrs": p["attrs"]}
+            "stages": {k: round(v, 1) for k, v in p["stages"].items()}, "attrs": p["attrs"],
+            **({"app": "ios"} if classify_agent(request.headers.get("User-Agent", ""))[1] == "ios" else {})}
 
 
 def _write(line: dict) -> None:
@@ -127,16 +132,29 @@ CLIENT_FIELDS = {"type": str, "name": str, "ms": (int, float), "bytes": (int, fl
                  "screen": str, "detail": str, "n": int}
 
 
+NATIVE_APP_AGENT = re.compile(r"^CullingBay/|CFNetwork/")   # CullingBay/110 CFNetwork/1494.0.7 Darwin/23.4.0
+
+
+def classify_agent(agent: str) -> tuple[str, str]:
+    """(device, app) for a User-Agent. The native app's is URLSession's own, "<app>/<build>
+    CFNetwork/... Darwin/...", with nothing about iPhone in it: ("iphone", "ios"). A browser is
+    ("iphone" | "ipad" | "android" | "desktop", "web"), by what its agent string says."""
+    if NATIVE_APP_AGENT.search(agent):
+        return "iphone", "ios"
+    device = "iphone" if "iPhone" in agent else "ipad" if "iPad" in agent else "android" if "Android" in agent else "desktop"
+    return device, "web"
+
+
 def client_lines(items: list, client: str, agent: str) -> int:
     """Log measurements the phone pages sent. Only known fields of the right type are kept, so
     a page can't write arbitrary text into the log. Returns how many were logged."""
     n = 0
     now = datetime.now().isoformat(timespec="milliseconds")
-    device = "iphone" if "iPhone" in agent else "ipad" if "iPad" in agent else "android" if "Android" in agent else "desktop"
+    device, app = classify_agent(agent)
     for it in items[:500]:
         if not isinstance(it, dict):
             continue
-        line = {"ts": now, "kind": "client", "client": client, "device": device}
+        line = {"ts": now, "kind": "client", "client": client, "device": device, "app": app}
         for k, typ in CLIENT_FIELDS.items():
             v = it.get(k)
             if isinstance(v, typ) and not isinstance(v, bool):

@@ -3,6 +3,7 @@
     ./venv/bin/python review/perf_report.py              # the last 24 hours
     ./venv/bin/python review/perf_report.py --hours 168  # the last week
     ./venv/bin/python review/perf_report.py --route img  # routes containing "img"
+    ./venv/bin/python review/perf_report.py --app ios    # only the native iPhone app's lines
 
 Three tables:
   server  per route: requests, median / 95th percentile / slowest handler time, median time
@@ -10,7 +11,9 @@ Three tables:
   phone   per measurement the phone pages sent: fetches grouped by kind, and the moments you
           feel (card_photo, viewer_photo, day_open, ...); for fetches, the median time waiting
           in the browser's queue, to the first byte (server plus round trip), and downloading,
-          and how many the browser answered from its own cache
+          and how many the browser answered from its own cache. Lines say which app sent them
+          (ios, the native app; web, a browser), and the table splits by it once the log has any;
+          lines from before the log recorded that show "?"
   slowest the ten slowest server requests, with their stages
 """
 import argparse
@@ -72,13 +75,18 @@ def main():
     ap.add_argument("--log", type=Path, default=DEFAULT_LOG)
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--route", default="", help="only server routes / phone kinds containing this text")
+    ap.add_argument("--app", choices=("ios", "web"),
+                    help="only lines from the native iPhone app, or from a browser (older lines don't say, so they drop out)")
     a = ap.parse_args()
     since = datetime.now() - timedelta(hours=a.hours)
     paths = [a.log.with_name(a.log.name + f".{i}") for i in (3, 2, 1)] + [a.log]
     lines = list(load(paths, since))
+    if a.app:
+        lines = [x for x in lines if x.get("app") == a.app]
     server = [x for x in lines if x.get("kind") == "server" and a.route in (x.get("route") or "")]
     client = [x for x in lines if x.get("kind") == "client"]
-    print(f"{len(server)} server requests and {len(client)} phone measurements since {since:%Y-%m-%d %H:%M}\n")
+    print(f"{len(server)} server requests and {len(client)} phone measurements since {since:%Y-%m-%d %H:%M}"
+          + (f", from the {'iPhone app' if a.app == 'ios' else 'web pages'} only" if a.app else "") + "\n")
 
     by_route = defaultdict(list)
     for x in server:
@@ -112,12 +120,13 @@ def main():
         print()
 
     groups = defaultdict(list)
+    split_by_app = any(x.get("app") for x in client)
     for x in client:
         key = "fetch " + fetch_kind(x.get("name")) if x["type"] == "fetch" else x["type"]
         if a.route in key:
-            groups[key].append(x)
+            groups[(key, (x.get("app") or "?") if split_by_app else "")].append(x)
     rows = []
-    for key, xs in sorted(groups.items(), key=lambda kv: (not kv[0].startswith("fetch"), kv[0])):
+    for (key, app), xs in sorted(groups.items(), key=lambda kv: (not kv[0][0].startswith("fetch"), kv[0])):
         ms = [x["ms"] for x in xs]
         live = [x for x in xs if x.get("detail") == "network"]
         split = lambda k: fmt(pct([x[k] for x in live if k in x], .5)) if any(k in x for x in live) else "-"
@@ -126,11 +135,13 @@ def main():
         waited = sum(1 for x in xs if x.get("detail") == "waited")
         note = (f"{cached} from browser cache" if key.startswith("fetch") and cached else
                 f"{waited} waited, {len(xs) - waited} prefetched" if key == "card_photo" else "")
-        rows.append([key, len(xs), fmt(pct(ms, .5)), fmt(pct(ms, .95)), fmt(max(ms)),
+        rows.append([key] + ([app] if split_by_app else []) + [
+                     len(xs), fmt(pct(ms, .5)), fmt(pct(ms, .95)), fmt(max(ms)),
                      split("wait_ms"), split("ttfb_ms"), split("dl_ms"), srv, note])
     if rows:
         print("PHONE (as measured on the device; the last four columns are medians for fetches)")
-        print(table(rows, ["measurement", "n", "p50", "p95", "max", "waiting", "first byte", "download", "server", ""]))
+        print(table(rows, ["measurement"] + (["app"] if split_by_app else [])
+                    + ["n", "p50", "p95", "max", "waiting", "first byte", "download", "server", ""]))
         print()
 
     slow = sorted(server, key=lambda x: -x["ms"])[:10]
