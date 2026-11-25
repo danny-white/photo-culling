@@ -5,6 +5,7 @@ the real model is never called. Run from the repo root:
 """
 import contextlib
 import io
+import os
 import sqlite3
 import sys
 import tempfile
@@ -160,6 +161,73 @@ class EmptyFiles(Fixture):
         # --redrive still visits every error row; it now says plainly why this one can't be read.
         self.run_cli(self.a, extra=["--redrive"])
         self.assertEqual(self.rows()["old.CR3"]["error_class"], "empty")
+
+
+class RestoredFiles(Fixture):
+    """A file replaced on the NAS (DAN-126: another copy of an empty original, put back under the
+    same name and camera date) is processed again and gets its full set of tries."""
+
+    def replace(self, path, size, keep_mtime=True):
+        st = path.stat()
+        path.write_bytes(b"y" * size)
+        if keep_mtime:
+            os.utime(path, (st.st_mtime, st.st_mtime))
+
+    def test_an_empty_file_replaced_by_a_real_one_is_reprocessed_from_attempt_1(self):
+        p = self.put(self.a, "IMG.CR3", size=0)
+        self.run_cli(self.a)
+        row = self.rows()["IMG.CR3"]
+        self.assertEqual((row["status"], row["error_class"], row["attempts"]), ("error", "empty", 1))
+        self.replace(p, 50)                                      # same name, same mtime, real bytes
+        code, out, _ = self.run_cli(self.a)                      # no flags: it is pending again
+        self.assertEqual(code, 0)
+        row = self.rows()["IMG.CR3"]
+        self.assertEqual((row["status"], row["attempts"], row["size"]), ("ok", 1, 50))
+        self.assertIsNone(row["error_class"])
+        self.assertEqual(self.calls, ["IMG.CR3"])
+
+    def test_register_resets_attempts_and_the_attempt_time(self):
+        p = self.put(self.a, "IMG.ARW")
+        self.register(self.a)
+        self.set_row(p, status="error", error_class="io", attempts=pc.MAX_ATTEMPTS, last_attempt_at="2026-01-01T00:00:00+00:00")
+        self.replace(p, 77)
+        self.register(self.a)
+        row = self.rows()["IMG.ARW"]
+        self.assertEqual((row["status"], row["attempts"], row["size"]), ("pending", 0, 77))
+        self.assertIsNone(row["last_attempt_at"])
+        self.assertIsNone(row["error_class"])
+        self.assertIsNone(row["error_msg"])
+
+    def test_a_replaced_file_that_fails_again_starts_counting_from_1(self):
+        p = self.put(self.a, "IMG.ARW")
+        self.register(self.a)
+        self.set_row(p, status="error", error_class="model", attempts=pc.MAX_ATTEMPTS)    # out of tries
+        self.replace(p, 77)
+        self.script = [ValueError("bad json")]
+        self.run_cli(self.a)
+        row = self.rows()["IMG.ARW"]
+        self.assertEqual((row["status"], row["attempts"]), ("error", 1))        # not 5
+        self.script = [ValueError("bad json")]
+        self.run_cli(self.a, extra=["--retry-failed"])                          # and it is retryable again
+        self.assertEqual(self.rows()["IMG.ARW"]["attempts"], 2)
+
+    def test_a_file_that_did_not_change_keeps_its_attempts(self):
+        p = self.put(self.a, "IMG.ARW")
+        self.register(self.a)
+        self.set_row(p, status="error", error_class="model", attempts=3, last_attempt_at="2026-01-01T00:00:00+00:00")
+        self.register(self.a)                                                   # same size and mtime
+        row = self.rows()["IMG.ARW"]
+        self.assertEqual((row["status"], row["attempts"], row["last_attempt_at"]),
+                         ("error", 3, "2026-01-01T00:00:00+00:00"))
+
+    def test_a_file_with_a_new_mtime_alone_counts_as_changed(self):
+        p = self.put(self.a, "IMG.ARW")
+        self.register(self.a)
+        self.set_row(p, status="error", error_class="model", attempts=3)
+        os.utime(p, (p.stat().st_mtime + 100, p.stat().st_mtime + 100))
+        self.register(self.a)
+        row = self.rows()["IMG.ARW"]
+        self.assertEqual((row["status"], row["attempts"]), ("pending", 0))
 
 
 class OllamaDown(Fixture):

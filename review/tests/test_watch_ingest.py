@@ -41,6 +41,8 @@ case "$cmd" in
       shift
     done
     [ -e "$STUB_DIR/folder-state.fail" ] && exit 1
+    # folder-state.fail-folder: the per-folder counts fail, the list of retryable folders does not
+    [ -e "$STUB_DIR/folder-state.fail-folder" ] && [ "$retry_only" = 0 ] && exit 1
     if [ "$retry_only" = 1 ]; then
       [ -f "$STUB_DIR/folder-state.tsv" ] && awk -F'\t' '$5 > 0 { print $1 }' "$STUB_DIR/folder-state.tsv"
     else
@@ -60,6 +62,8 @@ case "$cmd" in
     [ -f "$STUB_DIR/run.ok" ] && for _ in $(seq "$(cat "$STUB_DIR/run.ok")"); do
       sqlite3 "$DB" "INSERT INTO images VALUES('ok')"
     done
+    # what the run did to the folder's rows: after-run.tsv becomes the folder-state answer
+    [ -f "$STUB_DIR/after-run.tsv" ] && cp "$STUB_DIR/after-run.tsv" "$STUB_DIR/folder-state.tsv"
     ;;
 esac
 [ -f "$STUB_DIR/rc.$cmd" ] && exit "$(cat "$STUB_DIR/rc.$cmd")"
@@ -121,9 +125,9 @@ class WatcherCase(unittest.TestCase):
         self.touch_dir(d, age if dir_age is None else dir_age)
         return d
 
-    def add_file(self, d, name, age):
+    def add_file(self, d, name, age, size=10):
         p = d / name
-        p.write_bytes(b"x" * 10)
+        p.write_bytes(b"x" * size)
         t = self.now - age
         os.utime(p, (t, t))
         return p
@@ -137,12 +141,24 @@ class WatcherCase(unittest.TestCase):
         of the files photo_cull.py would register."""
         photos = [p for p in d.rglob("*") if p.is_file() and not p.name.startswith(".")
                   and p.suffix.lower() in pc.ALL_EXTENSIONS]
-        return "v2 %d %d %d" % (int(d.stat().st_mtime), max(int(p.stat().st_mtime) for p in photos), len(photos))
+        return "v2 %d %d %d %d" % (int(d.stat().st_mtime), max(int(p.stat().st_mtime) for p in photos), len(photos),
+                                   sum(p.stat().st_size for p in photos))
 
     def set_state(self, d, disk, rows, pending=0, retryable=0, unreadable=0):
         self.states[str(d)] = (disk, rows, pending, retryable, unreadable)
         lines = ["\t".join([f, *map(str, v)]) for f, v in self.states.items()]
         (self.stub / "folder-state.tsv").write_text("\n".join(lines) + "\n")
+
+    def set_after_run(self, d, disk, rows, pending=0, retryable=0, unreadable=0):
+        """What folder-state will say once `run` has been called (the run's effect on the rows)."""
+        after = dict(self.states)
+        after[str(d)] = (disk, rows, pending, retryable, unreadable)
+        lines = ["\t".join([f, *map(str, v)]) for f, v in after.items()]
+        (self.stub / "after-run.tsv").write_text("\n".join(lines) + "\n")
+
+    def step_names(self):
+        """The photo_cull commands called, in order, as `run`, `export`, `folder-state` ..."""
+        return [re.sub(r"^photo_cull\.py ", "", c).split()[0] for c in self.calls()]
 
     def marker(self, d):
         return self.markers / (d.name + ".done")
@@ -293,7 +309,7 @@ class LateFiles(WatcherCase):
         self.assertEqual(self.runs(), ["2026-06-27"])
         self.assertNotEqual(self.marker_text(d), first)
         self.assertEqual(self.marker_text(d), self.signature(d))
-        self.assertTrue(self.marker_text(d).endswith(" 4"))
+        self.assertEqual(self.marker_text(d).split()[3], "4")
         self.clear_calls()
         self.poll()
         self.assertEqual(self.runs(), [])
@@ -588,7 +604,7 @@ class JunkFiles(WatcherCase):
                 self.touch_dir(d, 1200)
                 self.poll()
                 self.assertEqual(self.runs(), ["2026-10-01"])
-                self.assertTrue(self.marker_text(d).endswith(" 4"))
+                self.assertEqual(self.marker_text(d).split()[3], "4")
 
     def test_a_removed_photo_does_reprocess_it(self):
         d = self.finished()
@@ -625,7 +641,7 @@ class JunkFiles(WatcherCase):
         self.poll()
         self.assertEqual(self.runs(), [])
         # the folder's mtime is noted, so later polls skip it by a stat instead of a find
-        self.assertEqual(self.marker_text(d), f"v2 {int(d.stat().st_mtime)} 0 0")
+        self.assertEqual(self.marker_text(d), f"v2 {int(d.stat().st_mtime)} 0 0 0")
         self.clear_calls()
         self.poll()
         self.assertEqual(self.finds(), [])
@@ -634,7 +650,7 @@ class JunkFiles(WatcherCase):
         self.touch_dir(d, 1200)
         self.poll()
         self.assertEqual(self.runs(), ["2026-10-05"])
-        self.assertTrue(self.marker_text(d).endswith(" 1"))
+        self.assertEqual(self.marker_text(d).split()[3], "1")
 
     def test_a_folder_with_no_photos_but_failed_rows_is_still_run(self):
         d = self.lib / "2026" / "2026-10-05"
@@ -917,6 +933,248 @@ class BatchEmail(WatcherCase):
         self.folder("2026-10-01")
         self.poll(DRY_RUN=1)
         self.assertEqual(self.mails(), [])
+
+
+class ReplacedInPlace(WatcherCase):
+    """A photo replaced by a different file of the same name and camera date (DAN-126: restoring
+    the empty originals) changes neither the photo count nor the newest photo, only the bytes."""
+
+    def replace(self, d, name="IMG_0001.ARW", size=25):
+        p = d / name
+        st = p.stat()
+        p.write_bytes(b"y" * size)
+        os.utime(p, (st.st_mtime, st.st_mtime))          # the same camera date
+        return p
+
+    def test_the_marker_holds_the_total_bytes_of_the_photos_only(self):
+        d = self.folder("2026-10-01", n=3)               # 3 x 10 bytes
+        self.add_file(d, "IMG_0000.xmp", 7200, size=999)
+        self.add_file(d, ".DS_Store", 7200, size=999)
+        self.touch_dir(d, 7200)
+        self.poll()
+        self.assertEqual(self.marker_text(d).split()[3:], ["3", "30"])
+        self.assertEqual(self.marker_text(d), self.signature(d))
+
+    def test_a_replaced_photo_is_reprocessed_when_the_folder_mtime_moves(self):
+        d = self.folder("2026-10-01", n=3)
+        self.poll()
+        self.clear_calls()
+        self.replace(d)
+        self.touch_dir(d, 1200)                          # a Finder replace usually does move it
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        self.assertEqual(self.marker_text(d).split()[3:], ["3", "45"])
+
+    def test_a_replaced_photo_with_an_unmoved_folder_mtime_is_found_by_the_daily_pass(self):
+        d = self.folder("2026-10-01", n=3)
+        self.poll()
+        before = d.stat().st_mtime
+        self.replace(d)
+        os.utime(d, (before, before))                    # an overwrite in place leaves the folder's mtime alone
+        self.clear_calls()
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.age_stamp(".last-full-scan", 25 * 3600)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+
+    def test_a_marker_without_the_byte_total_is_upgraded_not_reprocessed(self):
+        d = self.folder("2026-10-01", n=3)
+        sig = self.signature(d).split()
+        self.set_marker(d, " ".join(sig[:4]))            # v2 <dir mtime> <newest> <count>
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(self.marker_text(d), self.signature(d))
+        self.assertEqual(self.log_lines("processing "), [])
+
+    def test_a_three_field_marker_with_an_older_folder_mtime_is_upgraded_too(self):
+        d = self.folder("2026-10-01", n=3)
+        sig = self.signature(d).split()
+        self.set_marker(d, f"v2 {int(sig[1]) - 5000} {sig[2]} {sig[3]}")
+        self.poll()
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(self.marker_text(d), self.signature(d))
+
+    def test_a_three_field_marker_naming_other_photos_is_reprocessed(self):
+        d = self.folder("2026-10-01", n=3)
+        sig = self.signature(d).split()
+        self.set_marker(d, f"v2 {sig[1]} {sig[2]} 2")    # one photo fewer than there are
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+
+    def test_a_three_field_marker_with_retryable_rows_is_a_retry_only_visit(self):
+        d = self.folder("2026-10-01", n=3)
+        sig = self.signature(d).split()
+        self.set_marker(d, " ".join(sig[:4]))
+        self.set_state(d, 3, 3, retryable=1)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        self.assertNotIn("export", self.step_names())
+
+
+class RetryOnly(WatcherCase):
+    """A visit whose only reason is failed photos with tries left runs the retries and sends the
+    folder to Lightroom again only if a photo was recovered."""
+    STEPS = ("embed", "embed-images", "geotag", "shotinfo", "daysum", "review/previews.py", "export")
+
+    def finished_with_retries(self, rows=3, retryable=2):
+        """A finished folder (current marker) that then gets failed rows again."""
+        d = self.folder("2026-10-01", n=rows)
+        self.poll()
+        self.set_state(d, rows, rows, retryable=retryable)
+        self.clear_calls()
+        return d
+
+    def test_nothing_recovered_means_no_steps_and_no_export(self):
+        d = self.finished_with_retries()
+        self.set_after_run(d, 3, 3, retryable=2)
+        before = self.marker_text(d)
+        self.poll()
+        names = self.step_names()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        self.assertIn(f"photo_cull.py run {d} --db {self.db} --retry-failed", self.calls())
+        self.assertFalse([n for n in names if n in self.STEPS], names)
+        self.assertEqual(self.log_lines("retry pending for "),
+                         [f"retry pending for {d}: 2 photos (none recovered this time)"])
+        self.assertEqual(self.log_lines("done: ")[1:], [])               # no second done line
+        self.assertEqual(self.marker_text(d), before)
+        self.assertEqual(len(self.mails()), 1)                           # only the first visit's
+
+    def test_a_recovered_photo_runs_the_steps_and_the_export(self):
+        d = self.finished_with_retries()
+        self.set_after_run(d, 3, 3, retryable=1)                        # one more is ok now
+        self.poll()
+        names = self.step_names()
+        for step in self.STEPS:
+            self.assertIn(step, names)
+        self.assertEqual(self.log_lines("retry pending for "), [f"retry pending for {d}: 1 photos"])
+
+    def test_retries_running_out_without_a_recovery_finish_the_folder_without_an_export(self):
+        d = self.finished_with_retries(retryable=1)
+        self.set_after_run(d, 3, 3, retryable=0, unreadable=1)          # the last try failed too
+        self.poll()
+        self.assertNotIn("export", self.step_names())
+        self.assertEqual(len(self.log_lines("done: ")), 2)               # the first visit's and this one
+        self.assertEqual(self.marker_text(d), self.signature(d))
+        self.assertEqual(self.log_lines("retry pending for "), [])
+        self.clear_calls()
+        self.poll()
+        self.assertEqual(self.runs(), [])
+
+    def test_a_recovery_that_also_runs_out_the_retries_exports_and_finishes(self):
+        d = self.finished_with_retries(retryable=2)
+        self.set_after_run(d, 3, 3, retryable=0, unreadable=1)          # one recovered, one given up
+        self.poll()
+        self.assertIn("export", self.step_names())
+        self.assertEqual(len(self.log_lines("done: ")), 2)
+
+    def test_a_new_folder_is_always_a_full_visit(self):
+        d = self.folder("2026-10-01")
+        self.set_state(d, 3, 3, retryable=2)
+        self.set_after_run(d, 3, 3, retryable=2)                        # nothing will be recovered
+        self.poll()
+        self.assertIn("export", self.step_names())
+
+    def test_a_changed_folder_is_a_full_visit_even_if_nothing_is_recovered(self):
+        d = self.finished_with_retries()
+        self.set_after_run(d, 4, 4, retryable=2)
+        self.add_file(d, "late.ARW", 6 * 3600)                          # a new photo as well
+        self.touch_dir(d, 1200)
+        self.poll()
+        self.assertIn("export", self.step_names())
+
+    def test_an_unfinished_new_folder_is_retry_only_from_its_second_visit(self):
+        d = self.folder("2026-10-01")
+        self.set_state(d, 3, 3, retryable=2)
+        self.poll()                                                     # first visit: everything
+        self.assertIn("export", self.step_names())
+        visited = (self.markers / "2026-10-01.visited")
+        self.assertEqual(visited.read_text().strip(), self.signature(d))
+        self.assertIsNone(self.marker_text(d))
+        self.clear_calls()
+        self.set_after_run(d, 3, 3, retryable=2)
+        self.poll()                                                     # second: nothing recovered
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        self.assertNotIn("export", self.step_names())
+        self.assertEqual(self.log_lines("retry pending for ")[-1], f"retry pending for {d}: 2 photos (none recovered this time)")
+        self.clear_calls()
+        self.set_after_run(d, 3, 3, retryable=1)
+        self.poll()                                                     # third: one recovered
+        self.assertIn("export", self.step_names())
+        self.clear_calls()
+        self.set_after_run(d, 3, 3, retryable=0, unreadable=1)
+        self.poll()                                                     # fourth: tries run out
+        self.assertNotIn("export", self.step_names())
+        self.assertEqual(self.marker_text(d), self.signature(d))
+        self.assertFalse(visited.exists())                              # settled: nothing left to remember
+        self.assertEqual(len(self.log_lines("done: ")), 1)
+
+    def test_an_unfinished_folder_that_gains_a_photo_is_a_full_visit_again(self):
+        d = self.folder("2026-10-01")
+        self.set_state(d, 3, 3, retryable=2)
+        self.poll()
+        self.add_file(d, "late.ARW", 6 * 3600)
+        self.touch_dir(d, 1200)
+        self.clear_calls()
+        self.set_after_run(d, 4, 4, retryable=2)
+        self.poll()
+        self.assertIn("export", self.step_names())
+
+    def test_a_dir_mtime_only_change_with_retryable_rows_is_retry_only(self):
+        d = self.finished_with_retries()
+        self.add_file(d, ".DS_Store", 3000)
+        self.touch_dir(d, 1200)
+        self.set_after_run(d, 3, 3, retryable=2)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        self.assertNotIn("export", self.step_names())
+
+    def test_if_the_counts_cannot_be_read_it_is_a_full_visit(self):
+        d = self.finished_with_retries()
+        (self.stub / "folder-state.fail-folder").write_text("")
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-10-01"])
+        self.assertIn("export", self.step_names())                      # can't tell, so do everything
+        self.assertEqual(self.log_lines("retry pending for "),
+                         [f"retry pending for {d}: could not read the folder's state; will look again next poll"])
+
+    def test_old_markers_with_equal_counts_and_retryable_rows_are_retry_only(self):
+        # The first live poll: 2011-12-22 and the like have failed photos, all registered.
+        old = self.folder("2026-02-02", n=4)
+        newest = max(int(p.stat().st_mtime) for p in old.iterdir())
+        self.set_marker(old, f"{newest}.0000000000")
+        self.set_state(old, 4, 4, retryable=1)
+        self.set_after_run(old, 4, 4, retryable=1)
+        self.poll()
+        self.assertEqual(self.runs(), ["2026-02-02"])
+        self.assertNotIn("export", self.step_names())
+        self.assertEqual(self.log_lines("retry pending for "), [f"retry pending for {old}: 1 photos (none recovered this time)"])
+
+    def test_old_markers_whose_counts_differ_get_the_full_visit(self):
+        # 2026-06-27: 21 photos on disk, 12 rows.
+        d = self.folder("2026-06-27", n=21)
+        newest = max(int(p.stat().st_mtime) for p in d.iterdir())
+        self.set_marker(d, f"{newest}.0000000000")
+        self.set_state(d, 21, 12, retryable=7)
+        self.set_after_run(d, 21, 21, retryable=7)
+        self.poll()
+        self.assertIn("export", self.step_names())
+
+    def test_a_dry_run_says_which_kind_of_visit_each_folder_gets(self):
+        retry = self.folder("2026-02-02", n=4)
+        newest = max(int(p.stat().st_mtime) for p in retry.iterdir())
+        self.set_marker(retry, f"{newest}.0000000000")
+        self.set_state(retry, 4, 4, retryable=1)
+        full = self.folder("2026-06-27", n=4)
+        self.set_marker(full, f"{max(int(p.stat().st_mtime) for p in full.iterdir())}.0000000000")
+        self.set_state(full, 4, 3, retryable=1)
+        new = self.folder("2026-10-09")
+        r = self.poll(DRY_RUN=1)
+        out = r.stdout
+        self.assertIn(f"would process {retry} (old marker still matches; failed photos with tries left): "
+                      "retry-only visit, steps and export only if a photo is recovered", out)
+        self.assertRegex(out, rf"would process {full} \(old marker, 4 photos on disk but 3 in the DB.*\): full visit, steps and export")
+        self.assertIn(f"would process {new} (no marker): full visit, steps and export", out)
 
 
 class DryRun(WatcherCase):

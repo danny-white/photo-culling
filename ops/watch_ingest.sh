@@ -18,14 +18,15 @@
 # Safe to run concurrently with a manual `photo_cull.py run` -- both just resume the same DB.
 #
 # A folder is finished when its marker holds its current signature
-# ("v2 <dir mtime> <newest photo mtime> <photo count>") AND nothing in it is pending or still
-# worth retrying. "Photo" means a file photo_cull.py would register (its ALL_EXTENSIONS, any case,
+# ("v2 <dir mtime> <newest photo mtime> <photo count> <photo bytes>") AND nothing in it is pending
+# or still worth retrying. "Photo" means a file photo_cull.py would register (its ALL_EXTENSIONS, any case,
 # no dotfiles): a .DS_Store, an AppleDouble ._ file, a Lightroom .xmp sidecar or a video appearing
 # must not send a finished folder back to Lightroom. A folder is looked at again when a photo has
 # come or gone or the newest photo changed (files copied in late keep their camera dates, but a
 # new one still changes the count), or while it has failed photos that have tries left (one try
-# per poll, `photo_cull.py` MAX_ATTEMPTS in all). If only the folder's own mtime moved, the marker
-# is rewritten and nothing is processed. Busy is wider: the folder's mtime or ANY file's mtime
+# per poll, `photo_cull.py` MAX_ATTEMPTS in all). The byte total catches a photo replaced by a
+# different file of the same name and camera date. If only the folder's own mtime moved, the
+# marker is rewritten and nothing is processed. Busy is wider: the folder's mtime or ANY file's mtime
 # within STABLE_MINUTES, since a copy in progress can show up as any file.
 #
 # An idle poll looks at each folder's own mtime only (one stat call for all of them) and takes the
@@ -35,6 +36,12 @@
 # catches a photo rewritten in place. It logs one "poll: ..." line at least once an hour (the
 # health check reads it to see the watcher is alive), and one email when a poll finishes folders
 # and leaves nothing pending.
+#
+# A visit whose only reason is failed photos to retry (the photos themselves unchanged) is a
+# "retry-only" visit: it runs `run --retry-failed` and, only if at least one photo became ok, the
+# follow-up steps and the export. Otherwise the folder isn't sent to Lightroom again. A visit for
+# a new or changed folder always does everything. A folder left unfinished by a visit keeps a
+# "<shoot>.visited" file with the signature that visit handled, so the next visit can tell.
 #
 # Every setting below can be overridden from the environment; the defaults are the live paths.
 # That is how review/tests/test_watch_ingest.py runs this script against a temp library. Try a
@@ -93,26 +100,26 @@ if [ -z "${EXTS// /}" ]; then
     exit 1
 fi
 
-# "<dir mtime> <newest photo mtime> <photo count> <newest mtime of any file>" for a folder, in
-# epoch seconds, from one find. A photo is a file photo_cull.py registers (see EXTS). The folder's
+# "<dir mtime> <newest photo mtime> <photo count> <newest mtime of any file> <photo bytes>" for a
+# folder (times in epoch seconds), from one find. A photo is a file photo_cull.py registers (see EXTS). The folder's
 # own mtime is the time files were last copied in or removed (on this CIFS mount a copy keeps each
 # file's camera mtime, so the file times alone can't see a copy in progress). The last number
 # covers every file: it is for the busy test, and for old markers, which held that number.
 # Fails (prints nothing) only if the folder itself can't be read; a folder with no photos gives 0 0.
 folder_signature() {
     local listing
-    listing=$(find "$1" -printf '%d\t%Y\t%T@\t%f\n' 2>/dev/null)
+    listing=$(find "$1" -printf '%d\t%Y\t%T@\t%s\t%f\n' 2>/dev/null)
     awk -F'\t' -v exts="$EXTS" '
         BEGIN { n = split(exts, e, " "); for (i = 1; i <= n; i++) ok[e[i]] = 1 }
         $1 == 0 && $2 == "d" { dirm = int($3); have = 1 }
         $2 == "f" {
             t = int($3); if (t > anynewest) anynewest = t
-            name = $4; for (i = 5; i <= NF; i++) name = name "\t" $i
+            name = $5; for (i = 6; i <= NF; i++) name = name "\t" $i
             if (substr(name, 1, 1) != "." && match(name, /\.[^.]*$/) && (tolower(substr(name, RSTART)) in ok)) {
-                photos++; if (t > newest) newest = t
+                photos++; bytes += $4; if (t > newest) newest = t
             }
         }
-        END { if (have) print dirm, newest + 0, photos + 0, anynewest + 0; else exit 1 }' <<< "$listing"
+        END { if (have) printf "%.0f %.0f %.0f %.0f %.0f\n", dirm, newest, photos, anynewest, bytes; else exit 1 }' <<< "$listing"
 }
 
 shopt -s nullglob
@@ -131,8 +138,14 @@ while IFS= read -r f; do
     [ -n "$f" ] && retryable["$f"]=1
 done < <("$PY" photo_cull.py folder-state --db "$DB" --retryable-only "$LIBRARY_ROOT" 2>>"$LOG")
 
-declare -A reason=() sig_at_scan=()
+declare -A reason=() sig_at_scan=() retry_only=()
 todo=()           # folders to process this poll
+# queue FOLDER WHY [retry]: process FOLDER this poll. "retry" says its photos are unchanged, so
+# the visit is only about failed photos that have tries left.
+queue() {
+    todo+=("$1"); reason["$1"]="$2"
+    if [ "${3:-}" = retry ]; then retry_only["$1"]=1; fi
+}
 old_format=()     # folders whose marker is the old single number: upgrade it, or process
 # Scoped to YYYY/YYYY-MM-DD -- the date-organized library only. $LIBRARY_ROOT also has other
 # top-level folders (screenshots, $RECYCLE.BIN, one-off trip dumps, ...) that are NOT meant to
@@ -168,19 +181,19 @@ for folder in "${folders[@]}"; do
     [ "$flagged" = 1 ] && n_changed=$((n_changed + 1))
 
     sig=$(folder_signature "$folder") || continue          # could not read it
-    read -r dirm newest count anynewest <<< "$sig"
+    read -r dirm newest count anynewest bytes <<< "$sig"
     # Busy: copied into, or any file written, within the last STABLE_MINUTES (avoids culling a
     # shoot mid-copy). Skipped this poll; the next one sees it again.
     if [ $((now - dirm)) -lt "$window" ] || [ $((now - anynewest)) -lt "$window" ]; then
         continue
     fi
-    cur="v2 $dirm $newest $count"
+    cur="v2 $dirm $newest $count $bytes"
     if [ "$count" -eq 0 ]; then
         # No photos here (empty, or only sidecars and videos): nothing to ingest. Note the folder's
         # mtime so later polls skip it by a stat, as they do any other finished folder.
         if [ "$stored" != "$cur" ] && [ "$DRY_RUN" != 1 ]; then printf '%s\n' "$cur" > "$marker"; fi
         if [ -n "${retryable[$folder]:-}" ]; then   # rows left from files that are gone: let them run out
-            todo+=("$folder"); reason["$folder"]="failed photos with tries left"
+            queue "$folder" "failed photos with tries left" retry
         fi
         continue
     fi
@@ -188,10 +201,14 @@ for folder in "${folders[@]}"; do
     # a change only the daily full pass could find (a photo rewritten without moving the folder's mtime)
     if [ "$flagged" = 0 ] && [ "$stored" != "$cur" ]; then n_changed=$((n_changed + 1)); fi
 
+    # The signature the last visit handled, if it left the folder unfinished (see the header).
+    visited=""
+    [ -f "$MARKERS/$(basename "$folder").visited" ] && { IFS= read -r visited < "$MARKERS/$(basename "$folder").visited" || true; }
+
     if [ "$stored" = "$cur" ]; then
         # unchanged since it was finished; only failed photos with tries left bring it back
-        [ -n "${retryable[$folder]:-}" ] && { todo+=("$folder"); reason["$folder"]="failed photos with tries left"; }
-    elif [[ "$stored" =~ ^v2\ [0-9]+\ ${newest}\ ${count}$ ]]; then
+        [ -n "${retryable[$folder]:-}" ] && queue "$folder" "failed photos with tries left" retry
+    elif [[ "$stored" =~ ^v2\ [0-9]+\ ${newest}\ ${count}\ ${bytes}$ ]]; then
         # Same photos, same newest photo; only the folder's own mtime moved (a .DS_Store, a
         # sidecar, a video, something written and removed). Nothing to ingest: note the new mtime.
         if [ "$DRY_RUN" = 1 ]; then
@@ -199,21 +216,30 @@ for folder in "${folders[@]}"; do
         else
             printf '%s\n' "$cur" > "$marker"
         fi
-        [ -n "${retryable[$folder]:-}" ] && { todo+=("$folder"); reason["$folder"]="failed photos with tries left"; }
+        [ -n "${retryable[$folder]:-}" ] && queue "$folder" "failed photos with tries left" retry
+    elif [[ "$stored" =~ ^v2\ [0-9]+\ ${newest}\ ${count}$ ]]; then
+        # A marker from before the byte total was added, naming the same photos: add it, process nothing.
+        if [ "$DRY_RUN" = 1 ]; then
+            log "DRY RUN: would add the byte total to the marker for $folder (nothing else changed)"
+        else
+            printf '%s\n' "$cur" > "$marker"
+        fi
+        [ -n "${retryable[$folder]:-}" ] && queue "$folder" "failed photos with tries left" retry
     elif [[ "$stored" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-        if [ -n "${retryable[$folder]:-}" ]; then
-            todo+=("$folder"); reason["$folder"]="failed photos with tries left"
-        elif [ "${stored%%.*}" = "$anynewest" ] || [ "${stored%%.*}" = "$newest" ]; then
+        if [ "${stored%%.*}" = "$anynewest" ] || [ "${stored%%.*}" = "$newest" ]; then
             # The number is the newest file when it was marked: still the newest file, or the newest
             # photo with only non-photos (sidecars, videos) newer since. Photos: see the count below.
             old_format+=("$folder")
         else
-            todo+=("$folder"); reason["$folder"]="old marker, newest file changed"
+            queue "$folder" "old marker, newest file changed"
         fi
+    elif [[ "$visited" =~ ^v2\ [0-9]+\ ${newest}\ ${count}\ ${bytes}$ ]]; then
+        # An earlier visit handled these very photos and left some failed: only those need another try.
+        queue "$folder" "photos unchanged since the last visit; failed photos with tries left" retry
     elif [ -z "$stored" ]; then
-        todo+=("$folder"); reason["$folder"]="no marker"
+        queue "$folder" "no marker"
     else
-        todo+=("$folder"); reason["$folder"]="signature changed"
+        queue "$folder" "signature changed"
     fi
 done
 
@@ -224,7 +250,9 @@ fi
 # Old markers hold only the newest file's mtime. Reprocessing every such folder would append
 # all of them to the Lightroom inbox's pending.tsv again, so a folder whose marker still matches
 # its newest file, whose photo count equals its rows in the DB, and with nothing pending or
-# retryable, just gets its marker rewritten. Anything else is processed. One folder-state call.
+# retryable, just gets its marker rewritten. If only failed photos with tries left stand in the way
+# (nothing pending, counts equal) the visit is retry-only; anything else is processed in full. One
+# folder-state call.
 if [ "${#old_format[@]}" -gt 0 ]; then
     answered=0
     while IFS=$'\t' read -r f disk rows pending retry _; do
@@ -237,9 +265,10 @@ if [ "${#old_format[@]}" -gt 0 ]; then
                 printf '%s\n' "${sig_at_scan[$f]}" > "$MARKERS/$(basename "$f").done"
                 log "marker upgraded for $f (nothing changed since it was finished)"
             fi
+        elif [ "$disk" = "$rows" ] && [ "$pending" = 0 ]; then
+            queue "$f" "old marker still matches; failed photos with tries left" retry
         else
-            todo+=("$f")
-            reason["$f"]="old marker, $disk photos on disk but $rows in the DB ($pending pending, $retry to retry)"
+            queue "$f" "old marker, $disk photos on disk but $rows in the DB ($pending pending, $retry to retry)"
         fi
     done < <("$PY" photo_cull.py folder-state --db "$DB" "${old_format[@]}" 2>>"$LOG")
     if [ "$answered" -ne "${#old_format[@]}" ]; then
@@ -254,12 +283,45 @@ fi
 done_folders=()        # folders finished (marker written) this poll
 batch_retry=0          # photos still pending or waiting for a retry, in folders this poll processed
 batch_unreadable=0     # originals that can't be read, in folders this poll processed
+tsv="$INBOX/pending.tsv"
+
+# read_state FOLDER: the folder's counts from photo_cull's folder-state, in st_disk, st_rows,
+# st_pending, st_retry and st_unreadable. Fails if they can't be read.
+read_state() {
+    local line
+    line=$("$PY" photo_cull.py folder-state --db "$DB" "$1" 2>>"$LOG") || return 1
+    IFS=$'\t' read -r _ st_disk st_rows st_pending st_retry st_unreadable <<< "$line"
+    [ -n "${st_unreadable:-}" ]
+}
+
+# settle NOTE: after a visit, with the counts in st_*. Finished only when nothing is pending and
+# nothing failed that has tries left: the marker is written and the folder logged as done. Empty
+# files and photos that used all their tries ("unreadable") don't hold it back. Otherwise the
+# folder stays unmarked, with the signature this visit handled kept in <shoot>.visited.
+settle() {
+    batch_retry=$((batch_retry + st_pending + st_retry))
+    batch_unreadable=$((batch_unreadable + st_unreadable))
+    if [ "$st_pending" -eq 0 ] && [ "$st_retry" -eq 0 ]; then
+        printf '%s\n' "$cur" > "$marker"
+        rm -f "$MARKERS/$name.visited"
+        done_folders+=("$name")
+        log "done: $folder -> $tsv"
+    else
+        printf '%s\n' "$cur" > "$MARKERS/$name.visited"
+        log "retry pending for $folder: $((st_pending + st_retry)) photos$1"
+    fi
+}
+
 for folder in "${todo[@]}"; do
     name="$(basename "$folder")"
     marker="$MARKERS/$name.done"
 
     if [ "$DRY_RUN" = 1 ]; then
-        log "DRY RUN: would process $folder (${reason[$folder]})"
+        if [ -n "${retry_only[$folder]:-}" ]; then
+            log "DRY RUN: would process $folder (${reason[$folder]}): retry-only visit, steps and export only if a photo is recovered"
+        else
+            log "DRY RUN: would process $folder (${reason[$folder]}): full visit, steps and export"
+        fi
         continue
     fi
 
@@ -267,14 +329,20 @@ for folder in "${todo[@]}"; do
     # is now. A file copied in while we run changes it, so the folder comes round again.
     now=$(date +%s)
     sig=$(folder_signature "$folder") || continue
-    read -r dirm newest count anynewest <<< "$sig"
+    read -r dirm newest count anynewest bytes <<< "$sig"
     if [ $((now - dirm)) -lt "$window" ] || [ $((now - anynewest)) -lt "$window" ]; then
         continue
     fi
-    cur="v2 $dirm $newest $count"
+    cur="v2 $dirm $newest $count $bytes"
 
     log "processing $folder"
     n_processed=$((n_processed + 1))
+    # A retry-only visit: how many photos are ok now, to tell afterwards whether any recovered.
+    retry_visit=0
+    if [ -n "${retry_only[$folder]:-}" ] && read_state "$folder"; then
+        retry_visit=1
+        ok_pre=$((st_rows - st_pending - st_retry - st_unreadable))
+    fi
     "$PY" photo_cull.py run "$folder" --db "$DB" --retry-failed >> "$LOG" 2>&1
     rc=$?
     if [ "$rc" -eq 3 ]; then
@@ -284,6 +352,13 @@ for folder in "${todo[@]}"; do
         break
     elif [ "$rc" -ne 0 ]; then
         log "run FAILED for $folder -- leaving unmarked, will retry next poll"
+        continue
+    fi
+
+    # Retry-only visit and no photo became ok: nothing new to index or send to Lightroom.
+    if [ "$retry_visit" = 1 ] && read_state "$folder" \
+            && [ $((st_rows - st_pending - st_retry - st_unreadable)) -le "$ok_pre" ]; then
+        settle " (none recovered this time)"
         continue
     fi
 
@@ -321,29 +396,16 @@ for folder in "${todo[@]}"; do
         log "previews FAILED for $folder (non-fatal, continuing)"
     fi
 
-    tsv="$INBOX/pending.tsv"
     if ! "$PY" photo_cull.py export --plugin-data "$tsv" --plugin-data-append --folder "$folder" \
             --db "$DB" --csv "$PROJ/trial_out/report.csv" >> "$LOG" 2>&1; then
         log "export FAILED for $folder -- leaving unmarked, will retry next poll"
         continue
     fi
 
-    # Finished only when nothing here is pending and nothing failed that has tries left. Empty
-    # files and photos that used all their tries are "unreadable": they don't hold the marker back.
-    state=$("$PY" photo_cull.py folder-state --db "$DB" "$folder" 2>>"$LOG")
-    IFS=$'\t' read -r _ disk rows pending retry unreadable <<< "$state"
-    if [ -z "${retry:-}" ]; then
-        log "retry pending for $folder: could not read the folder's state; will look again next poll"
-        continue
-    fi
-    batch_retry=$((batch_retry + pending + retry))
-    batch_unreadable=$((batch_unreadable + unreadable))
-    if [ "$pending" -eq 0 ] && [ "$retry" -eq 0 ]; then
-        printf '%s\n' "$cur" > "$marker"
-        done_folders+=("$name")
-        log "done: $folder -> $tsv"
+    if read_state "$folder"; then
+        settle ""
     else
-        log "retry pending for $folder: $((pending + retry)) photos"
+        log "retry pending for $folder: could not read the folder's state; will look again next poll"
     fi
 done
 

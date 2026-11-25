@@ -102,7 +102,9 @@ recorded as `error_class='empty'` without being opened, and is never retried. `-
 retries the other failed photos under the folders you name; `--redrive` retries every error row
 in the DB. Before the first photo, `run` checks that Ollama answers. If it doesn't, or if it
 stops answering part-way, `run` leaves the rest untouched (no attempt recorded) and exits with
-code **3**, so the caller can try again later. `last_attempt_at` holds the time of each try.
+code **3**, so the caller can try again later. `last_attempt_at` holds the time of each try. When
+a file's size or mtime changes on disk, its row goes back to pending with `attempts` reset to 0
+and `last_attempt_at` cleared, so a restored original gets its full set of tries.
 
 EXIF (capture time / camera / lens) is read via `exifread`/PIL for ARW, CR2, NEF, JPEG, etc.;
 CR3 (and other non-TIFF raws) fall back to `exiftool` if it's installed. Capture time drives

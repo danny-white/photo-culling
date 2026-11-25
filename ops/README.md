@@ -124,19 +124,21 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
   to force one) every folder's signature is taken, which catches a photo rewritten in place
   without moving the folder's mtime. The hourly log line is stamped by `.last-heartbeat`.
 - `trial_out/ingest_markers/<shoot>.done` — one marker per finished shoot folder, holding its
-  signature, `v2 <folder mtime> <newest photo mtime> <photo count>` (epoch seconds). A "photo" is
+  signature, `v2 <folder mtime> <newest photo mtime> <photo count> <photo bytes>` (epoch seconds). A "photo" is
   a file `photo_cull.py` would register: its `ALL_EXTENSIONS` in any case, no dotfiles. The
   watcher asks `photo_cull.py folder-state --print-extensions` for the list on every poll, so the
   two can't drift apart. Everything else in a shoot folder (`.DS_Store` and `._` files from the
   Mac, Lightroom's `.xmp` sidecars, videos) is ignored, so it can't send a finished folder back
   to Lightroom. The folder's own mtime is the time files were last copied in (a card copy keeps
   each file's camera date, so the file times can't see it). A folder is looked at again when a
-  photo has come or gone or the newest photo changed. If only the folder's own mtime moved, the
-  marker is quietly rewritten and nothing is processed. A folder is *busy*, and skipped for the
+  photo has come or gone, the newest photo changed or the photos' total size changed (a photo
+  replaced by a different file of the same name and camera date, such as a restored copy of an
+  empty original, is caught by the size). If only the folder's own mtime moved, the marker is
+  quietly rewritten and nothing is processed. A marker without the byte total (three numbers) is
+  rewritten with it, without processing, when the newest photo and the count match. A folder is *busy*, and skipped for the
   poll, while its own mtime or any file's mtime (photo or not) is under 15 minutes old.
-  To force a re-cull + re-export of a folder, delete its marker. Do that after replacing a photo
-  in place with a different file of the same name and camera date (for example a recovered copy
-  of an empty original): the count and newest photo don't change, so the watcher can't see it.
+  To force a re-cull + re-export of a folder, delete its marker. An overwrite that leaves the
+  folder's own mtime alone is only found by the daily full pass (below).
   A folder with no photos in it is not processed; its marker just records its own mtime
   (`v2 <mtime> 0 0`), so later polls skip it with a stat.
   Markers from before 24 Nov 2026 hold a single number (the newest file's mtime). The first poll
@@ -146,7 +148,19 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
   processed, which appends that folder to `pending.tsv` again.
 - **Failed photos.** `run` is called with `--retry-failed`. A photo that failed to tag is tried
   again on every poll, up to 4 tries in all (`MAX_ATTEMPTS` in `photo_cull.py`), and a folder
-  with such photos stays unmarked, so the next poll comes back to it. Empty files (0 bytes) and
+  with such photos stays unmarked, so the next poll comes back to it. A photo whose file changes
+  on disk (size or mtime) starts again with a full set of tries.
+- **Retry-only visits.** When the only reason to visit a folder is failed photos with tries left
+  (its photos are unchanged: a current marker, an old or three-number marker that would have been
+  upgraded, or a "<shoot>.visited" file naming the same photos), the watcher runs
+  `run --retry-failed` and compares the folder's ok count before and after. If no photo became ok
+  it skips embed, embed-images, geotag, shotinfo, daysum, previews and the export, so the folder
+  isn't sent to Lightroom again for nothing: it logs
+  `retry pending for <folder>: N photos (none recovered this time)`, or, when the tries have run
+  out, writes the marker and logs `done:`. If at least one photo became ok, it does everything.
+  A visit for a new or changed folder always does everything. A folder left unfinished by a
+  visit keeps `<shoot>.visited` (the signature that visit handled) in the markers folder until it
+  is finished. Empty files (0 bytes) and
   photos that used all their tries are "unreadable": they stop holding the folder back. The log
   says `retry pending for <folder>: N photos` while it waits. If Ollama isn't answering, `run`
   exits 3 and the watcher logs `run deferred: Ollama not answering` and ends that poll.

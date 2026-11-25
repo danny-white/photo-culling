@@ -315,9 +315,11 @@ def register_targets(conn: sqlite3.Connection, folder: Path, recursive: bool, ex
             )
             queued += 1
         elif row["mtime"] != st.st_mtime or row["size"] != st.st_size:
-            # file changed on disk -> reprocess
+            # file changed on disk -> reprocess, with a fresh set of tries: a restored original must
+            # not inherit the attempts its empty or truncated predecessor used up
             conn.execute(
-                "UPDATE images SET mtime=?, size=?, status='pending', error_class=NULL, error_msg=NULL WHERE path=?",
+                "UPDATE images SET mtime=?, size=?, status='pending', error_class=NULL, error_msg=NULL, "
+                "attempts=0, last_attempt_at=NULL WHERE path=?",
                 (st.st_mtime, st.st_size, str(p)),
             )
             queued += 1
