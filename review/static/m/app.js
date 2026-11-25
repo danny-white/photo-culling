@@ -266,11 +266,16 @@ function act(label, changes, extra) {
   const before = changes.map(c => [c.id, copy(S.dec[c.id])]);
   for (const c of changes) S.dec[c.id] = decisionOf(c);
   const action_id = newId();
-  S.hist.push(Object.assign({ action_id, label, before, changes, day: S.day.day, cursor: S.cursor, pass: S.pass, screen: 'cull' }, extra || {}));
+  const at = S.stacks[S.cursor];
+  S.hist.push(Object.assign({ action_id, label, before, changes, day: S.day.day, cursor: S.cursor, stack: at ? at.id : null, pass: S.pass, screen: 'cull' }, extra || {}));
   send('POST', '/m/api/decide', { action_id, day: S.day.day, label, changes }, S.day.day);
 }
-S.undone = {};   // action_id -> history entry, for an undo the PC may refuse
+S.undone = {};      // action_id -> history entry, for an undo the PC may refuse
+S.hists = new Map(); // day -> its Undo history, kept for the session when you leave the day
+const DAY_SCREENS = ['cull', 'picker', 'focus', 'summary', 'grid', 'large'];
+const histOf = day => (S.day && S.day.day === day ? S.hist : S.hists.get(day));
 function undo() {
+  if (!S.day || !DAY_SCREENS.includes(S.screen)) return;
   const h = S.hist.pop();
   if (!h) { toast('Nothing to undo'); return; }
   h.at = S.hist.length;
@@ -283,7 +288,8 @@ function undo() {
   closeSheet();
   toast('Undone: ' + h.label);
   if (h.screen === 'summary') { S.screen = 'summary'; return draw(); }
-  S.cursor = Math.min(h.cursor, S.stacks.length - 1);
+  const back = S.stacks.findIndex(s => s.id === h.stack);   // the same stack, wherever a search put it
+  S.cursor = back >= 0 ? back : Math.min(h.cursor, S.stacks.length - 1);
   S.screen = 'cull';
   saveProgress();
   draw();
@@ -294,11 +300,12 @@ function undoRefused(actionId, err) {
   const h = S.undone[actionId];
   if (!h) return false;
   delete S.undone[actionId];
+  const list = histOf(h.day);
+  if (list) list.splice(Math.min(h.at, list.length), 0, h);
   if (S.day && S.day.day === h.day) {
     const was = new Map(h.before);
     for (const [id, d] of h.undoneFrom) if (sameDecision(S.dec[id], was.get(id))) { if (d) S.dec[id] = d; else delete S.dec[id]; }
-    S.hist.splice(Math.min(h.at, S.hist.length), 0, h);
-    if (S.screen !== 'days') draw();
+    if (DAY_SCREENS.includes(S.screen)) draw();
   }
   toast('Not undone: ' + err);
   return true;
@@ -307,11 +314,16 @@ function undoRefused(actionId, err) {
 function decideRefused(actionId) {
   const u = S.undone[actionId];
   delete S.undone[actionId];   // already undone here: the card shows what it was
-  const i = S.hist.findIndex(h => h.action_id === actionId);
-  if (i < 0 || u) return;
-  const h = S.hist.splice(i, 1)[0], was = new Map(h.before);
-  for (const c of h.changes) if (sameDecision(S.dec[c.id], decisionOf(c))) { const d = was.get(c.id); if (d) S.dec[c.id] = d; else delete S.dec[c.id]; }
-  if (S.screen !== 'days') draw();
+  if (u) return;
+  for (const list of [S.hist, ...S.hists.values()]) {
+    const i = list.findIndex(h => h.action_id === actionId);
+    if (i < 0) continue;
+    const h = list.splice(i, 1)[0], was = new Map(h.before);
+    if (!S.day || S.day.day !== h.day) return;   // that day shows the server's rows when it opens
+    for (const c of h.changes) if (sameDecision(S.dec[c.id], decisionOf(c))) { const d = was.get(c.id); if (d) S.dec[c.id] = d; else delete S.dec[c.id]; }
+    if (DAY_SCREENS.includes(S.screen)) draw();
+    return;
+  }
 }
 function commit(label, changes) {
   act(label, changes);
@@ -1170,8 +1182,8 @@ function rateFrame(n) {
 function showKeys() {
   const rows = [
     ['P / K / ↑', 'Keep · open a burst picker'], ['X / ↓', 'Reject'], ['1–5', 'Keep with stars · rate the frame in a burst'],
-    ['← / →', 'Browse'], ['Z / F', 'Focus at the AF point or centre'], ['Ctrl / Cmd + Z · Backspace', 'Undo'],
-    ['G', 'Grid'], ['A', 'Keep all frames in a burst'], ['B / Enter', 'Open burst picker'], ['Esc', 'Back'], ['?', 'Keyboard shortcuts'],
+    ['← / →', 'Browse'], ['Z / F', 'Focus at the AF point or centre'], ['Ctrl / Cmd + Z', 'Undo'], ['Backspace', 'Undo, on a card or in a burst'],
+    ['G', 'Grid'], ['A', 'Keep all frames in a burst'], ['B / Enter', 'Open burst picker'], ['Esc', 'Back (not from a card: Days is the button)'], ['?', 'Keyboard shortcuts'],
   ];
   const el = $('#sheet');
   el.innerHTML = '<div class="sheet key-sheet" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">' +
@@ -1205,8 +1217,8 @@ function onKey(e) {
     else if (S.screen === 'large') { S.large = null; S.screen = 'summary'; draw(); }
     else if (S.screen === 'grid') { S.screen = S.gridFrom || 'cull'; S.gridFrom = null; draw(); }
     else if (S.screen === 'summary') { S.screen = 'cull'; draw(); }
-    else if (S.screen === 'cull') showDays();
-    return;
+    return;   // on a card Esc does nothing: Days is the way out, and Undo is kept
+
   }
   if (S.sheet) {
     if (k === 'Tab') {
@@ -1219,7 +1231,10 @@ function onKey(e) {
   }
   if (k === '?') { e.preventDefault(); return showKeys(); }
   if (!S.day) return;
-  if (k === 'Backspace') { e.preventDefault(); return undo(); }
+  if (k === 'Backspace') {   // undo, but only where a tap was just made: the card and the picker
+    if (S.screen === 'cull' || S.screen === 'picker') { e.preventDefault(); undo(); }
+    return;
+  }
   if (k === 'g' && ['cull', 'picker', 'focus', 'large', 'summary', 'grid'].includes(S.screen)) {
     e.preventDefault();
     if (S.screen === 'grid') { S.screen = S.gridFrom || 'cull'; S.gridFrom = null; }
@@ -1271,8 +1286,16 @@ function onKey(e) {
 }
 
 /* ---------------------------------------------------------------- navigation */
+// Leaving a day: its Undo history is kept for when it opens again this session.
+function leaveDay() {
+  if (S.day) S.hists.set(S.day.day, S.hist);
+  S.day = null; S.stacks = []; S.hist = []; S.picker = null; S.focus = null; S.large = null;
+}
+let openSeq = 0;   // the day being opened: a late answer for another one is dropped
 async function showDays() {
-  S.screen = 'days'; S.day = null; S.stacks = []; S.hist = [];
+  openSeq++;
+  leaveDay();
+  S.screen = 'days';
   if (location.hash !== '#/') history.replaceState(null, '', '#/');
   draw();
   try { S.days = (await getJSON('/m/api/days')).days; }
@@ -1297,12 +1320,18 @@ function layQueued(day) {
   return at;
 }
 async function openDay(day, match) {   // match: {ids, label} from a search, whose stacks go first
+  const seq = ++openSeq;
   S.perfDay = performance.now();
+  leaveDay();
   S.screen = 'loading'; draw();
   let body;
   try { body = await getJSON('/m/api/day/' + dayPath(day)); }
-  catch (e) { S.screen = 'error'; S.error = 'Could not load ' + day + ': ' + e.message; return draw(); }
-  S.day = body; S.stacks = body.stacks; S.dec = {}; S.hist = []; S.picker = null; S.matches = null;
+  catch (e) {
+    if (seq !== openSeq || S.screen !== 'loading') return;
+    S.screen = 'error'; S.error = 'Could not load ' + day + ': ' + e.message; return draw();
+  }
+  if (seq !== openSeq || S.screen !== 'loading') return;   // you went back, or opened another day
+  S.day = body; S.stacks = body.stacks; S.dec = {}; S.hist = S.hists.get(body.day) || []; S.picker = null; S.matches = null;
   for (const s of S.stacks) for (const f of s.frames) if (f.decision) S.dec[f.id] = f.decision;
   const queuedAt = layQueued(body.day);
   if (match) {
@@ -1321,6 +1350,7 @@ async function openDay(day, match) {   // match: {ids, label} from a search, who
   }
   const i = status(S.stacks[S.cursor]).done ? firstOpen(S.cursor) : S.cursor;
   if (i < 0) S.screen = 'summary'; else { S.cursor = i; S.screen = 'cull'; await loadShape(shown(S.stacks[i]).id, 1500); }
+  if (seq !== openSeq) return;
   const hash = '#/day/' + day;
   if (location.hash !== hash) history.replaceState(null, '', hash);
   draw();
@@ -1378,6 +1408,7 @@ async function resetDo(btn) {
   try { body = await writeNow('/m/api/day/' + dayPath(day) + '/reset', {}); }
   catch (e) { btn.disabled = false; closeSheet(); return toast('Not reset: ' + e.message); }
   closeSheet();
+  S.hist = []; S.hists.delete(day);                 // the day's taps are gone, so is their Undo
   await openDay(day);
   toast('Started over: cleared ' + body.cleared + (body.withdrawn ? ', took ' + body.withdrawn + ' back out of the inbox' : ''));
 }

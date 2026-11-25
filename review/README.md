@@ -47,8 +47,11 @@ web app manifest any more (`desktop.js` removes one an older version registered)
 - **One pass of cards:** one stack per card, the photo beside a rail with its details, the RAW at
   1:1 where the camera focused (Sony, Canon and Nikon AF points) and the buttons, and the day's
   filmstrip below. Lightroom's keys: P keep, X reject, 1-5 keep with stars, arrows to browse, Z
-  (or a click on the photo) for the 1:1 focus check, Ctrl/Cmd+Z undo, ? for the full list. A
-  mouse drag never decides. The AF button shows a box on the photo where the camera focused.
+  (or a click on the photo) for the 1:1 focus check, Ctrl/Cmd+Z undo (Backspace too, on a card
+  or in a burst), ? for the full list. Keys with Ctrl, Cmd or Alt are the browser's, and a mouse
+  drag never decides. Esc goes back from the picker, focus, grid or review but never leaves a
+  card: Days is the way out, and each day keeps its Undo until the page is closed. The AF button
+  shows a box on the photo where the camera focused.
 - **Stars:** a row of five under a single photo keeps it with that rating in one tap (5 is Hero).
 - **Stacks** follow the camera where it says: on the Sony, one shutter press is one stack, and
   brackets are exact (`photo_cull.py shotinfo` reads the tags). Other cameras use a 2-second gap.

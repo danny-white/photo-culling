@@ -10,7 +10,8 @@ install chromium`); without them every test skips. The tests start their own ser
 127.0.0.1:8813 over the real trial_out/trial.db (read-only) with a throwaway annotations.db, inbox
 and state folder, and clear those before each test. Pictures are stubbed in the browser with a
 small grey JPEG, so no RAW is read or decoded (a test sets `real_pictures` to see the real ones).
-Nothing here talks to the live server, and search never reaches Ollama.
+Nothing here talks to the live server, and search never reaches Ollama. CB_WEB_STATIC serves
+another copy of static/m (say an older commit's, from `git archive`) to see a test fail there.
 """
 import atexit
 import io
@@ -77,7 +78,7 @@ class Server:
         app = Flask(__name__)
         app.register_blueprint(mobile.make_blueprint(
             db_ro=db_ro, anno=anno, pc=pc, cache_dir=ROOT / "review" / "cache",
-            static_dir=ROOT / "review" / "static" / "m", state_dir=self.state,
+            static_dir=Path(os.environ.get("CB_WEB_STATIC", ROOT / "review" / "static" / "m")), state_dir=self.state,
             inbox=self.inbox, check_mount=False, ingest_log=self.tmp / "ingest.log",
             ollama_url="http://127.0.0.1:9"))   # nothing listens there: search never reaches Ollama
         self.srv = make_server("127.0.0.1", PORT, app, threaded=True)
