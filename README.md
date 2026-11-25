@@ -80,6 +80,13 @@ sudo apt-get install -y libimage-exiftool-perl   # optional: EXIF for CR3 / othe
 # Retry only the images that errored
 ./venv/bin/python photo_cull.py run /path/to/photos --redrive
 
+# Retry the failed images under these folders that another try can still help (the ingest
+# watcher does this each poll)
+./venv/bin/python photo_cull.py run /path/to/photos --retry-failed
+
+# Per folder: files on disk, rows in the DB, pending, retryable, unreadable (tab separated)
+./venv/bin/python photo_cull.py folder-state --db trial_out/trial.db /path/to/photos/2026-09-29
+
 # Write the report + Lightroom sidecars
 ./venv/bin/python photo_cull.py export --xmp
 ```
@@ -88,6 +95,14 @@ sudo apt-get install -y libimage-exiftool-perl   # optional: EXIF for CR3 / othe
 model), `--limit N` (stop after N — good for a trial), `--ext arw` (only these extensions),
 `--force` (reprocess done), `--no-recursive`, `--pidfile` (defaults to `<db>.pid`, so you can
 `kill -INT $(cat <db>.pid)`).
+
+**Failed photos.** Each photo gets up to `MAX_ATTEMPTS` (4) tries in total. A timeout, a dropped
+connection or an HTTP 5xx is retried once after 10 s inside the same run. A file of 0 bytes is
+recorded as `error_class='empty'` without being opened, and is never retried. `--retry-failed`
+retries the other failed photos under the folders you name; `--redrive` retries every error row
+in the DB. Before the first photo, `run` checks that Ollama answers. If it doesn't, or if it
+stops answering part-way, `run` leaves the rest untouched (no attempt recorded) and exits with
+code **3**, so the caller can try again later. `last_attempt_at` holds the time of each try.
 
 EXIF (capture time / camera / lens) is read via `exifread`/PIL for ARW, CR2, NEF, JPEG, etc.;
 CR3 (and other non-TIFF raws) fall back to `exiftool` if it's installed. Capture time drives

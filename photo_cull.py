@@ -78,6 +78,10 @@ JPEG_QUALITY = 85
 NUM_CTX = 4096
 KEEP_ALIVE = "60m"               # keep the model resident between images
 CALL_TIMEOUT = 120               # seconds; a hung inference errors out instead of stalling the night
+MAX_ATTEMPTS = 4                 # total tries per photo (the first run plus retries) before it counts as unreadable
+TRANSIENT_WAIT_S = 10            # pause before the one in-run retry of a timeout / dropped connection / HTTP 5xx
+PREFLIGHT_TIMEOUT = 5            # seconds Ollama gets to answer before a run starts
+EXIT_OLLAMA_DOWN = 3             # `run` exit code: Ollama isn't answering, nothing was lost, try again later
 
 # Technical-quality thresholds. Sharpness (variance of Laplacian) is scene-dependent,
 # so SHARP_FLOOR is deliberately low — it only catches clearly soft/blurred frames;
@@ -160,7 +164,8 @@ CREATE TABLE IF NOT EXISTS images (
     color_label     TEXT,
     reason          TEXT,
     user_rating     INTEGER,                   -- your final LR star rating, read back from XMP (feedback)
-    user_label      TEXT                       -- your final LR color label, read back from XMP (feedback)
+    user_label      TEXT,                      -- your final LR color label, read back from XMP (feedback)
+    last_attempt_at TEXT                       -- UTC ISO time of the latest tagging try, ok or not (cmd_run)
 );
 CREATE INDEX IF NOT EXISTS idx_status ON images(status);
 CREATE INDEX IF NOT EXISTS idx_capture ON images(capture_ts);
@@ -247,7 +252,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
                       ("place", "TEXT"),
                       # how the shot was taken, from the camera's own tags (cmd_shotinfo)
                       ("drive", "TEXT"), ("seq", "INTEGER"), ("ev", "REAL"),
-                      ("af_u", "REAL"), ("af_v", "REAL"), ("shot_checked", "INTEGER")):
+                      ("af_u", "REAL"), ("af_v", "REAL"), ("shot_checked", "INTEGER"),
+                      # when cmd_run last tried this photo; the watcher's retry backoff reads attempts
+                      ("last_attempt_at", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError as e:
@@ -263,17 +270,42 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def register_targets(conn: sqlite3.Connection, folder: Path, recursive: bool, exts=ALL_EXTENSIONS) -> int:
-    """Insert any new/changed files as 'pending'. Returns count of newly-queued files.
+# Error rows another try can still help: not an empty file (size 0, or class 'empty') and not out
+# of tries. COALESCE keeps a NULL from turning the whole test NULL, i.e. false. The rest of the
+# error rows (empty, or MAX_ATTEMPTS used) are "unreadable". review/mobile.py repeats this test.
+RETRYABLE_SQL = (f"status='error' AND COALESCE(size, 1) > 0 AND COALESCE(error_class, '') != 'empty' "
+                 f"AND COALESCE(attempts, 0) < {MAX_ATTEMPTS}")
 
-    `exts` restricts which file extensions are queued (default: all supported raw/image types)."""
+
+def under_folders_sql(folders) -> "tuple[str, list]":
+    """SQL for `path` is a file somewhere under one of `folders`, and its parameters. A prefix test
+    on substr, not LIKE, because folder names hold `_` and `%`."""
+    parts, params = [], []
+    for f in folders:
+        prefix = str(f).rstrip("/") + "/"
+        parts.append("substr(path, 1, ?) = ?")
+        params += [len(prefix), prefix]
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def iter_targets(folder: Path, recursive: bool, exts=ALL_EXTENSIONS):
+    """The files `register_targets` would register under `folder`: supported extensions, no
+    dotfiles. `folder-state` counts with this too, so its numbers match what a run queues."""
     walker = folder.rglob("*") if recursive else folder.glob("*")
-    queued = 0
     for p in walker:
         if p.name.startswith("."):        # skip dotfiles: macOS AppleDouble (._*), .DS_Store, etc.
             continue
         if not p.is_file() or p.suffix.lower() not in exts:
             continue
+        yield p
+
+
+def register_targets(conn: sqlite3.Connection, folder: Path, recursive: bool, exts=ALL_EXTENSIONS) -> int:
+    """Insert any new/changed files as 'pending'. Returns count of newly-queued files.
+
+    `exts` restricts which file extensions are queued (default: all supported raw/image types)."""
+    queued = 0
+    for p in iter_targets(folder, recursive, exts):
         st = p.stat()
         row = conn.execute("SELECT mtime, size, status FROM images WHERE path=?", (str(p),)).fetchone()
         if row is None:
@@ -936,9 +968,49 @@ def derive(cv: dict, vlm: dict) -> dict:
 # Per-image processing
 # ----------------------------------------------------------------------------
 
+class OllamaDown(Exception):
+    """Ollama isn't answering at all (refused or couldn't connect). Unlike a timeout or a server
+    error this says nothing about the photo, so the run records no attempt and stops."""
+
+
+def is_connect_error(e: Exception) -> bool:
+    """True when nothing is listening: ollama-python turns httpx.ConnectError into the builtin
+    ConnectionError. A reset or aborted connection is a dropped one, not a missing server, and a
+    timeout (httpx.ConnectTimeout is not a ConnectError) is a slow one, so neither counts."""
+    import httpx
+    if isinstance(e, httpx.ConnectError):
+        return True
+    return isinstance(e, ConnectionError) and not isinstance(
+        e, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError))
+
+
+def is_timeout_error(e: Exception) -> bool:
+    return "time" in type(e).__name__.lower() or "timeout" in str(e).lower()
+
+
+def is_transient_model_error(e: Exception) -> bool:
+    """Worth one more try after a short wait: a timeout, a dropped connection ("Server
+    disconnected without sending a response") or an HTTP 5xx from Ollama. Not an OOM, which
+    analyze_vlm already tried to shrink its way out of."""
+    if is_oom(e):
+        return False
+    status = getattr(e, "status_code", None)
+    if isinstance(status, int) and status >= 500:
+        return True
+    return is_timeout_error(e) or "disconnected" in str(e).lower()
+
+
 def process_one(client, path: Path, fast: bool) -> dict:
     """Full pipeline for one image. Returns a dict of DB columns to write.
-    On failure returns status='error' with an error_class."""
+    On failure returns status='error' with an error_class. A timeout, dropped connection or 5xx
+    gets one more try after TRANSIENT_WAIT_S. Raises OllamaDown if Ollama can't be reached."""
+    try:
+        if path.stat().st_size == 0:
+            # Nothing to read, and nothing a retry could change: say so without loading the file.
+            return {"status": "error", "error_class": "empty",
+                    "error_msg": "The file on the NAS is empty (0 bytes)"}
+    except OSError:
+        pass                              # load_source reports it as an io error, as before
     try:
         source = load_source(path)
     except LoadError as e:
@@ -953,18 +1025,25 @@ def process_one(client, path: Path, fast: bool) -> dict:
     except Exception:  # noqa: BLE001 - hashing is non-critical
         phash = None
 
-    try:
-        vlm, model_used = analyze_vlm(client, work, fast)
-    except Exception as e:  # noqa: BLE001
-        if is_oom(e):
-            cls = "oom"
-        elif isinstance(e, (json.JSONDecodeError, ValueError)):
-            cls = "json_parse"
-        elif "time" in type(e).__name__.lower() or "timeout" in str(e).lower():
-            cls = "timeout"
-        else:
-            cls = "model"
-        return {"status": "error", "error_class": cls, "error_msg": _exc_text(e)[:500]}
+    for try_no in (1, 2):
+        try:
+            vlm, model_used = analyze_vlm(client, work, fast)
+            break
+        except Exception as e:  # noqa: BLE001
+            if is_connect_error(e):
+                raise OllamaDown(_exc_text(e)) from e
+            if try_no == 1 and is_transient_model_error(e):
+                time.sleep(TRANSIENT_WAIT_S)
+                continue
+            if is_oom(e):
+                cls = "oom"
+            elif isinstance(e, (json.JSONDecodeError, ValueError)):
+                cls = "json_parse"
+            elif is_timeout_error(e):
+                cls = "timeout"
+            else:
+                cls = "model"
+            return {"status": "error", "error_class": cls, "error_msg": _exc_text(e)[:500]}
 
     verdict = derive(cv, vlm)
     return {
@@ -1347,9 +1426,15 @@ def cmd_run(args):
         if args.force:
             statuses.append("ok")
         placeholders = ",".join("?" * len(statuses))
+        where, params = f"status IN ({placeholders})", list(statuses)
+        if args.retry_failed and not args.redrive:
+            # Besides pending rows: the failed rows under the folders named here that another try can
+            # still help (--redrive, every error row in the DB, already includes them).
+            under, uparams = under_folders_sql(folders)
+            where += f" OR ({RETRYABLE_SQL} AND {under})"
+            params += uparams
         todo = conn.execute(
-            f"SELECT path FROM images WHERE status IN ({placeholders}) ORDER BY filename",
-            statuses,
+            f"SELECT path FROM images WHERE {where} ORDER BY filename", params,
         ).fetchall()
         todo = [Path(r["path"]) for r in todo]
         if args.limit:
@@ -1366,6 +1451,15 @@ def cmd_run(args):
             print("Nothing to do. (Use --redrive to retry errors, --force to reprocess.)")
             return
 
+        # Is Ollama up? If not, stop before touching any row: every photo would fail the same way
+        # and burn one of its MAX_ATTEMPTS.
+        try:
+            ollama.Client(timeout=PREFLIGHT_TIMEOUT).list()
+        except Exception as e:  # noqa: BLE001
+            print(f"Ollama isn't answering ({_exc_text(e)[:120]}); nothing was processed, "
+                  f"{len(todo)} photo(s) are still waiting.", file=sys.stderr)
+            sys.exit(EXIT_OLLAMA_DOWN)
+
         harness_ver = harness_version()
         register_prompt(conn, VLM_PROMPT_VERSION, VLM_PROMPT)
         print(f"Prompt {VLM_PROMPT_VERSION} · harness {harness_ver}  "
@@ -1373,14 +1467,22 @@ def cmd_run(args):
 
         client = ollama.Client(timeout=CALL_TIMEOUT)
         done = 0
+        left_pending = 0
         t_start = time.time()
         try:
             for i, path in enumerate(todo, 1):
                 prev = conn.execute("SELECT attempts FROM images WHERE path=?", (str(path),)).fetchone()
-                attempts = (prev["attempts"] if prev else 0) + 1
+                attempts = ((prev["attempts"] if prev else 0) or 0) + 1
                 t0 = time.time()
-                result = process_one(client, path, args.fast)
+                try:
+                    result = process_one(client, path, args.fast)
+                except OllamaDown:
+                    # Ollama went away mid-run: this photo and the rest keep their rows as they were
+                    # (no attempt recorded), so the next run starts where this one stopped.
+                    left_pending = len(todo) - i + 1
+                    break
                 result["attempts"] = attempts
+                result["last_attempt_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 result["prompt_version"] = VLM_PROMPT_VERSION
                 result["harness_version"] = harness_ver
                 upsert_result(conn, str(path), result)
@@ -1400,6 +1502,9 @@ def cmd_run(args):
 
         print(f"\nProcessed {done} image(s) in {_fmt_eta(time.time() - t_start)}.")
         _print_summary(conn)
+        if left_pending:
+            print(f"Ollama stopped answering; {left_pending} photos left pending", file=sys.stderr)
+            sys.exit(EXIT_OLLAMA_DOWN)
         print("\nNext: `photo_cull.py export --xmp` to write cull.csv + XMP sidecars.")
     finally:
         if pidfile:
@@ -1429,6 +1534,61 @@ def _print_summary(conn: sqlite3.Connection):
             "SELECT verdict, COUNT(*) c FROM images WHERE status='ok' "
             "GROUP BY verdict ORDER BY c DESC"):
             print(f"    {r['verdict'] or '-':8s} {r['c']}")
+
+
+def _state_folder_key(path: str, roots: "list[str]") -> "str | None":
+    """The folder `--retryable-only` reports for a file. Under a root it is the shoot folder, the
+    first two levels below the root (root/YYYY/YYYY-MM-DD), whatever subfolders sit under it, so
+    it matches what the watcher globs. With no roots it is the folder that holds the file."""
+    if not roots:
+        return os.path.dirname(path)
+    for root in roots:
+        prefix = root.rstrip("/") + "/"
+        if path.startswith(prefix):
+            rel = path[len(prefix):].split("/")
+            return "/".join([root.rstrip("/")] + rel[:min(2, len(rel) - 1)])
+    return None
+
+
+def cmd_folder_state(args):
+    """One line per folder: folder, files_on_disk, db_rows, pending, retryable, unreadable (tab
+    separated). The watcher reads it to decide whether a folder is finished: files_on_disk equals
+    db_rows, and nothing is pending or retryable. Reads the DB read-only, in one query."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}.")
+    roots = [str(Path(f)) for f in args.folder]
+    if not roots and not args.retryable_only:
+        sys.exit("folder-state needs at least one FOLDER (or --retryable-only).")
+    conn = sqlite3.connect(f"{args.db.resolve().as_uri()}?mode=ro", uri=True)
+    conn.execute("PRAGMA busy_timeout=5000")
+    try:
+        if args.retryable_only:
+            rows = conn.execute(f"SELECT path FROM images WHERE {RETRYABLE_SQL}").fetchall()
+            keys = {_state_folder_key(r[0], roots) for r in rows}
+            for key in sorted(k for k in keys if k):
+                print(key)
+            return
+        counts = {f: [0, 0, 0, 0] for f in roots}          # db_rows, pending, retryable, unreadable
+        for path, pending, retryable, unreadable in conn.execute(
+                f"SELECT path, status='pending', {RETRYABLE_SQL}, "
+                f"(status='error' AND NOT ({RETRYABLE_SQL})) FROM images"):
+            parent = os.path.dirname(path)
+            while True:                                    # every named folder this file sits under
+                c = counts.get(parent)
+                if c is not None:
+                    c[0] += 1
+                    c[1] += pending
+                    c[2] += retryable
+                    c[3] += unreadable
+                up = os.path.dirname(parent)
+                if up == parent:
+                    break
+                parent = up
+    finally:
+        conn.close()
+    for f in roots:
+        on_disk = sum(1 for _ in iter_targets(Path(f), recursive=True))
+        print("\t".join([f, str(on_disk), *map(str, counts[f])]))
 
 
 def cmd_status(args):
@@ -2285,6 +2445,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--ext", nargs="+", metavar="EXT",
                    help="Only queue these file extensions (e.g. --ext arw). Default: all supported types.")
     r.add_argument("--redrive", action="store_true", help="Also retry rows that previously errored.")
+    r.add_argument("--retry-failed", action="store_true",
+                   help=f"Also retry failed photos under the folders named here that another try can "
+                        f"still help: not empty files, fewer than {MAX_ATTEMPTS} tries so far.")
     r.add_argument("--force", action="store_true", help="Reprocess even images already marked ok.")
     r.add_argument("--reprocess", nargs="+", metavar="VERDICT", choices=["keep", "review", "reject"],
                    help="Reset already-done rows with these base verdicts back to pending and re-run them "
@@ -2293,6 +2456,16 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--pidfile", type=Path, default=None,
                    help="Write this process's PID here at start (default: <db>.pid) so you can stop it later.")
     r.set_defaults(func=cmd_run)
+
+    fs = sub.add_parser("folder-state", help="Per folder: files on disk, rows in the DB, and how many "
+                        "are pending, retryable or unreadable (tab separated; the watcher reads it).")
+    fs.add_argument("folder", type=Path, nargs="*",
+                    help="Folders to report on. With --retryable-only: roots to look under (optional).")
+    fs.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    fs.add_argument("--retryable-only", action="store_true",
+                    help="Print only the folders that have retryable rows, one per line (a shoot folder "
+                         "under each root given, else the folder holding the file). Reads the DB only.")
+    fs.set_defaults(func=cmd_folder_state)
 
     s = sub.add_parser("status", help="Show counts and error breakdown.")
     s.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
