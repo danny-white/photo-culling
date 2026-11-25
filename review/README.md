@@ -97,12 +97,12 @@ Tests (from the repo root):
 ```bash
 ./venv/bin/python -m unittest discover -s review/tests -t .   # rules, API, phone->Lightroom->phone
 ./venv/bin/python -m unittest discover -s review/tests/web     # the web app in headless Chromium
-./venv/bin/python review/tests/ui_smoke.py                    # older click-through in headless Firefox
 ```
 
-All use the real `trial.db` read-only and a throwaway `annotations.db` and inbox. The browser
-suite (`review/tests/web`, Playwright from `requirements-dev.txt`) runs its own server on port
-8813 and skips when Playwright or its Chromium is missing.
+Both use the real `trial.db` read-only and a throwaway `annotations.db` and inbox. The browser
+suite ([`tests/web`](tests/web/README.md), Playwright from `requirements-dev.txt`) runs its own
+server on port 8813, stubs the pictures, and skips when Playwright or its Chromium is missing.
+It replaced `ui_smoke.py` (headless Firefox over WebDriver) on 2026-11-24.
 
 **Days** keep their scroll position and open years when you come back from a day; the list is
 fetched again with the server's ETag (a 304 when nothing changed) and redrawn only if it changed.
