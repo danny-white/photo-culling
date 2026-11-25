@@ -286,7 +286,8 @@ struct OfflineSyncTests {
     }
 
     @Test func aFileErrorStopsTheSync() async {
-        // How it is reported is a known issue: see OfflineGapTests.
+        // Stopping is right: on a full phone every later day would fail the same way. How it is
+        // reported is a known issue: see OfflineGapTests.
         let rig = SyncRig(.fresh([newest, started]))
         rig.fake.fail(started.day, with: CocoaError(.fileWriteOutOfSpace))
         await rig.syncNow()

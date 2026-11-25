@@ -20,6 +20,13 @@ swift test
 macOS (Xcode 16+ / Swift 6): the same `swift build` and `swift test` from the package folder,
 or open `Package.swift` in Xcode. The package declares iOS 18 and macOS 15.
 
+## Known issues
+
+`OfflineGapTests` holds tests for gaps the 2026-11-24 review found in the offline days, each
+inside `withKnownIssue` with a comment naming the finding in `review-2026-11-24/ios.md`. They
+show as known issues, not failures. When a fix lands, its test fails with "Known issue was not
+recorded": drop the `withKnownIssue` wrapper and keep the test.
+
 ## Live tests
 
 `swift test` runs only offline tests (fake transport, synthetic JSON). Tests against the

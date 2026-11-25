@@ -271,3 +271,15 @@ final class SendableLog<Element: Sendable>: Sendable {
     func append(_ element: Element) { state.withLock { $0.append(element) } }
     var all: [Element] { state.withLock { $0 } }
 }
+
+/// A value that escaping `@Sendable` closures read and a test changes: what a fake server sends.
+final class SendableBox<Value: Sendable>: Sendable {
+    private let state: Mutex<Value>
+
+    init(_ value: Value) { state = Mutex(value) }
+
+    var value: Value {
+        get { state.withLock { $0 } }
+        set { state.withLock { $0 = newValue } }
+    }
+}
