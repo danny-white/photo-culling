@@ -18,6 +18,7 @@ Then open http://127.0.0.1:8000. It is served by waitress (connections stay open
 --dev uses Flask's development server instead, for debugging.
 """
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -59,6 +60,9 @@ log = logging.getLogger(__name__)
 # the web pages open at once (a handful of connections each), so a decide never queues behind
 # a burst of slow crops. Idle connections are dropped after a minute.
 WAITRESS = {"threads": 16, "channel_timeout": 60, "connection_limit": 200}
+
+GZIP_MIN_BYTES = 1024    # smaller JSON isn't worth compressing
+GZIP_LEVEL = 6
 
 # ---- config (populated in main) ----
 CFG = {
@@ -469,6 +473,33 @@ def api_intervene():
     return jsonify({"ok": False, "msg": "unknown action"}), 400
 
 
+# ---------------------------------------------------------------- compression
+def install_compression(app):
+    """Gzip JSON responses for clients that ask for it (/m/api/days alone is 192 KB, 41 KB
+    gzipped). Register this after perf.install(): after_request hooks run last-registered first,
+    so the timing line then records the size that went over the wire. The mobile blueprint's own
+    hook runs before any app-level one, so its ETag is made from the plain body; compressing it
+    makes it a different representation, so the ETag goes weak (If-None-Match compares weakly,
+    so a client that sends it back still gets its 304). Pictures, crops and downloads aren't
+    JSON and are never touched."""
+    @app.after_request
+    def compress(resp):
+        if (resp.status_code != 200 or resp.mimetype != "application/json" or resp.direct_passthrough
+                or "Content-Encoding" in resp.headers
+                or request.accept_encodings.quality("gzip") <= 0):
+            return resp
+        body = resp.get_data()
+        if len(body) < GZIP_MIN_BYTES:
+            return resp
+        resp.set_data(gzip.compress(body, compresslevel=GZIP_LEVEL, mtime=0))   # also sets Content-Length
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.vary.add("Accept-Encoding")
+        etag, weak = resp.get_etag()
+        if etag and not weak:
+            resp.set_etag(etag, weak=True)
+        return resp
+
+
 # ---------------------------------------------------------------- main
 def configure_logging():
     """Warnings, errors and tracebacks go to stderr, where journald keeps them (it adds the
@@ -506,6 +537,7 @@ def main():
     CFG["folders"] = a.folders
     CFG["embed_base_url"] = a.embed_base_url
     perf.install(app, a.perf_log or Path(CFG["db"]).parent / "perf.jsonl")
+    install_compression(app)    # after perf, so its line has the compressed size
     app.register_blueprint(mobile.make_blueprint(
         db_ro=db_ro, anno=anno, pc=pc, cache_dir=CACHE, static_dir=STATIC / "m",
         state_dir=Path(CFG["db"]).parent / "mobile"))

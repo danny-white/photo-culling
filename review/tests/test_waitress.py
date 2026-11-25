@@ -178,6 +178,60 @@ class WaitressServing(unittest.TestCase):
         self.assertIn("send_ms", line)
 
 
+class GzipUnderWaitress(unittest.TestCase):
+    """install_compression() over a real connection: the body that arrives is gzip, the connection
+    stays open, and a client that doesn't ask gets plain JSON."""
+
+    @classmethod
+    def setUpClass(cls):
+        from flask import Flask, jsonify, request
+        import perf
+        import server
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.perf_log = Path(cls.tmp.name) / "perf.jsonl"
+        app = Flask(__name__)
+        perf.install(app, cls.perf_log)
+        server.install_compression(app)
+
+        @app.route("/big")
+        def big():
+            resp = jsonify(items=[{"n": i, "name": f"photo {i}"} for i in range(400)])
+            resp.add_etag()                    # what the mobile blueprint's revalidate hook does
+            return resp.make_conditional(request)
+
+        cls.served = Served(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.served.close()
+        drop_perf_handler(cls.perf_log)
+        cls.tmp.cleanup()
+
+    def test_gzip_over_a_kept_open_connection(self):
+        import gzip
+        c = self.served.conn()
+        c.request("GET", "/big")
+        plain = c.getresponse()
+        plain_body = plain.read()
+        self.assertIsNone(plain.getheader("Content-Encoding"))
+        ports = {c.sock.getsockname()[1]}
+        c.request("GET", "/big", headers={"Accept-Encoding": "gzip"})
+        r = c.getresponse()
+        body = r.read()
+        ports.add(c.sock.getsockname()[1])
+        self.assertEqual(r.getheader("Content-Encoding"), "gzip")
+        self.assertEqual(int(r.getheader("Content-Length")), len(body))
+        self.assertLess(len(body), len(plain_body) / 3)
+        self.assertEqual(gzip.decompress(body), plain_body)
+        self.assertTrue(r.getheader("ETag").startswith('W/"'))
+        self.assertEqual(len(ports), 1, "one connection carried both")
+        # (waitress 3 answers every 304 with Connection: close, so the connection isn't checked after it)
+        c.request("GET", "/big", headers={"Accept-Encoding": "gzip", "If-None-Match": r.getheader("ETag")})
+        again = c.getresponse()
+        self.assertEqual((again.status, again.read()), (304, b""))
+        c.close()
+
+
 @unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
 class SlowCropsLeaveRoomForDecides(unittest.TestCase):
     """A 1:1 crop can hold a thread for seconds (a NAS read, or waiting for one of the two decode

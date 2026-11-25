@@ -11,6 +11,12 @@ Writes need the header `X-Culling-Bay: 1` and a JSON body.
 a `304` comes back with no body when nothing changed. Pictures (`/m/api/img`) are
 cacheable for a day (`max-age=86400`) and support `If-Modified-Since`.
 
+**Compression.** A JSON `200` of 1 KB or more is gzipped when the request says
+`Accept-Encoding: gzip` (URLSession sends it and decodes the body itself): `Content-Encoding: gzip`,
+`Vary: Accept-Encoding`, and the `ETag` becomes weak (`W/"..."`) because the compressed body is a
+different representation. Send back whatever `ETag` came; it matches either way, so the `304` works
+as before. Pictures, crops and downloads are never compressed.
+
 **Timing.** Every response has a `Server-Timing` header (`total;dur=12.3, full_decode;dur=...`,
 facts as `cache;desc="hit"`). The app can report its own measurements to `POST /m/api/perf`
 (see `review/perf.py`). The server tells the app's lines from the web pages' by the User-Agent
