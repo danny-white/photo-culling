@@ -44,12 +44,12 @@ struct ExportModelTests {
 
     private func make(
         _ photos: [Photo], _ action: ExportModel.Action, service: FakeExportService,
-        rawChoice: RawChoice? = nil
+        rawChoice: RawChoice? = nil, onSuccess: (@MainActor () -> Void)? = nil
     ) -> (ExportModel, PerfReporter) {
         let perf = PerfReporter(client: testBaseURL, transport: perfTransport)
         return (ExportModel(
             photos: photos, action: action, client: client, perf: perf, service: service,
-            rawChoice: rawChoice), perf)
+            rawChoice: rawChoice, onSuccess: onSuccess), perf)
     }
 
     @Test func aRawAsksForAChoiceFirst() {
@@ -181,5 +181,63 @@ struct ExportModelTests {
         #expect(model.needsChoice)
         await model.run(choice: .jpeg)
         #expect(service.downloads.map(\.kind) == [.picture])
+    }
+
+    // MARK: Success hook
+
+    @Test func aFinishedSaveCallsOnSuccessOnce() async {
+        var calls = 0
+        let (model, _) = make(photos, .save, service: FakeExportService(), onSuccess: { calls += 1 })
+        await model.run(choice: .raw)
+        #expect(calls == 1)
+        await model.run(choice: .raw)                          // a second run does nothing
+        #expect(calls == 1)
+    }
+
+    @Test func aSharedFileCallsOnSuccessWhenItIsReady() async {
+        var calls = 0
+        let (model, _) = make([photos[0]], .share, service: FakeExportService(), rawChoice: .raw, onSuccess: { calls += 1 })
+        await model.run()
+        #expect(model.shareFile != nil)
+        #expect(calls == 1)
+    }
+
+    @Test func aDeniedPermissionDoesNotCallOnSuccess() async {
+        var calls = 0
+        let service = FakeExportService()
+        service.allowed = false
+        let (model, _) = make([photos[0]], .save, service: service, rawChoice: .raw, onSuccess: { calls += 1 })
+        await model.run()
+        #expect(model.permissionDenied && calls == 0)
+    }
+
+    @Test func aFailedDownloadDoesNotCallOnSuccess() async {
+        var calls = 0
+        let service = FakeExportService()
+        service.failDownloadFor = [1]
+        let (save, _) = make([photos[0]], .save, service: service, rawChoice: .raw, onSuccess: { calls += 1 })
+        await save.run()
+        let (share, _) = make([photos[0]], .share, service: service, rawChoice: .raw, onSuccess: { calls += 1 })
+        await share.run()
+        #expect(save.progress.failed == [1] && share.shareFile == nil)
+        #expect(calls == 0)
+    }
+
+    @Test func aFailedAddDoesNotCallOnSuccess() async {
+        var calls = 0
+        let service = FakeExportService()
+        service.failAddFor = ["IMG_0002.JPG"]
+        let (model, _) = make([photos[1]], .save, service: service, onSuccess: { calls += 1 })
+        await model.run()
+        #expect(calls == 0)
+    }
+
+    @Test func aCancelledSaveDoesNotCallOnSuccess() async {
+        var calls = 0
+        let (model, _) = make(photos, .save, service: FakeExportService(), rawChoice: .raw, onSuccess: { calls += 1 })
+        let task = Task { await model.run() }
+        task.cancel()
+        await task.value
+        #expect(model.message == "Cancelled." && calls == 0)
     }
 }

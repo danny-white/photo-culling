@@ -336,4 +336,89 @@ struct PracticeModelTests {
         _ = await write.value
         #expect(!model.isSaving("a"))
     }
+
+    // MARK: Notes kept between launches
+
+    private func storeDirectory() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("practice-notes-\(UUID().uuidString)")
+    }
+
+    @Test func aTypedNoteIsKeptInTheStoreAndComesBackOnARelaunch() async {
+        let store = InMemoryPracticeDraftStore()
+        let transport = practiceTransport(list: practiceListJSON([practiceJSON("a")]))
+        let first = PracticeModel(
+            client: CullingBayClient(baseURL: testBaseURL, transport: transport), now: { stamp }, store: store)
+        await first.load()
+        first.setDraft("Pushed the shadows", for: "a")
+        #expect(store.drafts == ["a": "Pushed the shadows"])
+
+        let second = PracticeModel(
+            client: CullingBayClient(baseURL: testBaseURL, transport: transport), now: { stamp }, store: store)
+        #expect(second.draft(for: "a") == "Pushed the shadows")      // before the list has loaded
+        await second.load()
+        #expect(second.draft(for: "a") == "Pushed the shadows")
+    }
+
+    @Test func aNoteBackToTheSavedTextOrSavedToTheServerLeavesTheStore() async {
+        let store = InMemoryPracticeDraftStore()
+        let item = practiceJSON("a", status: "done", doneAt: "2026-11-21T10:00:00")
+        let model = PracticeModel(
+            client: CullingBayClient(
+                baseURL: testBaseURL,
+                transport: accepting([item], status: "done", note: "Warmer", doneAt: "2026-11-21T10:00:00")),
+            now: { stamp }, store: store)
+        await model.load()
+        model.setDraft("Warm", for: "a")
+        #expect(store.drafts == ["a": "Warm"])
+        model.setDraft("", for: "a")                                // the saved note again: no draft
+        #expect(store.drafts.isEmpty)
+        model.setDraft("Warmer", for: "a")
+        #expect(await model.saveNote("Warmer", for: "a"))
+        #expect(store.drafts.isEmpty)
+    }
+
+    @Test func sendingUnsavedNotesSendsTheNotesOfDoneChallengesOnly() async throws {
+        let done = practiceJSON("a", status: "done", doneAt: "2026-11-21T10:00:00")
+        let waiting = practiceJSON("b")
+        let store = InMemoryPracticeDraftStore(drafts: ["a": "Written offline", "b": "Not marked done yet"])
+        let transport = accepting([done, waiting], status: "done", note: "Written offline", doneAt: "2026-11-21T10:00:00")
+        let model = PracticeModel(
+            client: CullingBayClient(baseURL: testBaseURL, transport: transport), now: { stamp }, store: store)
+        await model.load()
+        await model.sendUnsavedNotes()
+        let writes = await transport.requests.filter { $0.httpMethod != "GET" }
+        #expect(writes.count == 1)
+        #expect(writes.first?.url?.lastPathComponent == "a")
+        #expect(try jsonBody(try #require(writes.first))["note"] as? String == "Written offline")
+        #expect(model.challenge(id: "a")?.note == "Written offline")
+        #expect(store.drafts == ["b": "Not marked done yet"])
+    }
+
+    @Test func aNoteThatCannotBeSentStaysQuietlyForNextTime() async {
+        let done = practiceJSON("a", status: "done", doneAt: "2026-11-21T10:00:00")
+        let store = InMemoryPracticeDraftStore(drafts: ["a": "Written offline"])
+        let model = PracticeModel(
+            client: CullingBayClient(baseURL: testBaseURL, transport: refusing([done], status: 503, body: "{}")),
+            now: { stamp }, store: store)
+        await model.load()
+        await model.sendUnsavedNotes()
+        #expect(model.message == "")
+        #expect(store.drafts == ["a": "Written offline"] && model.draft(for: "a") == "Written offline")
+        #expect(!model.isSaving("a"))
+    }
+
+    @Test func theFileStoreRoundTripsAndToleratesAMissingOrGarbledFile() throws {
+        let directory = storeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FilePracticeDraftStore(directory: directory)
+        #expect(store.load().isEmpty)                                // no file yet
+        store.save(["a": "One", "b": "Two\nlines"])
+        #expect(FilePracticeDraftStore(directory: directory).load() == ["a": "One", "b": "Two\nlines"])
+        store.save([:])
+        #expect(!FileManager.default.fileExists(atPath: store.fileURL.path))
+        try Data("not json".utf8).write(to: store.fileURL)
+        #expect(FilePracticeDraftStore(directory: directory).load().isEmpty)
+        try Data(#"{"a": 3}"#.utf8).write(to: store.fileURL)         // the wrong shape is no notes either
+        #expect(FilePracticeDraftStore(directory: directory).load().isEmpty)
+    }
 }

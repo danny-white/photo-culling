@@ -13,6 +13,7 @@ struct PracticeRoute: Hashable {
 /// `practice.js`.
 struct PracticeTab: View {
     @Environment(AppServices.self) private var services
+    @Environment(\.scenePhase) private var scenePhase
     @State private var path: [PracticeRoute] = []
     @State private var openedLaunchChallenge = false
 
@@ -40,7 +41,13 @@ struct PracticeTab: View {
             }
             .task {
                 await model.load()
+                await model.sendUnsavedNotes()
                 openLaunchChallenge()
+            }
+            // Back from the background: a note typed with no connection goes now, if it can.
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await model.sendUnsavedNotes() }
             }
         }
     }

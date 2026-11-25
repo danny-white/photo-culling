@@ -233,6 +233,15 @@ struct PracticeModelsTests {
         #expect([PracticeLevel.easy, .medium, .hard].map(\.title) == ["Easy", "Medium", "Hard"])
     }
 
+    @Test func thePhotoFrameTakesThePicturesOwnShape() {
+        #expect(PracticeFormat.photoShape(width: 1200, height: 1800) == 2.0 / 3.0)    // a portrait
+        #expect(PracticeFormat.photoShape(width: 1616, height: 1077) > 1.49)
+        #expect(PracticeFormat.photoShape(width: 3000, height: 1000) == 3)
+        // Until the size is known, or if it is no use: 4:3, as before.
+        #expect(PracticeFormat.photoShape(width: 0, height: 0) == 4.0 / 3.0)
+        #expect(PracticeFormat.photoShape(width: 1200, height: 0) == 4.0 / 3.0)
+    }
+
     @Test func theSaveButtonNamesTheRawAndItsSize() {
         let raw = galleryPhoto(1, file: "A.ARW", raw: true, bytes: 43_100_672)
         #expect(PracticeFormat.saveTitle(raw) == "Save RAW to Photos · 43 MB")

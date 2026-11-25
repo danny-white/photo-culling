@@ -76,11 +76,12 @@ final class AppServices {
     /// A Save or Share for these photos, to show in an `ExportSheet`. `rawChoice` settles JPEG or
     /// RAW in advance, so the sheet does not ask.
     func makeExport(
-        _ photos: [Photo], action: ExportModel.Action, rawChoice: RawChoice? = nil
+        _ photos: [Photo], action: ExportModel.Action, rawChoice: RawChoice? = nil,
+        onSuccess: (@MainActor () -> Void)? = nil
     ) -> ExportLaunch {
         ExportLaunch(model: ExportModel(
             photos: photos, action: action, client: client, perf: perf, service: exporter,
-            rawChoice: rawChoice))
+            rawChoice: rawChoice, onSuccess: onSuccess))
     }
 
     private struct Connection {
@@ -121,7 +122,9 @@ final class AppServices {
             client: client, loader: loader, perf: perf,
             home: HomeModel(client: client, settings: settings),
             cullQueue: queue, cullDays: CullDaysModel(client: client),
-            practice: PracticeModel(client: client), offline: offline)
+            practice: PracticeModel(
+                client: client, store: FilePracticeDraftStore(directory: practiceStoreDirectory(for: url))),
+            offline: offline)
     }
 
     /// Where the Cull queue keeps its unsent taps: one folder per server, so changing the server
@@ -130,6 +133,12 @@ final class AppServices {
     private static func cullStoreDirectory(for url: URL) -> URL {
         URL.applicationSupportDirectory.appending(
             path: "CullWrites/\(serverFolderName(for: url))", directoryHint: .isDirectory)
+    }
+
+    /// Where the Practice notes that did not reach the server are kept: one folder per server, named the same way.
+    private static func practiceStoreDirectory(for url: URL) -> URL {
+        URL.applicationSupportDirectory.appending(
+            path: "PracticeNotes/\(serverFolderName(for: url))", directoryHint: .isDirectory)
     }
 
     /// Where the days kept on the phone live: one folder per server, named the same way.

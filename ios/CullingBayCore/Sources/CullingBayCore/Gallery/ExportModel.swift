@@ -27,17 +27,22 @@ public final class ExportModel {
     @ObservationIgnored private let client: CullingBayClient
     @ObservationIgnored private let perf: PerfReporter
     @ObservationIgnored private let presetChoice: RawChoice?
+    @ObservationIgnored private let onSuccess: (@MainActor () -> Void)?
 
     /// `rawChoice` settles JPEG or RAW in advance, so the sheet does not ask (the Practice tab
-    /// always saves the RAW); `run(choice:)` then uses it whatever it is given.
+    /// always saves the RAW); `run(choice:)` then uses it whatever it is given. `onSuccess` is
+    /// called once, when every photo is in the library (a save) or the file is ready (a share);
+    /// not when permission is refused, a download fails, or the sheet is cancelled.
     public init(photos: [Photo], action: Action, client: CullingBayClient,
-                perf: PerfReporter, service: any PhotoExportService, rawChoice: RawChoice? = nil) {
+                perf: PerfReporter, service: any PhotoExportService, rawChoice: RawChoice? = nil,
+                onSuccess: (@MainActor () -> Void)? = nil) {
         self.photos = action == .share ? Array(photos.prefix(1)) : photos
         self.action = action
         self.client = client
         self.perf = perf
         self.service = service
         presetChoice = rawChoice
+        self.onSuccess = onSuccess
         needsChoice = rawChoice == nil && SavePlan.needsRawChoice(self.photos)
         progress = SaveProgress(total: self.photos.count)
     }
@@ -72,6 +77,7 @@ public final class ExportModel {
                 if action == .share {
                     shareFile = file
                     message = "Ready to share."
+                    onSuccess?()
                 } else {
                     try await service.addPhoto(file: file, filename: item.filename)
                     progress.recordSaved()
@@ -82,7 +88,10 @@ public final class ExportModel {
                 message = error.localizedDescription
             }
         }
-        if action == .save { message = progress.summary }
+        if action == .save {
+            message = progress.summary
+            if progress.failed.isEmpty && progress.isFinished { onSuccess?() }
+        }
     }
 
     public func finishSharing() {

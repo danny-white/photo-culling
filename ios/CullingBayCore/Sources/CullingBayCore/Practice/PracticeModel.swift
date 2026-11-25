@@ -18,18 +18,26 @@ public final class PracticeModel {
     /// What to say above the list or the detail: the server's `error`, a failed load, or a failed
     /// write. Empty when there is nothing to say.
     public private(set) var message = ""
-    /// Notes typed and not yet saved, by challenge id. A failed save leaves its note here.
+    /// Notes typed and not yet saved, by challenge id. A failed save leaves its note here, and
+    /// the store keeps them for the next launch.
     public private(set) var drafts: [String: String] = [:]
     private var saving: [String: Int] = [:]
 
     @ObservationIgnored private let client: CullingBayClient
     @ObservationIgnored private let now: () -> Date
+    @ObservationIgnored private let store: (any PracticeDraftStore)?
     @ObservationIgnored private var generation = 0
 
     /// `now` stamps the download mark a challenge shows before the server answers; tests pin it.
-    public init(client: CullingBayClient, now: @escaping () -> Date = { Date() }) {
+    /// `store` is where the unsaved notes are kept between launches; nil keeps them in memory only.
+    public init(
+        client: CullingBayClient, now: @escaping () -> Date = { Date() },
+        store: (any PracticeDraftStore)? = nil
+    ) {
         self.client = client
         self.now = now
+        self.store = store
+        drafts = store?.load() ?? [:]
     }
 
     // MARK: Reading
@@ -105,7 +113,21 @@ public final class PracticeModel {
 
     /// Keeps what was typed. Text that is the saved note again is no draft.
     public func setDraft(_ text: String, for id: String) {
-        drafts[id] = text == challenge(id: id)?.note ? nil : text
+        let draft = text == challenge(id: id)?.note ? nil : text
+        guard drafts[id] != draft else { return }
+        drafts[id] = draft
+        store?.save(drafts)
+    }
+
+    /// Sends the notes written for done challenges that the server does not have yet, as when the
+    /// app comes back to the front after a note was typed with no connection. A note that cannot
+    /// be sent stays, quietly, for the next time; the notes of challenges not done wait for Mark done.
+    public func sendUnsavedNotes() async {
+        for (id, text) in drafts.sorted(by: { $0.key < $1.key }) {
+            guard let challenge = challenge(id: id), challenge.status == .done, text != challenge.note
+            else { continue }
+            _ = await write(id, status: nil, note: text, quiet: true)
+        }
     }
 
     // MARK: Writing
@@ -154,7 +176,10 @@ public final class PracticeModel {
             if let index = challenges.firstIndex(where: { $0.id == id }) {
                 challenges[index].apply(state)
             }
-            if let note, drafts[id] == note { drafts[id] = nil }
+            if let note, drafts[id] == note {
+                drafts[id] = nil
+                store?.save(drafts)
+            }
             if !quiet { message = "" }
             return true
         } catch {

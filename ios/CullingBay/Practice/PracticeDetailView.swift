@@ -4,14 +4,16 @@ import SwiftUI
 /// One challenge (`detailView` in `practice.js`): the picture, what to do and why, saving the RAW
 /// to Photos to edit in Lightroom, and marking it done with a note. A Needs Desktop challenge has
 /// no save buttons: it says it is done on the Mac, and links to its on-the-go version, which is
-/// the same screen for the same photo. The state lives in `PracticeModel`; what is typed in the note box is kept there too, so a note that did not save
-/// is still here when the screen is opened again.
+/// the same screen for the same photo. The state lives in `PracticeModel`; what is typed in the note box is kept there too (and in a file,
+/// for the next launch), so a note that did not save is still here when the screen is opened again.
 @MainActor
 struct PracticeDetailView: View {
     @Environment(AppServices.self) private var services
     let id: String
     @State private var note: String
     @State private var export: ExportLaunch?
+    /// The height of the screen, for capping a tall photo.
+    @State private var screenHeight: CGFloat = 0
     @FocusState private var noteFocused: Bool
 
     private var model: PracticeModel { services.practice }
@@ -34,6 +36,10 @@ struct PracticeDetailView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
+        // The scroll view's height plus the bars it runs under: the screen's.
+        .onGeometryChange(for: CGFloat.self) {
+            $0.size.height + $0.safeAreaInsets.top + $0.safeAreaInsets.bottom
+        } action: { screenHeight = $0 }
         .navigationTitle("Challenge")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -64,11 +70,8 @@ struct PracticeDetailView: View {
             if !model.message.isEmpty {
                 PracticeMessageView(text: model.message)
             }
-            RemoteImage(
-                url: services.client.imageURL(id: challenge.photo.id, size: .view),
-                maxPixel: ImagePixels.view, fit: true)
-                .aspectRatio(4 / 3, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            ChallengePhoto(
+                url: services.client.imageURL(id: challenge.photo.id, size: .view), maxHeight: screenHeight * 0.6)
                 .accessibilityLabel("Challenge photo")
             header(challenge)
             brief(challenge)
@@ -223,10 +226,15 @@ struct PracticeDetailView: View {
         .controlSize(.large)
     }
 
-    /// Opens the Save or Share for the picture, as the file itself, and counts it as downloaded.
+    /// Opens the Save or Share for the picture, as the file itself. It counts as downloaded once
+    /// the file is in Photos (or ready to share), not when the sheet opens: a refused permission,
+    /// a failed download or Cancel leaves it as it was.
     private func start(_ action: ExportModel.Action, for challenge: PracticeChallenge) {
-        export = services.makeExport([challenge.photo], action: action, rawChoice: .raw)
-        model.markDownloaded(challenge.id)
+        let id = challenge.id
+        let model = model
+        export = services.makeExport([challenge.photo], action: action, rawChoice: .raw, onSuccess: {
+            model.markDownloaded(id)
+        })
     }
 
     private func howTo(_ challenge: PracticeChallenge) -> some View {
@@ -303,5 +311,24 @@ struct PracticeDetailView: View {
         else { return }
         let text = note
         Task { await model.saveNote(text, for: id) }
+    }
+}
+
+/// The challenge's photo in a frame of its own shape, so a portrait fills a tall frame instead of
+/// sitting in a 4:3 box with bars either side. The frame is 4:3 until the picture is known, and
+/// no taller than `maxHeight` (a fraction of the screen) when that is set.
+private struct ChallengePhoto: View {
+    let url: URL
+    let maxHeight: CGFloat
+    @State private var shape = PracticeFormat.photoShape(width: 0, height: 0)
+
+    var body: some View {
+        RemoteImage(url: url, maxPixel: ImagePixels.view, fit: true, onSize: { size in
+            shape = PracticeFormat.photoShape(width: size.width, height: size.height)
+        })
+        .aspectRatio(shape, contentMode: .fit)
+        .frame(maxHeight: maxHeight > 0 ? maxHeight : .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity)
     }
 }

@@ -79,6 +79,12 @@ public enum PracticeFormat {
         return challenge.status == .downloaded ? "Downloaded" : nil
     }
 
+    /// The shape of the picture's frame on the challenge screen, width over height: the picture's
+    /// own once it is known, and 4:3 until then (or when it reports no size).
+    public static func photoShape(width: Double, height: Double) -> Double {
+        width > 0 && height > 0 ? width / height : 4.0 / 3.0
+    }
+
     private static func withSize(_ title: String, _ photo: Photo) -> String {
         let size = GalleryFormat.megabytes(photo.bytes)
         return size.isEmpty ? title : "\(title) · \(size)"
