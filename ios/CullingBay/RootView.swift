@@ -27,7 +27,7 @@ struct RootView: View {
                 .tag(Tab.practice)
         }
         .sheet(isPresented: $services.showsSettings) {
-            SettingsView(url: services.serverURL)
+            SettingsView()
         }
     }
 }
