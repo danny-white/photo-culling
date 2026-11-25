@@ -197,7 +197,8 @@ def decode_failed(pc, rowid: int, path: str | None, e: Exception):
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
                    known_unreadable: Path = KNOWN_UNREADABLE, ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
-                   raw_decoder=None, region_decoder=None, backup_status: Path | None = None) -> Blueprint:
+                   raw_decoder=None, region_decoder=None, backup_status: Path | None = None,
+                   prime_search: bool = False) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
@@ -205,7 +206,9 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     list of originals pipeline-health stops reporting as unreadable. raw_decoder(path) ->
     PIL image replaces the rawpy decode (tests pass a fast fake); region_decoder(path, x, y, w, h)
     -> (image, box) replaces region_decode.decode_region for the offline crops. backup_status: the file
-    ops/backup.sh writes after each run, read by the pipeline-health alerts (default: next to the DB)."""
+    ops/backup.sh writes after each run, read by the pipeline-health alerts (default: next to the DB).
+    prime_search: after the search index is built, also load CLIP's text half and the caption model
+    in Ollama (the server turns it on; tests leave it off, so they don't load a 250 MB model each)."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
     ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
     backup_status = backup_status if backup_status is not None else state_dir.parent / "backup-status.json"
@@ -234,12 +237,14 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     finder = search.Search(db_ro=db_ro, pc=pc, day_of=day_of, day_date=day_date, ollama_url=ollama_url,
                            library_root=LIBRARY_ROOT)
 
-    def warm():   # the first search would otherwise wait a few seconds for the vectors to load
+    def warm_search():   # the first search would otherwise wait a few seconds for the vectors to load
         try:
             finder.index()
+            if prime_search:
+                finder.prime()
         except Exception:  # noqa: BLE001 - a search will try again, and report what is wrong
             pass
-    threading.Thread(target=warm, daemon=True).start()
+    threading.Thread(target=warm_search, daemon=True, name="search-warm-up").start()
 
     def offline_decode(path: str) -> Image.Image:
         """A full decode for the phone's offline copy of a day (`keep=0` on a crop): one at a
@@ -319,7 +324,7 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                 decoding.pop(path, None)
             done.set()
 
-    def warm(path: str) -> None:
+    def warm_decode(path: str) -> None:
         """Decode-ahead: a RAW's picture was just asked for (a card shown or pre-fetched, a
         photo in the viewer), so its 1:1 check or HD zoom is likely next. Queue a background
         decode unless it is cached, running or queued already."""
@@ -1824,7 +1829,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         if not r:
             return jsonify({"error": "not found"}), 404
         if edge == IMG_EDGE["view"] and request.args.get("warm") != "0":
-            warm(r["path"])                           # its 1:1 check or HD zoom is likely next
+            warm_decode(r["path"])                    # its 1:1 check or HD zoom is likely next
         cached = previews.preview_path(cache_dir, r["path"], edge)
         perf.note(cache="hit" if cached.exists() else "miss", size=request.args.get("s", "view"),
                   ext=Path(r["path"]).suffix.lower())

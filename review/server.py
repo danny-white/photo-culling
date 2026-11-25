@@ -35,6 +35,11 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# One BLAS thread. The search's vector products run on numpy's multithreaded OpenBLAS, whose
+# threads then fight onnxruntime's for the cores: a search took ~300 ms and a CLIP text query
+# 65 ms; with one BLAS thread, ~220 ms and 36 ms. Read when numpy loads, so set it before that.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import numpy as np
 import waitress
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
@@ -540,7 +545,7 @@ def main():
     install_compression(app)    # after perf, so its line has the compressed size
     app.register_blueprint(mobile.make_blueprint(
         db_ro=db_ro, anno=anno, pc=pc, cache_dir=CACHE, static_dir=STATIC / "m",
-        state_dir=Path(CFG["db"]).parent / "mobile"))
+        state_dir=Path(CFG["db"]).parent / "mobile", prime_search=True))
     app.register_blueprint(make_eval_blueprint(eval_dir=HERE.parent / "eval"))
     if a.server_pidfile:
         a.server_pidfile.write_text(str(os.getpid()))

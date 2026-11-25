@@ -15,15 +15,25 @@ photo ids, so the app can open the day with those stacks first.
 
 Years, months and ISO dates in a query ("snow 2019", "june 2015", "2026-10-01") narrow the days
 instead of being searched for. More like this ranks days by one photo's picture vector.
+
+The index (every photo's text and both vector matrices, about 220 MB) is rebuilt only when the
+library changes: index() looks at a cheap content signature at most every REFRESH_S and builds a
+new index off to the side, so searches keep using the old one meanwhile.
 """
+import json
+import logging
 import math
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 
 import perf
+
+log = logging.getLogger(__name__)
 
 CAPTION_MARGIN = 0.06   # nomic cosine: within this of the best photo
 PICTURE_MARGIN = 0.03   # CLIP cosine runs on a tighter scale than nomic's
@@ -45,6 +55,8 @@ LIKE_PICTURE_MARGIN = 0.10
 LIKE_CAPTION_MARGIN = 0.08
 IDENT = re.compile(r"\d{3,}")   # DSC04814, IMG_2231: a file name, matched by words only
 REFRESH_S = 60          # how often to look for new photos or vectors
+BACKSTOP_S = 24 * 3600  # rebuild the index at least this often, in case a change slips past the signature
+KEEP_ALIVE = "2h"       # how long Ollama keeps the caption model loaded after a query (its default is 5 min)
 DAYS_OUT = 40
 MATCH_IDS_MAX = 400     # matching photo ids sent per day, for "matches first"
 PHOTOS_OUT = 600        # photos sent for one gallery search
@@ -101,44 +113,102 @@ def cutoff(s: np.ndarray, margin: float, floor: float = -1.0) -> tuple[float, fl
 
 
 class Search:
-    def __init__(self, *, db_ro, pc, day_of, day_date, ollama_url: str, library_root: str):
+    def __init__(self, *, db_ro, pc, day_of, day_date, ollama_url: str, library_root: str, embed=None):
+        """embed(text) -> the caption vector for a query; by default Ollama's /api/embed (tests pass a fake)."""
         self.db_ro, self.pc, self.day_of, self.day_date = db_ro, pc, day_of, day_date
         self.ollama = ollama_url.rstrip("/")
         self.root = library_root
+        self._embed = embed or self._ollama_embed
         self._clip = None
-        self.lock = threading.Lock()
-        self.idx = None
-        self.key = None
-        self.checked = 0.0
+        self._clip_lock = threading.Lock()
+        self.lock = threading.Lock()   # guards the fields below; never held while the index is built
+        self.idx = None                # the index in use
+        self.key = None                # the library signature it was built from
+        self.checked = 0.0             # when the signature was last compared
+        self.built = 0.0               # when the index was built
+        self._building = None          # an Event while one thread checks or builds, so others don't
+        self._error = None             # why the last build failed, for the threads that waited for it
 
     @property
-    def clip(self):   # loaded on first use (~250 MB for the text half)
+    def clip(self):   # loaded on first use (~250 MB for the text half), once, however many ask at first
         if self._clip is None:
-            self._clip = self.pc.Clip(threads=2)
+            with self._clip_lock:
+                if self._clip is None:
+                    self._clip = self.pc.Clip(threads=2)
         return self._clip
 
     # ---------------------------------------------------------------- the index
+    SNAPSHOT_SQL = """SELECT e.top, e.n, i.top, i.ok, i.latest, i.places, {s} FROM
+        (SELECT MAX(rowid) AS top, COUNT(*) AS n FROM embeddings) e,
+        (SELECT MAX(rowid) AS top, SUM(status = 'ok') AS ok, MAX(processed_at) AS latest, COUNT(place) AS places
+         FROM images) i{sums}"""
+
     def _snapshot(self, con):
-        e = con.execute("SELECT MAX(rowid) FROM embeddings").fetchone()[0]
-        i = con.execute("SELECT MAX(rowid) FROM images").fetchone()[0]
-        s = con.execute("SELECT COUNT(*), MAX(created_at) FROM day_summaries").fetchone()
-        return e, i, tuple(s), int(time.time() // 600)   # and a full reload every 10 minutes
+        """What the library holds, cheaply: new rows (the highest rowids), rows changed in place (the
+        count of photos that are ok, the newest processed_at, how many have a place) and the day
+        summaries. Anything that changes what a search can find changes this."""
+        try:
+            row = con.execute(self.SNAPSHOT_SQL.format(
+                s="s.n, s.latest", sums=", (SELECT COUNT(*) AS n, MAX(created_at) AS latest FROM day_summaries) s")).fetchone()
+        except Exception:  # noqa: BLE001 - before daysum has ever run there is no such table
+            row = con.execute(self.SNAPSHOT_SQL.format(s="0, NULL", sums="")).fetchone()
+        return tuple(row)
 
     def index(self):
-        with self.lock:
-            if self.idx is not None and time.time() - self.checked < REFRESH_S:
-                return self.idx
-            con = self.db_ro()
-            try:
-                key = self._snapshot(con)
-                if self.idx is not None and key == self.key:
-                    self.checked = time.time()
+        """The index to search. Looks for library changes at most every REFRESH_S. One thread at a time
+        checks and builds, outside the lock: the others go on with the old index, or wait when
+        there is none yet. A failed build keeps the old index (and logs why); with none, it raises."""
+        while True:
+            with self.lock:
+                if self.idx is not None and time.time() - self.checked < REFRESH_S:
                     return self.idx
-                self.idx = self._load(con)
-                self.key, self.checked = key, time.time()
-            finally:
-                con.close()
-            return self.idx
+                running = self._building
+                if running is None:
+                    self._building = mine = threading.Event()
+                    break
+                if self.idx is not None:
+                    return self.idx
+            running.wait()   # no index at all yet: wait for the build under way
+            with self.lock:
+                if self.idx is not None:
+                    return self.idx
+                if self._error is not None:
+                    raise self._error
+        err = built = None
+        try:
+            built = self._refresh()
+        except BaseException as e:  # noqa: BLE001 - even an interrupt must let the waiting threads go
+            err = e
+        with self.lock:
+            now = time.time()
+            if err is None:
+                if built is not None:
+                    self.idx, self.key, self.built = built[0], built[1], now
+                self.checked, self._error = now, None
+            else:
+                self._error = err
+                if self.idx is not None:
+                    self.checked = now      # try again after REFRESH_S, not on every search
+            self._building = None
+            idx = self.idx
+        mine.set()
+        if err is not None:
+            if idx is None or not isinstance(err, Exception):
+                raise err
+            log.warning("search index not reloaded, keeping the old one: %s: %s", type(err).__name__, err)
+        return idx
+
+    def _refresh(self):
+        """(new index, its signature) if the library changed or the backstop is due, else None."""
+        con = self.db_ro()
+        try:
+            key = self._snapshot(con)
+            with self.lock:
+                if self.idx is not None and key == self.key and time.time() - self.built < BACKSTOP_S:
+                    return None
+            return self._load(con), key
+        finally:
+            con.close()
 
     def _load(self, con):
         rows = con.execute(
@@ -200,9 +270,35 @@ class Search:
         return {"photos": len(idx["ids"]), "captions": int(idx["cap_have"].sum()), "pictures": int(idx["pic_have"].sum())}
 
     # ---------------------------------------------------------------- queries
+    def _ollama_embed(self, text: str) -> list:
+        """The query through nomic-embed-text in Ollama's native /api/embed, which (unlike /v1/embeddings)
+        takes keep_alive: the model stays loaded for KEEP_ALIVE after each query, so a search an hour
+        after the last one doesn't wait seconds for it to load. The same vector as /v1 gives."""
+        req = urllib.request.Request(
+            self.ollama + "/api/embed", method="POST", headers={"Content-Type": "application/json"},
+            data=json.dumps({"model": self.pc.EMBED_MODEL, "input": text, "keep_alive": KEEP_ALIVE}).encode())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())["embeddings"][0]
+        except urllib.error.HTTPError as e:
+            with e:
+                raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
+
     def _caption_vec(self, text: str) -> np.ndarray:
-        v = np.asarray(self.pc.infer_embed(self.ollama + "/v1", None, self.pc.EMBED_MODEL, text, timeout=15), np.float32)
+        v = np.asarray(self._embed(text), np.float32)
         return v / (np.linalg.norm(v) or 1)
+
+    def prime(self) -> None:
+        """Load what a first search would otherwise wait for: CLIP's text half, and the caption model
+        in Ollama (kept loaded for KEEP_ALIVE). Run it in the background after the index is built."""
+        for what, run in (("CLIP text half", lambda: self.clip.text("warm up")),
+                          ("caption model", lambda: self._caption_vec("warm up"))):
+            t = time.perf_counter()
+            try:
+                run()
+                log.info("search warm-up: %s ready in %.0f ms", what, (time.perf_counter() - t) * 1000)
+            except Exception as e:  # noqa: BLE001 - a search will try again, and say what is wrong
+                log.warning("search warm-up: %s failed: %s: %s", what, type(e).__name__, e)
 
     def _signal(self, mat, have, qv, margin, floor=-1.0):
         """(score array, match mask, strength 0..1, z of the best) for one meaning signal, over
