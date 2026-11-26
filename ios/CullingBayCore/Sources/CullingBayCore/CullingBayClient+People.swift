@@ -127,21 +127,29 @@ extension CullingBayClient {
     public func removeFaces(_ faces: [Int], from person: Int) async throws -> Person {
         try await writeJSON(
             method: "POST", path: "/m/api/faces",
-            body: FacesBody(faces: faces, action: "not", person: person), staling: .nothing)
+            body: FacesBody(faces: faces, group: nil, action: "not", person: person), staling: .nothing)
+    }
+
+    /// An unnamed group's unclaimed faces are not `person`: the "No" to "Is this Alex?" on a group. The
+    /// server remembers it, so the group's `maybe` is gone from the next read.
+    public func removeGroup(_ key: Int, from person: Int) async throws -> Person {
+        try await writeJSON(
+            method: "POST", path: "/m/api/faces",
+            body: FacesBody(faces: nil, group: key, action: "not", person: person), staling: .nothing)
     }
 
     /// These faces are `person`'s, whoever's they were.
     public func moveFaces(_ faces: [Int], to person: Int) async throws -> Person {
         try await writeJSON(
             method: "POST", path: "/m/api/faces",
-            body: FacesBody(faces: faces, action: "move", person: person), staling: .nothing)
+            body: FacesBody(faces: faces, group: nil, action: "move", person: person), staling: .nothing)
     }
 
     /// Not a face, or a stranger: hidden everywhere.
     public func ignoreFaces(_ faces: [Int]) async throws {
         let _: PeopleAck = try await writeJSON(
             method: "POST", path: "/m/api/faces",
-            body: FacesBody(faces: faces, action: "ignore", person: nil), staling: .nothing)
+            body: FacesBody(faces: faces, group: nil, action: "ignore", person: nil), staling: .nothing)
     }
 
     /// Hides the group's unclaimed faces, like `ignoreFaces`.
@@ -213,7 +221,9 @@ private struct ReviewBody: Encodable, Sendable {
 }
 
 private struct FacesBody: Encodable, Sendable {
-    let faces: [Int]
+    /// Either, or both: the faces named, and an unnamed group's unclaimed faces.
+    let faces: [Int]?
+    let group: Int?
     let action: String
     let person: Int?
 }

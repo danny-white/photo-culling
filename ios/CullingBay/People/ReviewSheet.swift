@@ -16,9 +16,7 @@ struct ReviewSheet: View {
 
     init(person: Person, services: AppServices, onFinish: @escaping (Person) -> Void) {
         self.onFinish = onFinish
-        let people = services.people
-        _model = State(initialValue: ReviewModel(
-            person: person, client: services.client, onDecline: { [people] in people.declineMaybe(forGroup: $0) }))
+        _model = State(initialValue: ReviewModel(person: person, client: services.client))
     }
 
     var body: some View {

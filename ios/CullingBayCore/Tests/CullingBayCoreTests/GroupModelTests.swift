@@ -16,11 +16,8 @@ struct GroupModelTests {
         return server
     }
 
-    private func makeModel(
-        _ server: PeopleServer, group: FaceGroup? = nil, declined: Bool = false,
-        onDecline: (@MainActor (Int) -> Void)? = nil
-    ) -> GroupModel {
-        GroupModel(key: 315, group: group, maybeDeclined: declined, client: server.client(), onDecline: onDecline)
+    private func makeModel(_ server: PeopleServer, group: FaceGroup? = nil) -> GroupModel {
+        GroupModel(key: 315, group: group, client: server.client())
     }
 
     // MARK: Header
@@ -126,36 +123,42 @@ struct GroupModelTests {
         #expect(server.calls().isEmpty)
     }
 
-    @Test func noMarksTheCoverFaceNotThemAndDropsTheQuestion() async {
+    @Test func noSendsTheGroupNotThemAndTheServerForgetsTheQuestion() async {
         let server = serve()
+        let listed = listed
+        // The read after the answer is the list as the server now has it: the group, with no maybe.
+        server.reply(
+            "GET /m/api/people",
+            peopleListBody(people: [makePerson(2, "Alex", photos: 31)], groups: [listed.withoutMaybe()]))
         server.reply("POST /m/api/faces", peopleJSON(makePerson(2, "Alex", photos: 31)))
-        let declined = Recorder()
-        let model = makeModel(server, group: listed, onDecline: { declined.keys.append($0) })
+        let model = makeModel(server, group: listed)
         await model.declineMaybe()
-        #expect(model.maybeDeclined)
-        #expect(model.maybe == nil && model.question == nil)
-        #expect(declined.keys == [315])
         let body = server.calls("POST /m/api/faces").first?.json
+        #expect(body?["group"] as? Int == 315)
         #expect(body?["action"] as? String == "not")
         #expect(body?["person"] as? Int == 2)
-        #expect(body?["faces"] as? [Int] == [14738])
-        #expect(model.ending == nil)
+        #expect(body?["faces"] == nil, "the group says which faces; the app names none")
+        #expect(server.calls("GET /m/api/people").count == 1, "the group is read again")
+        #expect(model.maybe == nil && model.question == nil)
+        #expect(model.group?.faces == 443, "the rest of the header stays")
+        #expect(model.ending == nil && model.message.isEmpty)
     }
 
     @Test func noThatFailsKeepsTheQuestionAndSaysWhy() async {
         let server = serve()
         server.reply("POST /m/api/faces", #"{"error":"busy"}"#, status: 503)
-        let declined = Recorder()
-        let model = makeModel(server, group: listed, onDecline: { declined.keys.append($0) })
+        let model = makeModel(server, group: listed)
         await model.declineMaybe()
-        #expect(!model.maybeDeclined && model.question == "Is this Alex?")
-        #expect(declined.keys.isEmpty)
+        #expect(model.question == "Is this Alex?")
         #expect(model.message == "Couldn’t save that: busy")
+        #expect(server.calls("GET /m/api/people").isEmpty, "nothing changed, so nothing is read again")
     }
 
-    @Test func aGroupAnsweredNoEarlierDoesNotAskAgain() {
-        let model = makeModel(serve(), group: listed, declined: true)
-        #expect(model.maybe == nil && model.question == nil)
+    @Test func noWithNoQuestionDoesNothing() async {
+        let server = serve()
+        let model = makeModel(server, group: makeGroup(315))
+        await model.declineMaybe()
+        #expect(server.calls().isEmpty)
     }
 
     // MARK: Hide
@@ -176,10 +179,4 @@ struct GroupModelTests {
         #expect(model.ending == nil)
         #expect(model.message == "That person or face isn’t there any more.")
     }
-}
-
-/// Collects what a model's callback is called with.
-@MainActor
-final class Recorder {
-    var keys: [Int] = []
 }

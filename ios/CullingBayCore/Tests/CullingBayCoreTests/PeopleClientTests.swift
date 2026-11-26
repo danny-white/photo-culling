@@ -187,6 +187,18 @@ struct PeopleClientTests {
         #expect(ignore["person"] == nil)
     }
 
+    @Test func noToAGroupSendsTheGroupKeyAndNoFaces() async throws {
+        let (client, transport) = client(body: peopleJSON(makePerson(2)))
+        let after = try await client.removeGroup(315, from: 2)
+        #expect(after.id == 2)
+        let request = try #require(await transport.requests.first)
+        #expect(request.url?.path == "/m/api/faces")
+        #expect(request.httpMethod == "POST")
+        #expect(request.value(forHTTPHeaderField: "X-Culling-Bay") == "1")
+        #expect(String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            == #"{"action":"not","group":315,"person":2}"#)
+    }
+
     @Test func notAndMoveSendTheActionAndThePerson() async throws {
         let (client, transport) = client(body: peopleJSON(makePerson(2)))
         let after = try await client.removeFaces([3, 4], from: 2)
@@ -196,6 +208,7 @@ struct PeopleClientTests {
         let not = try jsonBody(requests[0]), move = try jsonBody(requests[1])
         #expect(not["action"] as? String == "not" && not["person"] as? Int == 2)
         #expect(not["faces"] as? [Int] == [3, 4])
+        #expect(not["group"] == nil)
         #expect(move["action"] as? String == "move" && move["person"] as? Int == 6)
         #expect(requests.allSatisfy { $0.url?.path == "/m/api/faces" })
     }

@@ -12,8 +12,8 @@ struct ReviewModelTests {
             faces: ids.map { FaceSuggestion(id: $0, photo: 40_000 + $0, sim: 0.5) }, groups: groups))
     }
 
-    private func makeModel(_ server: PeopleServer, onDecline: (@MainActor (Int) -> Void)? = nil) -> ReviewModel {
-        ReviewModel(person: alex, client: server.client(), onDecline: onDecline)
+    private func makeModel(_ server: PeopleServer) -> ReviewModel {
+        ReviewModel(person: alex, client: server.client())
     }
 
     // MARK: Loading
@@ -144,33 +144,54 @@ struct ReviewModelTests {
     @Test func yesToAGroupAddsItAndItLeavesTheList() async {
         let server = PeopleServer()
         let maybe = PersonRef(id: 2, name: "Alex")
-        server.reply("GET /m/api/people/2/suggestions", batch([501], groups: [makeGroup(1, maybe: maybe), makeGroup(9, maybe: maybe)]))
+        server.on("GET /m/api/people/2/suggestions") { _, count in
+            Reply(body: self.batch(
+                [501], groups: count == 0 ? [makeGroup(1, maybe: maybe), makeGroup(9, maybe: maybe)] : [makeGroup(9, maybe: maybe)]))
+        }
         server.reply("POST /m/api/people/2/add", peopleJSON(makePerson(2, "Alex", photos: 80, suggestions: 5)))
         let model = makeModel(server)
         await model.load()
         await model.answer(group: model.groups[0], yes: true)
         #expect(server.calls("POST /m/api/people/2/add").first?.json["group"] as? Int == 1)
         #expect(model.groups.map(\.key) == [9])
+        #expect(server.calls("GET /m/api/people/2/suggestions").count == 2, "the groups are read again")
         #expect(model.person.photos == 80)
         #expect(model.phase == .reviewing)
     }
 
-    @Test func noToAGroupMarksItsCoverNotThemAndTellsTheList() async {
+    @Test func noToAGroupSendsTheGroupNotThemAndReadsTheGroupsAgain() async {
         let server = PeopleServer()
         let maybe = PersonRef(id: 2, name: "Alex")
-        server.reply("GET /m/api/people/2/suggestions", batch([], groups: [makeGroup(1, cover: 777, maybe: maybe)]))
+        server.on("GET /m/api/people/2/suggestions") { _, count in
+            // After the answer the server no longer says the group may be them.
+            Reply(body: self.batch([], groups: count == 0 ? [makeGroup(1, cover: 777, maybe: maybe)] : []))
+        }
         server.reply("POST /m/api/faces", peopleJSON(makePerson(2, "Alex", suggestions: 0)))
-        let declined = Recorder()
-        let model = makeModel(server, onDecline: { declined.keys.append($0) })
+        let model = makeModel(server)
         await model.load()
         #expect(model.phase == .reviewing, "a group alone is something to review")
         await model.answer(group: model.groups[0], yes: false)
         let body = server.calls("POST /m/api/faces").first?.json
+        #expect(body?["group"] as? Int == 1)
         #expect(body?["action"] as? String == "not" && body?["person"] as? Int == 2)
-        #expect(body?["faces"] as? [Int] == [777])
-        #expect(declined.keys == [1])
+        #expect(body?["faces"] == nil)
+        #expect(server.calls("GET /m/api/people/2/suggestions").count == 2, "read again after the answer")
         #expect(model.groups.isEmpty)
         #expect(model.phase == .done, "nothing is left")
+    }
+
+    @Test func answeringAGroupKeepsTheTapsOnTheFaces() async {
+        let server = PeopleServer()
+        let maybe = PersonRef(id: 2, name: "Alex")
+        server.reply("GET /m/api/people/2/suggestions", batch([501, 502], groups: [makeGroup(1, maybe: maybe)]))
+        server.reply("POST /m/api/faces", peopleJSON(makePerson(2, "Alex", suggestions: 2)))
+        let model = makeModel(server)
+        await model.load()
+        model.toggle(502)
+        await model.answer(group: model.groups[0], yes: false)
+        #expect(model.isNo(502), "reading the groups again does not start the faces over")
+        #expect(model.faces.map(\.id) == [501, 502])
+        #expect(model.phase == .reviewing)
     }
 
     @Test func aFailedGroupAnswerKeepsTheGroup() async {

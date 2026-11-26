@@ -34,14 +34,11 @@ public final class ReviewModel {
     public private(set) var isWorking = false
 
     @ObservationIgnored private let client: CullingBayClient
-    @ObservationIgnored private let onDecline: (@MainActor (Int) -> Void)?
 
-    /// `onDecline` is told the key of a group answered no, so the People tab's list can stop asking.
-    public init(person: Person, client: CullingBayClient, onDecline: (@MainActor (Int) -> Void)? = nil) {
+    public init(person: Person, client: CullingBayClient) {
         self.personID = person.id
         self.person = person
         self.client = client
-        self.onDecline = onDecline
     }
 
     // MARK: Reading
@@ -104,9 +101,9 @@ public final class ReviewModel {
         await load()
     }
 
-    /// Answers "These photos might be Alex" for a group. Yes adds its faces to them. No marks the
-    /// one face the app can name (the group's cover) as not them; see `GroupModel.declineMaybe`.
-    /// Either way the group leaves the list.
+    /// Answers "Might be Alex" for a group. Yes adds its faces to them; no says they are not them, and
+    /// the server remembers. Either way the group leaves the list, and the groups are read again
+    /// (the faces, and the taps on them, stay as they are).
     public func answer(group: FaceGroup, yes: Bool) async {
         guard !isWorking else { return }
         message = ""
@@ -116,10 +113,10 @@ public final class ReviewModel {
             if yes {
                 person = try await client.addFaces(to: personID, group: group.key)
             } else {
-                person = try await client.removeFaces([group.cover], from: personID)
-                onDecline?(group.key)
+                person = try await client.removeGroup(group.key, from: personID)
             }
             groups.removeAll { $0.key == group.key }
+            if let batch = try? await client.suggestions(for: personID) { groups = batch.groups }
             if faces.isEmpty && groups.isEmpty { phase = .done }
         } catch {
             if !(error is CancellationError) { message = PeopleMessages.failure(error) }

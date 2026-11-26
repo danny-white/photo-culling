@@ -32,26 +32,16 @@ public final class GroupModel {
     public private(set) var ending: Ending?
     /// A write is in flight, so the buttons should wait.
     public private(set) var isWorking = false
-    /// Danny said no to "Is this ...?" for this group.
-    public private(set) var maybeDeclined: Bool
 
     @ObservationIgnored private let client: CullingBayClient
-    @ObservationIgnored private let onDecline: (@MainActor (Int) -> Void)?
     @ObservationIgnored private var generation = 0
 
-    /// `group` is what the list already knows, so the header shows at once. `maybeDeclined` is
-    /// whether the question was answered no earlier in this run; `onDecline` tells whoever keeps
-    /// that (the People tab's list) when it is answered now.
-    public init(
-        key: Int, group: FaceGroup? = nil, maybeDeclined: Bool = false, client: CullingBayClient,
-        onDecline: (@MainActor (Int) -> Void)? = nil
-    ) {
+    /// `group` is what the list already knows, so the header shows at once.
+    public init(key: Int, group: FaceGroup? = nil, client: CullingBayClient) {
         self.key = key
         self.group = group
         self.phase = group == nil ? .idle : .loaded
-        self.maybeDeclined = maybeDeclined
         self.client = client
-        self.onDecline = onDecline
     }
 
     // MARK: Reading
@@ -63,7 +53,7 @@ public final class GroupModel {
     public var caption: String { group.map { PeopleFormat.groupCaption($0) } ?? "" }
 
     /// The person the group looks like, until Danny says it isn't.
-    public var maybe: PersonRef? { maybeDeclined ? nil : group?.maybe }
+    public var maybe: PersonRef? { group?.maybe }
 
     /// `"Is this Alex?"`
     public var question: String? { maybe.map { "Is this \($0.name)?" } }
@@ -136,14 +126,14 @@ public final class GroupModel {
         return await add(to: maybe)
     }
 
-    /// No to "Is this Alex?". The server can only be told about faces it names, and the app is
-    /// told one of this group's (its cover), so that face is marked not Alex and the question goes
-    /// from this run's screens (`maybeDeclined`, and `onDecline` for the list).
+    /// No to "Is this Alex?": the group's unclaimed faces are not them. The server remembers, so the
+    /// group's `maybe` is gone when it is read again; the question goes from the screen at once and
+    /// the group is read again to say what the server now has.
     public func declineMaybe() async {
         guard let maybe else { return }
-        guard await write({ try await self.client.removeFaces([self.cover], from: maybe.id) }) != nil else { return }
-        maybeDeclined = true
-        onDecline?(key)
+        guard await write({ try await self.client.removeGroup(self.key, from: maybe.id) }) != nil else { return }
+        group = group?.withoutMaybe()
+        await load()
     }
 
     /// "Not someone I know": hides the group's unclaimed faces everywhere. On success `ending` is `.hidden`.

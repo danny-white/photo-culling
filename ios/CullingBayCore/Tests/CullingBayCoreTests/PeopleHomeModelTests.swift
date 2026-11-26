@@ -162,29 +162,4 @@ struct PeopleHomeModelTests {
         #expect(model.visibleGroups.isEmpty && model.visiblePeople.isEmpty)
         #expect(model.emptyMessage == "No one matches “zed”.")
     }
-
-    // MARK: A group answered no
-
-    @Test func decliningAGroupsQuestionTakesItsMaybeAway() async {
-        let model = makeModel(serve())
-        await model.load()
-        #expect(model.visibleGroups[0].maybe?.name == "Alex")
-        #expect(!model.isMaybeDeclined(forGroup: 1))
-        model.declineMaybe(forGroup: 1)
-        #expect(model.isMaybeDeclined(forGroup: 1))
-        #expect(model.visibleGroups[0].maybe == nil)
-        #expect(model.visibleGroups[0].faces == 1039)
-        #expect(model.group(key: 1)?.maybe == nil)
-        #expect(model.visibleGroups[1].key == 315)
-        model.filter = "alex"
-        #expect(model.visibleGroups.isEmpty)
-    }
-
-    @Test func theDeclinedAnswerSurvivesAReload() async {
-        let model = makeModel(serve())
-        await model.load()
-        model.declineMaybe(forGroup: 1)
-        await model.refresh()
-        #expect(model.visibleGroups[0].maybe == nil)
-    }
 }

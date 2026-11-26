@@ -17,8 +17,7 @@ public final class PeopleHomeModel {
     public private(set) var phase: Phase = .idle
     /// Most photos first.
     public private(set) var people: [Person] = []
-    /// The unnamed groups worth naming, the likeliest friends and family first. A group Danny
-    /// answered no to ("Is this Alex?") has lost its `maybe` until the app is restarted.
+    /// The unnamed groups worth naming, the likeliest friends and family first.
     public private(set) var groups: [FaceGroup] = []
     /// Photos checked for faces, and photos in the library.
     public private(set) var facesChecked = 0
@@ -28,10 +27,6 @@ public final class PeopleHomeModel {
     /// The name filter. Empty shows everyone.
     public var filter = ""
 
-    /// Groups whose "Is this ...?" was answered no, by key. The server has no way to say "none of
-    /// this group's faces are Alex" (its `not` takes face ids, and the app is not told a group's), so the
-    /// answer is kept here, for this run only, and the question is left out until then.
-    private var declined: Set<Int> = []
     @ObservationIgnored private let client: CullingBayClient
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var hasLoaded = false
@@ -100,9 +95,8 @@ public final class PeopleHomeModel {
 
     /// With no filter, every group; with one, the groups that look like a person whose name holds it.
     public var visibleGroups: [FaceGroup] {
-        let all = groups.map { declined.contains($0.key) ? $0.withoutMaybe() : $0 }
-        guard isFiltering else { return all }
-        return all.filter { $0.maybe?.name.localizedCaseInsensitiveContains(query) == true }
+        guard isFiltering else { return groups }
+        return groups.filter { $0.maybe?.name.localizedCaseInsensitiveContains(query) == true }
     }
 
     /// `"Finding faces… 8,609 of 43,195 photos"` while the backfill or an import is running.
@@ -128,17 +122,6 @@ public final class PeopleHomeModel {
     /// A person as the last load had them, for a screen that opens before its own load answers.
     public func person(id: Int) -> Person? { people.first { $0.id == id } }
 
-    /// A group as the last load had it, without the question Danny already answered.
-    public func group(key: Int) -> FaceGroup? {
-        groups.first { $0.key == key }.map { declined.contains(key) ? $0.withoutMaybe() : $0 }
-    }
-
-    // MARK: Answers
-
-    /// Leaves "Is this ...?" off this group for the rest of this run.
-    public func declineMaybe(forGroup key: Int) {
-        declined.insert(key)
-    }
-
-    public func isMaybeDeclined(forGroup key: Int) -> Bool { declined.contains(key) }
+    /// A group as the last load had it, for a screen that opens before its own load answers.
+    public func group(key: Int) -> FaceGroup? { groups.first { $0.key == key } }
 }

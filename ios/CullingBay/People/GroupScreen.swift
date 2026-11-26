@@ -16,10 +16,8 @@ struct GroupScreen: View {
 
     init(key: Int, services: AppServices) {
         self.key = key
-        let people = services.people
         _model = State(initialValue: GroupModel(
-            key: key, group: people.group(key: key), maybeDeclined: people.isMaybeDeclined(forGroup: key),
-            client: services.client, onDecline: { [people] in people.declineMaybe(forGroup: $0) }))
+            key: key, group: services.people.group(key: key), client: services.client))
     }
 
     var body: some View {
