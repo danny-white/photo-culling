@@ -64,6 +64,7 @@ KEEP_ALIVE = "2h"       # how long Ollama keeps the caption model loaded after a
 DAYS_OUT = 40
 MATCH_IDS_MAX = 400     # matching photo ids sent per day, for "matches first"
 PHOTOS_OUT = 600        # photos sent for one gallery search
+PERSON_PHOTOS_OUT = 5000  # ... but a search for people alone lists all their photos, as the person screen does
 LIKE_PHOTOS_OUT = 200
 STOP = {"a", "an", "the", "of", "in", "on", "at", "with", "and", "or", "to", "for", "by", "from",
         "my", "me", "some", "photo", "photos", "picture", "pictures", "shot", "shots", "day", "days"}
@@ -494,7 +495,9 @@ class Search:
                 keep &= only
             order = sorted(np.flatnonzero(keep), key=lambda i: (idx["day_iso"].get(idx["days"][i]) or "", idx["ids"][i]),
                            reverse=True)
-            return {"query": q, "ids": [int(idx["ids"][i]) for i in order[:limit]], "total": int(keep.sum()),
+            # a search for people is a list of their photos, not a ranking: don't cut it at the top 600
+            cap = max(limit, PERSON_PHOTOS_OUT) if ids is not None else limit
+            return {"query": q, "ids": [int(idx["ids"][i]) for i in order[:cap]], "total": int(keep.sum()),
                     "signals": used + (["dates"] if ids is None or any(dates.values()) else []), "notes": []}
         matched, score, _ = self._score(idx, words, day_keep, notes, used, only=only)
         order = sorted(np.flatnonzero(matched), key=lambda i: -score[i])

@@ -1320,6 +1320,13 @@ class PeopleSearch(unittest.TestCase):
         finally:
             con.close()
 
+    def test_a_name_alone_lists_every_photo_not_just_the_top_ranked(self):
+        ids = self.s.photos("alex", limit=2)["ids"]
+        self.assertGreater(len(self.alex_photos()), 2)
+        self.assertEqual(set(ids), self.alex_photos())
+        # a search of dates alone, or of a name with words, keeps the cap
+        self.assertEqual(len(self.s.photos("2026", limit=2)["ids"]), 2)
+
     def test_a_first_name_nobody_else_has(self):
         self.assertEqual(set(self.ids("alex")[0]), self.alex_photos())
         self.assertEqual(set(self.ids("SAM")[0]), self.sam_photos())
