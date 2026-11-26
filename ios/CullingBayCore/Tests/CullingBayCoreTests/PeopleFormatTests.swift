@@ -40,6 +40,27 @@ struct PeopleFormatTests {
         #expect(PeopleFormat.reviewTitle(12) == "Review 12 suggestions")
     }
 
+    @Test func theConfirmButtonSaysHowManyAreAndAreNotThePerson() {
+        #expect(PeopleFormat.reviewConfirm(yes: 58, no: 0, name: "Alex") == "Confirm 58 as Alex")
+        #expect(PeopleFormat.reviewConfirm(yes: 56, no: 2, name: "Alex") == "Confirm 56 as Alex, 2 not")
+        #expect(PeopleFormat.reviewConfirm(yes: 1, no: 1, name: "Alex") == "Confirm 1 as Alex, 1 not")
+        #expect(PeopleFormat.reviewConfirm(yes: 0, no: 8, name: "Alex") == "Confirm 8 as not Alex")
+        #expect(PeopleFormat.reviewConfirm(yes: 0, no: 1, name: "Sam Lee") == "Confirm 1 as not Sam Lee")
+    }
+
+    @Test func theRemovedFromPhotosToastCountsPhotosAndThoseSkipped() {
+        #expect(PeopleFormat.removedFromPhotos("Alex", photos: 12, skipped: 0) == "Removed Alex from 12 photos")
+        #expect(PeopleFormat.removedFromPhotos("Alex", photos: 1, skipped: 0) == "Removed Alex from 1 photo")
+        #expect(PeopleFormat.removedFromPhotos("Alex", photos: 12, skipped: 2)
+            == "Removed Alex from 12 photos (2 didn’t have Alex’s face)")
+        #expect(PeopleFormat.removedFromPhotos("Alex", photos: 1, skipped: 1)
+            == "Removed Alex from 1 photo (1 didn’t have Alex’s face)")
+    }
+
+    @Test func theToastForASelectionWithNoFaceOfTheirsSendsYouToShowFaces() {
+        #expect(PeopleFormat.notInPhotos("Alex") == "None of these photos have Alex’s face. Use Show faces to fix one.")
+    }
+
     @Test func aPersonIsCaptionedWithTheirPhotos() {
         #expect(PeopleFormat.personCaption(makePerson(1, photos: 31), locale: us) == "31 photos")
         #expect(PeopleFormat.personCaption(makePerson(1, photos: 1), locale: us) == "1 photo")

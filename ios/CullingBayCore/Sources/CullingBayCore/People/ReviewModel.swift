@@ -55,6 +55,9 @@ public final class ReviewModel {
 
     public func isNo(_ face: Int) -> Bool { noes.contains(face) }
 
+    /// Every face of this batch is no: the batch has faces and none is left as yes.
+    public var allNo: Bool { !faces.isEmpty && noes.count == faces.count }
+
     // MARK: Loading
 
     /// Loads the next batch. Nothing in it (no faces and no groups) is `.done`.
@@ -78,6 +81,12 @@ public final class ReviewModel {
     public func toggle(_ face: Int) {
         guard faces.contains(where: { $0.id == face }) else { return }
         if !noes.insert(face).inserted { noes.remove(face) }
+    }
+
+    /// Turns every face of this batch into no (`true`), or every one back into yes (`false`), for when none
+    /// of them, or all of them, are the person. Sends nothing: Confirm does.
+    public func markAll(no: Bool) {
+        noes = no ? Set(faces.map(\.id)) : []
     }
 
     /// Sends this batch as one review, then loads the next. A failure keeps the batch, with every

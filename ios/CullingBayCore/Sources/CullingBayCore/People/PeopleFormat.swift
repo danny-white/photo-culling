@@ -46,6 +46,28 @@ public enum PeopleFormat {
         "\(name)’s face isn’t in this photo. Use Show faces to fix it."
     }
 
+    /// The review sheet's Confirm button: `"Confirm 58 as Alex"`, `"Confirm 56 as Alex, 2 not"`, and when
+    /// every face is no, `"Confirm 8 as not Alex"`.
+    public static func reviewConfirm(yes: Int, no: Int, name: String) -> String {
+        if yes == 0 && no > 0 { return "Confirm \(no) as not \(name)" }
+        let base = "Confirm \(yes) as \(name)"
+        return no > 0 ? "\(base), \(no) not" : base
+    }
+
+    /// `"Removed Alex from 12 photos"`, the toast after "Not Alex" on a selection of photos. When some
+    /// of the selected photos had none of their face, they are counted after it: `" (2 didn’t have
+    /// Alex’s face)"`.
+    public static func removedFromPhotos(_ name: String, photos: Int, skipped: Int) -> String {
+        var text = "Removed \(name) from \(photos) photo" + (photos == 1 ? "" : "s")
+        if skipped > 0 { text += " (\(skipped) didn’t have \(name)’s face)" }
+        return text
+    }
+
+    /// The toast when "Not Alex" on a selection finds no face of Alex's in any of the photos.
+    public static func notInPhotos(_ name: String) -> String {
+        "None of these photos have \(name)’s face. Use Show faces to fix one."
+    }
+
     /// `"31 photos"` under a person's name.
     public static func personCaption(_ person: Person, locale: Locale = .current) -> String {
         GalleryFormat.photoCount(person.photos, locale: locale)
