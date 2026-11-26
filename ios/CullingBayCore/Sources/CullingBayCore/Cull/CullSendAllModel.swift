@@ -33,8 +33,13 @@ public final class CullSendAllModel {
 
     @ObservationIgnored private let client: CullingBayClient
     @ObservationIgnored private let queue: CullWriteQueue
+    @ObservationIgnored private let workingOffline: @MainActor () -> Bool
 
-    public init(days: [Day], client: CullingBayClient, queue: CullWriteQueue) {
+    /// `workingOffline` says whether Work offline is on, so Send says so at once.
+    public init(
+        days: [Day], client: CullingBayClient, queue: CullWriteQueue,
+        workingOffline: @escaping @MainActor () -> Bool = { false }
+    ) {
         let items = days.compactMap { day -> Item? in
             let n = Self.unsent(day)
             guard n > 0 else { return nil }
@@ -47,6 +52,7 @@ public final class CullSendAllModel {
         selected = Set(finished.map(\.id))
         self.client = client
         self.queue = queue
+        self.workingOffline = workingOffline
     }
 
     /// Decisions a day has not sent yet. An older server without `unsent` gives decided minus
@@ -84,6 +90,10 @@ public final class CullSendAllModel {
     public func send() async -> Bool {
         let days = all.map(\.id).filter { selected.contains($0) }
         guard !days.isEmpty, !isSending else { return false }
+        guard !workingOffline() else {
+            message = CullSessionModel.workingOfflineSendMessage
+            return false
+        }
         isSending = true
         defer { isSending = false }
         guard await queue.drain(timeout: CullSessionModel.drainTimeout) else {

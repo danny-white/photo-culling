@@ -266,7 +266,7 @@ struct ViewerPage: View {
 
     private func probeSourceSize() async {
         let url = services.client.probeCropURL(id: photo.id, center: Point(x: 0.5, y: 0.5))
-        guard let box = try? await CropProbe.load(url: url) else { return }
+        guard let box = try? await CropProbe.load(url: url, transport: services.network) else { return }
         viewer.setSourceSize(box.sourceSize, for: photo.id)
         zoom.setSourceSize(box.sourceSize)
     }

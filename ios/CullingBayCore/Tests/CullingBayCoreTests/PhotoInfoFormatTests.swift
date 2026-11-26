@@ -339,6 +339,10 @@ struct PhotoInfoFormatTests {
             == "This photo isn’t in the library index any more.")
         #expect(PhotoInfoFormat.failure(CullingBayError.http(status: 415, message: "could not read this file's details: x"))
             == "This file’s details can’t be read.")
+        // The link's own failures: the PC out of reach reads as above; Work offline says how to get them.
+        #expect(PhotoInfoFormat.failure(CullingBayError.transport(ServerLink.unreachableMessage)) == unreachable)
+        #expect(PhotoInfoFormat.failure(CullingBayError.transport(ServerLink.forcedMessage))
+            == "Camera details come from the PC. Turn off Work offline to see them.")
     }
 
     @Test func anyOtherFailureIsNamedAndNeverBlank() {

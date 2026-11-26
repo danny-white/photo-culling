@@ -13,6 +13,9 @@ enum OfflinePreferences {
     static let crops = "offlineCrops"
     /// Danny's choices for single days, as JSON: `{"2026/2026-10-01": "always"}`.
     static let pins = "offlinePins"
+    /// Work offline: the app contacts the PC not at all until it is turned off. Kept across
+    /// launches, and for every server.
+    static let forced = "offlineForced"
 
     static let defaultLimitGB = 2.0
     static let limitRange: ClosedRange<Double> = 0.5...10
@@ -54,4 +57,12 @@ struct UserDefaultsOfflineSettings: OfflineSettingsSource {
     func current() -> OfflineSettings { OfflinePreferences.current() }
     func loadPins() -> [String: OfflinePin] { OfflinePreferences.loadPins() }
     func savePins(_ pins: [String: OfflinePin]) { OfflinePreferences.savePins(pins) }
+}
+
+/// Work offline as `ServerLink` keeps it, in `UserDefaults` under `OfflinePreferences.forced`.
+final class UserDefaultsWorkOffline: WorkOfflineSetting {
+    var isOn: Bool {
+        get { UserDefaults.standard.bool(forKey: OfflinePreferences.forced) }
+        set { UserDefaults.standard.set(newValue, forKey: OfflinePreferences.forced) }
+    }
 }

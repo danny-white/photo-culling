@@ -108,6 +108,24 @@ struct CullSendTests {
         #expect(rig.queue.pending == 2)                                             // and the taps are still safe
     }
 
+    @Test func withWorkOfflineOnSendSaysSoAtOnceAndKeepsTheTaps() async {
+        let rig = CullRig(day: singles())
+        let ids = rig.ids
+        let model = CullSessionModel(
+            day: "2026/2026-10-01", client: rig.client, queue: rig.queue, sleep: rig.sleeper.sleep,
+            workingOffline: { true }, newActionID: { ids.next() })
+        await model.load()
+        answerSend(rig)
+        rig.server.on("POST /m/api/decide") { _ in throw CullingBayError.transport(ServerLink.forcedMessage) }
+        model.keep()
+        await model.send()                                                          // no wait for the drain
+        #expect(model.toast?.text == "Turn off Work offline to send.")
+        #expect(!model.isSending)
+        #expect(await rig.sleeper.waiting.contains(.seconds(10)) == false)
+        #expect(rig.server.calls("/send").isEmpty)
+        #expect(rig.queue.pending == 1)
+    }
+
     @Test func aSecondSendWhileOneIsWaitingDoesNothing() async {
         let (model, rig) = await open(singles())
         rig.server.on("POST /m/api/decide") { _ in throw CullingBayError.transport("offline") }

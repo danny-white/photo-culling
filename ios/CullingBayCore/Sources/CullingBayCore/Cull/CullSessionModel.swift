@@ -96,6 +96,7 @@ public final class CullSessionModel {
     @ObservationIgnored private let match: CullMatch?
     @ObservationIgnored private let sleep: CullSleep
     @ObservationIgnored private let keepsDaysOffline: @MainActor () -> Bool
+    @ObservationIgnored private let workingOffline: @MainActor () -> Bool
     @ObservationIgnored private let warmer: CullWarmer?
     @ObservationIgnored private let newActionID: @Sendable () -> String
     @ObservationIgnored private var generation = 0
@@ -119,11 +120,13 @@ public final class CullSessionModel {
     /// says whether the app keeps days on the phone: if so, a day that cannot be loaded because
     /// the PC cannot be reached is a day that was not saved. `warmer` asks the PC to decode the
     /// card on screen and the next one ahead of their 1:1 checks; nil asks for nothing.
-    /// `newActionID` makes the ids of `decide`; tests pin it.
+    /// `workingOffline` says whether Work offline is on, so Send says so at once instead of
+    /// waiting for the taps that cannot go. `newActionID` makes the ids of `decide`; tests pin it.
     public init(
         day: String, client: CullingBayClient, queue: CullWriteQueue, match: CullMatch? = nil,
         sleep: @escaping CullSleep = CullClock.system,
         keepsDaysOffline: @escaping @MainActor () -> Bool = { false },
+        workingOffline: @escaping @MainActor () -> Bool = { false },
         warmer: CullWarmer? = nil,
         newActionID: @escaping @Sendable () -> String = { CullingBayClient.newActionID() }
     ) {
@@ -133,6 +136,7 @@ public final class CullSessionModel {
         self.match = match
         self.sleep = sleep
         self.keepsDaysOffline = keepsDaysOffline
+        self.workingOffline = workingOffline
         self.warmer = warmer
         self.newActionID = newActionID
         queue.observeDrops(self) { [weak self] drop in self?.queueDropped(drop) }
@@ -170,6 +174,8 @@ public final class CullSessionModel {
 
     /// What a day says when the PC cannot be reached and the phone has no copy of it.
     public static let notSavedMessage = "This day isn't saved on the phone."
+    /// What Send and Send all say while Work offline is on.
+    public static let workingOfflineSendMessage = "Turn off Work offline to send."
 
     /// Loads the day again for the receipts (`landed`, `conflict`, ...) and keeps the cursor on
     /// the same stack. First waits up to `waiting` for the queue to empty, so no tap is lost, and
@@ -828,6 +834,10 @@ public final class CullSessionModel {
     /// Lightroom. Unsent decisions become `queued` here; `refresh()` brings the real receipts.
     public func send() async {
         guard let day, !isSending else { return }
+        guard !workingOffline() else {
+            showToast(Self.workingOfflineSendMessage)
+            return
+        }
         isSending = true
         defer { isSending = false }
         guard await queue.drain(timeout: Self.drainTimeout) else {

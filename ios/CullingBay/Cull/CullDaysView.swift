@@ -38,20 +38,18 @@ struct CullDaysView: View {
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 Color.clear.frame(height: 0).id(Self.topID)
+                // Work offline, or the taps waiting while the PC is out of reach.
                 CullOfflineBanner(queue: services.cullQueue)
-                if model.isServedOffline && model.phase == .loaded {
-                    Text("Offline · saved days open from this phone")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.yellow)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 3)
-                        .accessibilityAddTraits(.isStaticText)
+                if showsUnreachable {
+                    UnreachableBanner(hasSavedDays: OfflinePreferences.isEnabled)
                 }
                 content
             }
             .padding(.horizontal, 12)
         }
         .refreshable {
+            // A pull asks the PC at once whether it is there, then loads the list.
+            await services.link.checkNow()
             await days.refresh()
             services.offline.sync()
         }
@@ -84,6 +82,13 @@ struct CullDaysView: View {
                 services.offline.sync()
             })
         }
+    }
+
+    /// The PC cannot be reached (and Work offline is off): the list says so, with Try now.
+    private var showsUnreachable: Bool {
+        let link = services.link
+        if link.isWorkingOffline { return false }
+        return link.state == .unreachable || (model.isServedOffline && model.phase == .loaded && !link.isOnline)
     }
 
     // MARK: Coming back
@@ -144,8 +149,10 @@ struct CullDaysView: View {
         openingSendAll = true
         Task {
             await services.cullDays.refresh()
+            let link = services.link
             sendAll = CullSendAllLaunch(model: CullSendAllModel(
-                days: services.cullDays.unsentDays, client: services.client, queue: services.cullQueue))
+                days: services.cullDays.unsentDays, client: services.client, queue: services.cullQueue,
+                workingOffline: { link.isWorkingOffline }))
             openingSendAll = false
         }
     }

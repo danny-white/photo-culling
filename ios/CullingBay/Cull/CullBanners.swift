@@ -3,12 +3,16 @@ import SwiftUI
 import UIKit
 
 /// `Offline · 3 waiting to save`, while the queue cannot reach the server. The taps are safe:
-/// they are kept on the phone and go out when the server answers again.
+/// they are kept on the phone and go out when the server answers again. With Work offline on it is
+/// the orange Work offline capsule instead, `Working offline · 3 waiting to save`, with Go online.
 struct CullOfflineBanner: View {
+    @Environment(AppServices.self) private var services
     let queue: CullWriteQueue
 
     var body: some View {
-        if queue.isOffline {
+        if services.link.isWorkingOffline {
+            WorkingOfflineBar(waiting: queue.pending)
+        } else if queue.isOffline {
             Text("Offline · \(queue.pending) waiting to save")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Color.yellow)

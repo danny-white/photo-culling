@@ -43,6 +43,17 @@ struct CullSendAllModelTests {
         #expect(m.selected.count == 3)
     }
 
+    @Test func withWorkOfflineOnSendAllSaysSoAtOnce() async {
+        let rig = CullRig(day: cullDay([]))
+        let m = CullSendAllModel(
+            days: [day("2026/2026-09-29", finished: true, unsent: 12)], client: rig.client, queue: rig.queue,
+            workingOffline: { true })
+        #expect(await m.send() == false)
+        #expect(m.message == "Turn off Work offline to send.")
+        #expect(!m.didSend)
+        #expect(rig.server.allCalls.isEmpty)
+    }
+
     @Test func anOlderServerWithoutUnsentFallsBackToDecidedMinusSent() {
         #expect(CullSendAllModel.unsent(day("2026/2026-09-29", finished: true, unsent: nil, decided: 46, sent: 6)) == 40)
         #expect(CullSendAllModel.unsent(day("2026/2026-09-29", finished: true, unsent: nil, decided: 3, sent: 3)) == 0)

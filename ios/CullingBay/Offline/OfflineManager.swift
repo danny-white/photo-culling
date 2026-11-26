@@ -9,9 +9,10 @@ import Observation
 /// answers the focus check's questions about saved crops. The Settings screen and the Choose
 /// days list read it.
 ///
-/// It syncs when the app starts, when it comes to the foreground, when a setting or a pin changes
-/// and after a Send, and stops when the app goes to the background. Downloads run only while the
-/// app is open; there is no background session.
+/// It syncs when the app starts (once the PC has answered), when it comes to the foreground, when
+/// the PC can be reached again, when a setting or a pin changes and after a Send, and stops when
+/// the app goes to the background or Work offline is turned on. Nothing is fetched while the PC
+/// cannot be reached. Downloads run only while the app is open; there is no background session.
 @MainActor
 @Observable
 final class OfflineManager {
@@ -36,12 +37,16 @@ final class OfflineManager {
     @ObservationIgnored private let store: OfflineStore
     @ObservationIgnored private let core: OfflineSync
 
-    init(client: CullingBayClient, store: OfflineStore, downloader: OfflineDownloader) {
+    /// `canReachPC` is the link being online: nothing is fetched while it is not.
+    init(
+        client: CullingBayClient, store: OfflineStore, downloader: OfflineDownloader,
+        canReachPC: @escaping @MainActor () -> Bool
+    ) {
         self.store = store
         self.core = OfflineSync(
             daysSource: client, store: store, downloader: downloader,
             settings: UserDefaultsOfflineSettings(),
-            excludeFromBackup: { excludeFromBackup(store.root) })
+            excludeFromBackup: { excludeFromBackup(store.root) }, canReachPC: canReachPC)
     }
 
     // MARK: Triggers

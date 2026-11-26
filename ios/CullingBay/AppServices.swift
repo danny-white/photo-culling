@@ -4,15 +4,22 @@ import Foundation
 import Observation
 
 /// The app's one client, image loader and perf reporter, plus the Home model that rides on them,
-/// the Cull tab's write queue and days list, and the Practice tab's challenges. Views read it from
-/// the environment. Changing the server builds all of them again and bumps `generation`, which the
-/// root view uses to start the Gallery, the Cull tab and the Practice tab over.
+/// the Cull tab's write queue and days list, and the Practice tab's challenges, and the link that
+/// says whether the PC can be reached. Views read it from the environment. Changing the server
+/// builds all of them again and bumps `generation`, which the root view uses to start the
+/// Gallery, the Cull tab and the Practice tab over.
 @MainActor
 @Observable
 final class AppServices {
     let settings: UserDefaultsGallerySettings
     let exporter = PhotoLibraryExportService()
+    /// The phone's network, for the link.
+    let path = NetworkPathWatcher()
     private(set) var serverURL: URL
+    /// Whether the PC can be reached; every request goes through it (`ServerLinkTransport`).
+    private(set) var link: ServerLink
+    /// The real network behind the link, for requests that skip the saved days: the 1:1 probes.
+    private(set) var network: any HTTPTransport
     private(set) var client: CullingBayClient
     private(set) var loader: ImageDataLoader
     private(set) var perf: PerfReporter
@@ -27,6 +34,7 @@ final class AppServices {
     /// the writes of a decision always have a connection to the server free.
     let cropGate = CropLoadGate(limit: 2)
     private(set) var generation = 0
+    @ObservationIgnored private var launched = false
     /// The Settings sheet. Any screen can open it.
     var showsSettings = false
 
@@ -35,6 +43,8 @@ final class AppServices {
         let connection = Self.connect(to: settings.serverURL, settings: settings)
         self.settings = settings
         self.serverURL = settings.serverURL
+        self.link = connection.link
+        self.network = connection.network
         self.client = connection.client
         self.loader = connection.loader
         self.perf = connection.perf
@@ -43,6 +53,49 @@ final class AppServices {
         self.cullDays = connection.cullDays
         self.practice = connection.practice
         self.offline = connection.offline
+        wireLink()
+    }
+
+    /// At launch: watch the network, send the taps left from an earlier run, and probe the PC; once
+    /// it answers, bring the days kept on the phone up to date. Once per run.
+    func launch() {
+        guard !launched else { return }
+        launched = true
+        path.start { [weak self] hasPath in self?.link.pathChanged(hasPath: hasPath) }
+        startLink()
+    }
+
+    private func startLink() {
+        if !path.hasPath { link.pathChanged(hasPath: false) }
+        cullQueue.start()
+        let link = link, offline = offline
+        Task {
+            await link.start()
+            offline.sync()
+        }
+    }
+
+    /// Reaching the PC again sends the taps waiting, syncs the saved days, refreshes the days
+    /// list quietly and loads again a Gallery or Practice screen that failed for want of it. An
+    /// open Cull day is left as it is. Work offline stops the downloads.
+    private func wireLink() {
+        link.onReachable = { [weak self] in self?.reachedPC() }
+        link.onWorkOffline = { [weak self] in self?.offline.cancel() }
+    }
+
+    private func reachedPC() {
+        cullQueue.resume()
+        offline.sync()
+        let days = cullDays, home = home, practice = practice
+        Task { await days.refresh() }
+        if case .failed = home.phase {
+            Task { await home.load() }
+        } else if home.refreshError != nil {
+            Task { await home.refresh() }
+        }
+        if !practice.hasLoaded || !practice.message.isEmpty {
+            Task { await practice.load() }
+        }
     }
 
     /// Points the app at another server. Does nothing if it is the one already in use.
@@ -51,7 +104,10 @@ final class AppServices {
         settings.serverURL = url
         serverURL = url
         offline.cancel()
+        link.stop()
         let connection = Self.connect(to: url, settings: settings)
+        link = connection.link
+        network = connection.network
         client = connection.client
         loader = connection.loader
         perf = connection.perf
@@ -60,17 +116,19 @@ final class AppServices {
         cullDays = connection.cullDays
         practice = connection.practice
         offline = connection.offline
+        wireLink()
         // This server may still have taps waiting from an earlier visit.
-        cullQueue.start()
-        offline.sync()
+        startLink()
         generation += 1
     }
 
     /// A session for one day of the Cull tab. `match` is the search hit it was opened from.
     func makeCullSession(day: String, match: CullMatch? = nil) -> CullSessionModel {
-        CullSessionModel(
+        let link = link
+        return CullSessionModel(
             day: day, client: client, queue: cullQueue, match: match,
             keepsDaysOffline: { OfflinePreferences.isEnabled },
+            workingOffline: { link.isWorkingOffline },
             warmer: CullWarmer(client: client, queue: cullQueue))
     }
 
@@ -86,6 +144,8 @@ final class AppServices {
     }
 
     private struct Connection {
+        let link: ServerLink
+        let network: any HTTPTransport
         let client: CullingBayClient
         let loader: ImageDataLoader
         let perf: PerfReporter
@@ -98,7 +158,11 @@ final class AppServices {
 
     private static func connect(to url: URL, settings: any GallerySettings) -> Connection {
         // `-CBReadOnly`: a simulator run that looks at the real server and cannot write to it.
-        let network: any HTTPTransport = LaunchOptions.readOnly ? ReadOnlyTransport() : URLSessionTransport()
+        let real: any HTTPTransport = LaunchOptions.readOnly ? ReadOnlyTransport() : URLSessionTransport()
+        // The probe goes out on the real network; everything else through the link, which fails
+        // at once while the PC cannot be reached (or Work offline is on).
+        let link = ServerLink(baseURL: url, network: real, setting: UserDefaultsWorkOffline())
+        let network: any HTTPTransport = ServerLinkTransport(base: real, gate: link.gate)
         // Days kept on the phone answer for the PC when it cannot be reached; the client and the
         // image loader both go through this, so pictures come from the phone automatically.
         let offlineStore = OfflineStore(root: offlineStoreDirectory(for: url))
@@ -115,12 +179,14 @@ final class AppServices {
         let client = CullingBayClient(baseURL: url, transport: transport)
         let queue = CullWriteQueue(
             client: client, store: FileCullWriteStore(directory: cullStoreDirectory(for: url)))
-        // The downloader fetches with the real network, not through the saved days.
+        // The downloader fetches through the link, not through the saved days, and only while the
+        // link is online.
         let offline = OfflineManager(
             client: client, store: offlineStore,
-            downloader: OfflineDownloader(baseURL: url, transport: network, store: offlineStore))
+            downloader: OfflineDownloader(baseURL: url, transport: network, store: offlineStore),
+            canReachPC: { link.isOnline })
         return Connection(
-            client: client, loader: loader, perf: perf,
+            link: link, network: network, client: client, loader: loader, perf: perf,
             home: HomeModel(client: client, settings: settings),
             cullQueue: queue, cullDays: CullDaysModel(client: client),
             practice: PracticeModel(

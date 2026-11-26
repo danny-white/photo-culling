@@ -58,7 +58,7 @@ struct SettingsView: View {
     // MARK: Offline
 
     /// Keep days on the phone: the switch, how much, whether to keep the 1:1 crops, what is saved
-    /// now, and the list to choose days from.
+    /// now, and the list to choose days from. Then Work offline, which the link keeps.
     @ViewBuilder
     private var offlineSection: some View {
         Section {
@@ -76,11 +76,21 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 NavigationLink("Choose days") { OfflineDaysView() }
             }
+            Toggle("Work offline", isOn: workOffline)
+            Text("The app won't contact the PC at all. Saved days open from the phone, and your taps wait on the phone until you turn this off.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         } header: {
             Text("Offline")
         } footer: {
             Text("Saved days open and can be culled with no connection to the PC. Your taps are kept and go to the PC when it can be reached. Changes at once.")
         }
+    }
+
+    /// On: nothing more goes to the PC and the downloads stop. Off: the PC is asked at once.
+    private var workOffline: Binding<Bool> {
+        let link = services.link
+        return Binding(get: { link.isWorkingOffline }, set: { link.setWorkingOffline($0) })
     }
 
     private var offlineStatus: String {
@@ -91,7 +101,8 @@ struct SettingsView: View {
         case .syncing(let title, let done, let total):
             return OfflineFormat.saving(title: title, done: done, total: total)
         case .offline:
-            return "Can't reach the PC · showing saved days"
+            return services.link.isWorkingOffline
+                ? "Working offline · showing saved days" : "Can't reach the PC · showing saved days"
         case .failed(let message):
             return message
         }

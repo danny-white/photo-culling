@@ -369,24 +369,33 @@ private struct CullFocusPage: View {
             placeIfReady()
             return
         }
-        // With a saved 1:1 on the phone: straight to it when the phone already knows it is offline,
-        // and otherwise a short wait for the PC (over Tailscale a PC that has gone away may not
+        // While the PC cannot be reached (or Work offline is on), at once: the saved 1:1 if the
+        // phone has one, or why there is none. With a saved 1:1 and the queue offline, straight to
+        // it too; otherwise a short wait for the PC (over Tailscale a PC that has gone away may not
         // refuse the connection, and the default wait is a minute).
         let hasSaved = services.offline.hasSavedCrop(for: frame.id)
-        if hasSaved && services.cullQueue.isOffline {
+        if pcIsAway || (hasSaved && services.cullQueue.isOffline) {
             await useSavedCropOrFail()
             return
         }
         let url = services.client.probeCropURL(id: frame.id, center: Point(x: 0.5, y: 0.5))
         let timeout: TimeInterval = hasSaved ? 8 : 60
+        let network = services.network
         do {
-            let box = try await services.cropGate.run(urgent: true) { try await CropProbe.load(url: url, timeout: timeout) }
+            let box = try await services.cropGate.run(urgent: true) {
+                try await CropProbe.load(url: url, timeout: timeout, transport: network)
+            }
             focus.setSourceSize(box.sourceSize, for: frame.id)
             zoom.setSourceSize(box.sourceSize)
             placeIfReady()
         } catch {
             if !Task.isCancelled { await useSavedCropOrFail() }
         }
+    }
+
+    /// The PC cannot be reached, or Work offline is on: the 1:1 cannot come from it.
+    private var pcIsAway: Bool {
+        services.link.state == .unreachable || services.link.isWorkingOffline
     }
 
     /// The 1:1 cannot come from the PC (it cannot be reached, or will not decode this frame). If
@@ -401,7 +410,14 @@ private struct CullFocusPage: View {
                 return
             }
         }
-        if !Task.isCancelled { failure = "Could not decode this frame." }
+        guard !Task.isCancelled else { return }
+        if services.link.isWorkingOffline {
+            failure = "The 1:1 needs the PC. Turn off Work offline to see the 1:1."
+        } else if services.link.state == .unreachable {
+            failure = "The 1:1 needs the PC, which can't be reached right now."
+        } else {
+            failure = "Could not decode this frame."
+        }
     }
 
     /// Full-resolution tiles, nearest the middle first. Tiles that have left the screen are
@@ -448,7 +464,9 @@ private struct CullFocusPage: View {
             let other = focus.frames[index].id
             guard focus.sourceSize(for: other) == nil else { continue }
             let url = client.probeCropURL(id: other, center: Point(x: 0.5, y: 0.5))
-            guard let box = try? await gate.run({ try await CropProbe.load(url: url) }), !Task.isCancelled
+            let network = services.network
+            guard let box = try? await gate.run({ try await CropProbe.load(url: url, transport: network) }),
+                  !Task.isCancelled
             else { return }
             focus.setSourceSize(box.sourceSize, for: other)
         }

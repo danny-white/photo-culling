@@ -55,6 +55,12 @@ struct ResultsView: View {
             ExportSheet(launch: launch)
         }
         .sensoryFeedback(trigger: feed.selected) { _, _ in .selection }
+        // A screen that failed for want of the PC loads again once the PC can be reached.
+        .onChange(of: services.link.recoveries) {
+            guard case .failed = feed.phase else { return }
+            startTiming()
+            Task { await feed.load() }
+        }
     }
 
     // MARK: Pieces

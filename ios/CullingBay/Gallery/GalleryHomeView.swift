@@ -14,6 +14,7 @@ struct GalleryHomeView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    WorkingOfflineBar()
                     content(proxy)
                 }
                 .padding(.horizontal, 12)

@@ -504,6 +504,17 @@ struct ServerLinkTests {
         #expect(rig.link.state == .forcedOffline)
     }
 
+    // MARK: What the screens say
+
+    @Test func aScreenThatFailsForWantOfThePCSaysWhichKindOfOffline() {
+        #expect(GalleryMessages.failure(unreachable, loading: "the challenges")
+            == "Can’t reach the photo server. Is the PC on and in Ubuntu?")
+        #expect(GalleryMessages.failure(forced, loading: "the challenges")
+            == "Work offline is on. Turn it off to load the challenges.")
+        #expect(GalleryMessages.failure(forced, loading: "the library")
+            == "Work offline is on. Turn it off to load the library.")
+    }
+
     // MARK: The offline downloads
 
     @Test func theOfflineDownloadsDoNotRunWhileThePCCannotBeReachedAndStartWhenItCan() async throws {

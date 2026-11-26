@@ -39,7 +39,15 @@ Scope and decisions: https://claude.ai/artifact/FQv95YRVDg1DK6tBvruvob (picks ma
   `Cull/` has the days list, the cards, the burst picker, the focus check and the end-of-day review; `Images/` loads and decodes
   pictures; `Platform/` holds the PhotoKit and UIKit calls; `Shared/` has the (i) sheet of a photo's camera details (ISO,
   shutter, aperture, lens, size, when and where), opened from the Cull card, the burst picker and the Gallery viewer. It asks
-  the PC when it opens and saves nothing on the phone.
+  the PC when it opens and saves nothing on the phone. `Shared/ConnectionBanners.swift` has the two kinds of offline: the
+  orange Work offline capsule (an aeroplane, "Working offline", Go online) at the top of each tab's first screen and of an
+  opened day, and the Days list's yellow "Can't reach the PC" line (`wifi.slash`) with Try now.
+- Being offline: `AppServices` owns a `ServerLink` (CullingBayCore), rebuilt with the rest by `setServer`. It probes the PC
+  at launch (`launch()`), when the app comes to the front, when the phone's network changes (`Platform/NetworkPathWatcher`,
+  `NWPathMonitor`) and on Try now or a pull of the Days list; while the PC cannot be reached every request fails at once
+  and saved days answer from the phone. Reaching the PC again sends the taps waiting, syncs the saved days, refreshes the
+  days list and reloads a Gallery or Practice screen that had failed; an open Cull day is left alone. Work offline is a
+  switch in Settings > Offline, kept in `UserDefaults` as `offlineForced` until it is turned off.
 
 ## Phases
 

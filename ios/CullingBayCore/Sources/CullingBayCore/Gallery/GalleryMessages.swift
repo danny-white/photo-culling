@@ -8,6 +8,8 @@ enum GalleryMessages {
             return "Couldn’t load \(what): \(error.localizedDescription)"
         }
         switch error {
+        case .transport(ServerLink.forcedMessage):
+            return "Work offline is on. Turn it off to load \(what)."
         case .transport:
             return "Can’t reach the photo server. Is the PC on and in Ubuntu?"
         case .http(404, _):

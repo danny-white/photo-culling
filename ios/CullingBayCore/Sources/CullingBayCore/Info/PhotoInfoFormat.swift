@@ -187,6 +187,8 @@ public enum PhotoInfoFormat {
     /// Danny can act on: the PC is out of reach, the photo is gone, or the file cannot be read.
     public static func failure(_ error: any Error) -> String {
         switch error as? CullingBayError {
+        case .transport(ServerLink.forcedMessage):
+            return "Camera details come from the PC. Turn off Work offline to see them."
         case .transport, .unavailable:
             return "Camera details come from the PC, and it can’t be reached right now. Try again when it’s back."
         case .http(404, _):

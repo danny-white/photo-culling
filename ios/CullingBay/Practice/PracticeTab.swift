@@ -23,6 +23,7 @@ struct PracticeTab: View {
         NavigationStack(path: $path) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    WorkingOfflineBar()
                     content
                 }
                 .padding(.horizontal, 12)

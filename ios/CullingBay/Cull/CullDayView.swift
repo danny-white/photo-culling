@@ -68,6 +68,7 @@ struct CullDayView: View {
     private func placeholder<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         VStack(spacing: 0) {
             CullDayHeader(title: session.title, backTitle: "Days") { dismiss() }
+            WorkingOfflineBar()
             Spacer()
             content()
             Spacer()
