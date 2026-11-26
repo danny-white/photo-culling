@@ -13,13 +13,20 @@ public final class FeedModel {
         case like(Int, file: String?)
         /// A day id such as `2026/2026-10-01`.
         case day(String)
+        /// The photos a named person is in. `name` is for the title.
+        case person(Int, name: String)
+        /// The photos of an unnamed group's faces, by the group's key.
+        case group(Int)
 
-        /// The route name `gallery.js` reports with `results_ready`: `q`, `like` or `day`.
+        /// The route name `gallery.js` reports with `results_ready`: `q`, `like` or `day`; the People
+        /// screens are `person` and `group`.
         public var screen: String {
             switch self {
             case .search: "q"
             case .like: "like"
             case .day: "day"
+            case .person: "person"
+            case .group: "group"
             }
         }
     }
@@ -119,6 +126,12 @@ public final class FeedModel {
             let body = try await client.galleryDay(day, best: best, bursts: bursts)
             return Loaded(
                 photos: body.photos, total: body.photos.count, notes: [], signals: [], day: body)
+        case .person(let id, _):
+            let body = try await client.personPhotos(id, best: best, bursts: bursts)
+            return Loaded(photos: body.photos, total: body.total, notes: [], signals: [])
+        case .group(let key):
+            let body = try await client.groupPhotos(key, best: best, bursts: bursts)
+            return Loaded(photos: body.photos, total: body.total, notes: [], signals: [])
         }
     }
 
@@ -147,6 +160,10 @@ public final class FeedModel {
         case .day(let day):
             if let loadedDay { return GalleryFormat.longDate(loadedDay.date) }
             return GalleryFormat.longDate(day.split(separator: "/").last.map(String.init))
+        case .person(_, let name):
+            return name
+        case .group:
+            return "Not named yet"
         }
     }
 
@@ -169,9 +186,9 @@ public final class FeedModel {
 
     /// What to show in place of an empty grid.
     public var emptyMessage: String {
-        best
-            ? "Nothing you picked or rated 3★ or more. Turn off ★ Best to see everything."
-            : "No photos found."
+        if best { return "Nothing you picked or rated 3★ or more. Turn off ★ Best to see everything." }
+        if case .group = source { return "Nothing is left in this group. Its faces have been named or hidden." }
+        return "No photos found."
     }
 
     /// Whether tiles carry their date: results from many days do; a single day does not.
