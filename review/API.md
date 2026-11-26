@@ -152,7 +152,7 @@ Stack (stacks are in shot order):
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | int | Position in this response (0, 1, 2 ...). What `progress.cursor` refers to. Positions can change when photos are added. Save progress with `lead` so the cursor follows that photo's stack. |
-| `kind` | string | `single`, `burst`, `bracket` or `pano`. Brackets and panoramas suggest Keep all. `pano` shows only once a pixel check has confirmed a burst of 3+ frames that slides one way. |
+| `kind` | string | `single`, `burst`, `bracket` or `pano`. Brackets and panoramas suggest Keep all. `pano` shows only once a pixel check has confirmed 3+ frames that slide one way: either one burst, or separate presses each within 3 s of the last (a hand-held sweep, which the camera numbers as presses), joined into one stack. |
 | `lead` | int | Frame `id` to show first: the sharpest frame; a bracket's base exposure |
 | `frames` | [Frame] | In shot order. A single stack has one frame. |
 

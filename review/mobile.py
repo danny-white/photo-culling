@@ -510,6 +510,62 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         except (OSError, ValueError):
             return {}
 
+    # Panoramas shot press by press: stacks.merge_press_sweeps measures each pair of neighbouring
+    # presses once, from the 320 px thumbnails this PC keeps (no NAS read), and the result is kept
+    # by the pair's ids in pano_steps.json, so building a day's stacks again only looks them up.
+    sweep_file = state_dir / "pano_steps.json"
+    sweep_lock = threading.Lock()
+    sweep = {"steps": None, "dirty": False}
+
+    def sweep_steps() -> dict:
+        if sweep["steps"] is None:
+            try:
+                data = json.loads(sweep_file.read_text())
+                sweep["steps"] = data if isinstance(data, dict) else {}
+            except (OSError, ValueError):
+                sweep["steps"] = {}
+        return sweep["steps"]
+
+    def thumb_grey(path: str):
+        try:
+            with Image.open(previews.preview_path(cache_dir, path, IMG_EDGE["thumb"])) as im:
+                return np.asarray(im.convert("L"), np.float32)
+        except (OSError, ValueError):
+            return None
+
+    def measure_step(a: dict, b: dict):
+        """stacks.phase_step for two neighbouring presses. None when a thumbnail is not made yet
+        (not kept, so it is tried again next time) or the two differ in shape (kept)."""
+        key = f"{a['rowid']},{b['rowid']}"
+        with sweep_lock:
+            steps = sweep_steps()
+            if key in steps:
+                return tuple(steps[key]) if steps[key] else None
+        ga, gb = thumb_grey(a["path"]), thumb_grey(b["path"])
+        if ga is None or gb is None:
+            return None
+        step = stacks.phase_step(ga, gb) if ga.shape == gb.shape else None
+        with sweep_lock:
+            sweep_steps()[key] = [round(v, 5) for v in step] if step else None
+            sweep["dirty"] = True
+        return step
+
+    def save_sweeps() -> None:
+        with sweep_lock:
+            if not sweep["dirty"]:
+                return
+            tmp = sweep_file.with_name(f"{sweep_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                tmp.write_text(json.dumps(sweep["steps"]))
+                tmp.replace(sweep_file)
+                sweep["dirty"] = False
+            except OSError:
+                log.warning("could not save %s", sweep_file.name, exc_info=True)
+
+    def day_stacks_of(rows: list[dict]) -> list[dict]:
+        """A day's stacks, with panoramas shot press by press joined into one stack each."""
+        return stacks.build_stacks(rows, measure=measure_step)
+
     def grey(path: str):
         im = pc.load_source(Path(path)).convert("L")
         im.thumbnail((256, 256))
@@ -839,7 +895,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             summary = []
             stack_paths = {}
             for d, rows in by_day.items():
-                st = stacks.build_stacks(rows)
+                st = day_stacks_of(rows)
                 stack_paths[d] = [[f["path"] for f in s["frames"]] for s in st]
                 towns = {}
                 for r in rows:
@@ -860,6 +916,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 })
             summary.sort(key=lambda x: (x["date"] or "", x["last_ts"]), reverse=True)
             stack_of = {p: (d, i) for d, sts in stack_paths.items() for i, paths in enumerate(sts) for p in paths}
+            save_sweeps()
             cache.update(days=summary, days_at=now, stack_paths=stack_paths, stack_of=stack_of)
 
     @bp.route("/api/days")
@@ -920,8 +977,9 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         if not rows:
             return jsonify({"error": "no such day"}), 404
         with perf.stage("stacks"):
-            day_stacks = stacks.build_stacks(rows)
+            day_stacks = day_stacks_of(rows)
             confirm_panos(day_stacks)
+            save_sweeps()
         paths = [p for s in day_stacks for f in s["frames"] for p in [f["path"]]]
         con = anno_db()
         try:
@@ -1746,7 +1804,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         best, bursts = gallery_flags()
         rows.sort(key=lambda r: (r["capture_ts"] or 0, r["rowid"]))
         if bursts:   # each stack's lead, in time order
-            leads = {s["lead"] for s in stacks.build_stacks(rows)}
+            leads = {s["lead"] for s in day_stacks_of(rows)}
             rows = [r for r in rows if r["rowid"] in leads]
         return jsonify({"day": day, "date": day_date(day), "summary": day_summaries().get(f"{LIBRARY_ROOT}/{day}"),
                         "photos": gallery_items([r["rowid"] for r in rows], best=best, bursts=False)})

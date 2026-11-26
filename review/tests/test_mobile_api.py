@@ -843,10 +843,10 @@ class MobileApi(unittest.TestCase):
             self.assertEqual(con.execute("SELECT cursor_path FROM cull_days WHERE day=?", (DAY,)).fetchone()[0], path)
 
         build = stacks.build_stacks
-        def earlier_stack(rows):
+        def earlier_stack(rows, **kw):
             extra = dict(rows[0], rowid=-1, filename="earlier.JPG", path=f"/mnt/passport/Pictures/{DAY}/earlier.JPG",
                          capture_ts=min(r["capture_ts"] for r in rows) - 3600, seq=None, drive=None)
-            return build([extra] + rows)
+            return build([extra] + rows, **kw)
         with patch.object(stacks, "build_stacks", side_effect=earlier_stack):
             changed = self.frames()[1]
         self.assertEqual(len(changed["stacks"]), len(day["stacks"]) + 1)
@@ -855,16 +855,16 @@ class MobileApi(unittest.TestCase):
         self.assertEqual([s["id"] for s in changed["stacks"]], list(range(len(changed["stacks"]))))
 
         # The saved photo can become a pair partner, or leave the response altogether.
-        def as_partner(rows):
-            result = build([r for r in rows if r["rowid"] != target["lead"]])
+        def as_partner(rows, **kw):
+            result = build([r for r in rows if r["rowid"] != target["lead"]], **kw)
             result[-1]["frames"][0]["partners"].append(Path(path).name)
             result[-1]["frames"][0]["partner_ids"].append(target["lead"])
             return result
         with patch.object(stacks, "build_stacks", side_effect=as_partner):
             paired = self.frames()[1]
             self.assertEqual(paired["progress"]["cursor"], len(paired["stacks"]) - 1)
-        with patch.object(stacks, "build_stacks", side_effect=lambda rows: build(
-                [r for r in rows if r["rowid"] != target["lead"]])):
+        with patch.object(stacks, "build_stacks", side_effect=lambda rows, **kw: build(
+                [r for r in rows if r["rowid"] != target["lead"]], **kw)):
             self.assertEqual(self.frames()[1]["progress"], {"pass": 2, "cursor": target["id"]})
 
         # A later save from an old client replaces the anchor with its integer cursor.
@@ -1639,3 +1639,64 @@ class PipelineHealthWatcher(HealthFixture):
         d = self.health()
         self.assertEqual([r["step"] for r in d["recent"]], ["export"])
         self.assertIn("Ingest export failing", [a["title"] for a in d["alerts"]])
+
+
+@unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
+class PressPanos(unittest.TestCase):
+    """The 29 Sep 2026 beach panorama was shot press by press (DSC04906..DSC04912, each its own
+    press) and showed as seven single cards. The day now has it as one pano stack, measured from
+    this PC's thumbnails (review/cache, read only here) and remembered in pano_steps.json."""
+    DAY = "2026/2026-09-29"
+
+    def setUp(self):
+        from flask import Flask
+        import mobile
+        import photo_cull as pc
+        import previews
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        cache = ROOT / "review" / "cache"
+        con = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
+        try:
+            paths = [r[0] for r in con.execute(
+                "SELECT path FROM images WHERE path LIKE ? AND filename BETWEEN 'DSC04906' AND 'DSC04913'",
+                (f"%/{self.DAY}/%",))]
+        finally:
+            con.close()
+        if len(paths) < 7 or not all(previews.preview_path(cache, p, 320).exists() for p in paths):
+            self.skipTest("needs the 29 Sep thumbnails in review/cache")
+
+        def db_ro():
+            c = sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)
+            c.row_factory = sqlite3.Row
+            return c
+
+        (tmp / "static").mkdir()
+        (tmp / "inbox").mkdir()
+        self.state = tmp / "state"
+        app = Flask(__name__)
+        app.register_blueprint(mobile.make_blueprint(
+            db_ro=db_ro, anno=lambda: anno_connection(tmp / "annotations.db"), pc=pc, cache_dir=cache,
+            static_dir=tmp / "static", state_dir=self.state, inbox=tmp / "inbox", check_mount=False,
+            ingest_log=tmp / "ingest.log", ollama_url="http://127.0.0.1:9", backup_status=tmp / "b.json",
+            known_unreadable=tmp / "k.txt"))
+        self.client = app.test_client()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_beach_sweep_is_one_pano_card(self):
+        body = self.client.get(f"/m/api/day/{self.DAY}").get_json()
+        files = lambda s: [f["file"] for f in s["frames"]]
+        pano = next(s for s in body["stacks"] if "DSC04906.ARW" in files(s))
+        self.assertEqual(pano["kind"], "pano")
+        self.assertEqual(files(pano), [f"DSC049{n:02d}.ARW" for n in range(6, 13)])
+        before = next(s for s in body["stacks"] if "DSC04905.ARW" in files(s))
+        self.assertNotEqual(before["kind"], "pano")                     # a different shot, kept apart
+        steps = json.loads((self.state / "pano_steps.json").read_text())
+        self.assertGreaterEqual(len(steps), 6)                          # the pairs were measured and kept
+
+    def test_the_days_list_counts_the_pano_as_one_stack(self):
+        day = next(d for d in self.client.get("/m/api/days").get_json()["days"] if d["day"] == self.DAY)
+        body = self.client.get(f"/m/api/day/{self.DAY}").get_json()
+        self.assertEqual(day["stacks"], len(body["stacks"]))

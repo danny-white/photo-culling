@@ -39,6 +39,12 @@ KEEP_FLOOR = 5               # even a five-minute shoot may keep five
 PANO_MIN_FRAMES = 3
 PANO_PHASH_BITS = 20         # adjacent frames differ by at least this many of 64 phash bits
 PANO_MIN_SHIFT = 0.08        # and slide at least this fraction of the frame, all the same way
+# A panorama shot press by press (each frame its own press, which Sony numbers from 1, so
+# group_bursts keeps them apart). Calibrated on the whole library on 25 Nov 2026: these found all
+# 22 real sweeps and let through 4 camera pans that look the same (an airshow, a gondola ride).
+PANO_PRESS_GAP_S = 3.0       # the presses of a hand-held sweep come at most this far apart
+PANO_STEP_MIN_PEAK = 0.035   # neighbours overlap: their phase-correlation peak reaches this (~0.02 unrelated)
+PANO_STEP_MAX_CV = 0.35      # and the camera turns about as far each time (spread of the steps over their mean)
 
 
 def _stem(filename: str) -> str:
@@ -211,6 +217,112 @@ def pano_confirmed(greys: list[np.ndarray]) -> bool:
     return False
 
 
+def phase_step(a: np.ndarray, b: np.ndarray) -> tuple[float, float, float]:
+    """(dy, dx, peak): how far b's content moved from a's, as fractions of the frame's height and
+    width, and how strongly the two overlap (the phase-correlation peak: about 0.02 for unrelated
+    pictures, 0.04 to 0.5 for neighbouring frames of a sweep). Same-shape greyscale arrays."""
+    h, w = a.shape
+    win = np.outer(np.hanning(h), np.hanning(w))
+    fa, fb = np.fft.fft2(a * win), np.fft.fft2(b * win)
+    r = fa * np.conj(fb)
+    r /= np.abs(r) + 1e-9
+    corr = np.abs(np.fft.ifft2(r))
+    py, px = np.unravel_index(int(np.argmax(corr)), corr.shape)
+    dy = py if py <= h // 2 else py - h
+    dx = px if px <= w // 2 else px - w
+    return -dy / h, -dx / w, float(corr[py, px])
+
+
+def _sweep_direction(step) -> tuple[str, bool, float] | None:
+    """(axis, positive, along) when a step looks like one turn of a sweep, else None."""
+    if step is None:
+        return None
+    dy, dx, peak = step
+    if peak < PANO_STEP_MIN_PEAK:
+        return None
+    for axis, along, across in (("x", dx, dy), ("y", dy, dx)):
+        if abs(along) >= PANO_MIN_SHIFT and abs(along) > abs(across):
+            return axis, along > 0, abs(along)
+    return None
+
+
+def sweep_segments(steps: list) -> list[tuple[int, int]]:
+    """Which frames of a run sweep, as (first, last) frame indices, inclusive. steps[i] is
+    phase_step from frame i to frame i + 1, or None when it can't be measured. A sweep is at least
+    PANO_MIN_FRAMES frames whose every step slides at least PANO_MIN_SHIFT of the frame along one
+    axis, more than across it, the same way each time, with a peak of PANO_STEP_MIN_PEAK, and with
+    steps of about the same size. A step that breaks the pattern ends one sweep and may start the
+    next."""
+    segs: list[tuple[int, int]] = []
+    start, way, alongs = None, None, []
+
+    def close(last: int) -> None:
+        if start is not None and last - start + 1 >= PANO_MIN_FRAMES:
+            mean = sum(alongs) / len(alongs)
+            spread = (sum((a - mean) ** 2 for a in alongs) / len(alongs)) ** 0.5
+            if mean > 0 and spread / mean <= PANO_STEP_MAX_CV:
+                segs.append((start, last))
+
+    for i, step in enumerate(steps):
+        d = _sweep_direction(step)
+        if d is not None and way is not None and d[:2] == way:
+            alongs.append(d[2])
+            continue
+        close(i)
+        start, way, alongs = (i, d[:2], [d[2]]) if d is not None else (None, None, [])
+    close(len(steps))
+    return segs
+
+
+def _press_runs(groups: list[list[dict]]) -> list[list[int]]:
+    """Runs of PANO_MIN_FRAMES or more consecutive one-frame groups from one camera, each taken
+    within PANO_PRESS_GAP_S of the one before: the shape of a panorama shot press by press."""
+    runs, cur, prev = [], [], None
+    for i, group in enumerate(groups):
+        f = group[0] if len(group) == 1 else None
+        if f is None:
+            if len(cur) >= PANO_MIN_FRAMES:
+                runs.append(cur)
+            cur, prev = [], None
+            continue
+        near = (prev is not None and f.get("capture_ts") is not None and prev.get("capture_ts") is not None
+                and 0 <= f["capture_ts"] - prev["capture_ts"] <= PANO_PRESS_GAP_S
+                and f.get("camera") and f.get("camera") == prev.get("camera"))
+        if near:
+            cur.append(i)
+        else:
+            if len(cur) >= PANO_MIN_FRAMES:
+                runs.append(cur)
+            cur = [i]
+        prev = f
+    if len(cur) >= PANO_MIN_FRAMES:
+        runs.append(cur)
+    return runs
+
+
+def merge_press_sweeps(groups: list[list[dict]], measure) -> tuple[list[list[dict]], set[int]]:
+    """Join the one-press groups that sweep into one group each. measure(a, b) gives phase_step for
+    two frames (or None when it can't). Returns the new groups and the indices (in the new list) of
+    the joined ones, which are panoramas."""
+    joins: dict[int, int] = {}                 # first group index -> last group index, inclusive
+    for run in _press_runs(groups):
+        frames = [groups[i][0] for i in run]
+        steps = [measure(a, b) for a, b in zip(frames, frames[1:])]
+        for first, last in sweep_segments(steps):
+            joins[run[first]] = run[last]
+    out, panos, i = [], set(), 0
+    while i < len(groups):
+        if i in joins:
+            last = joins[i]
+            panos.add(len(out))
+            out.append([f for g in groups[i:last + 1] for f in g])
+            i = last + 1
+        else:
+            out.append(groups[i])
+            i += 1
+    return out, panos
+
+
 def shooting_hours(rows: list[dict]) -> float:
     """Time spent shooting: the gaps between consecutive frames, each capped at
     SHOOTING_GAP_CAP_S. First-to-last wall-clock time was tried and dropped: idle hours gave half
@@ -228,14 +340,21 @@ def keep_budget(rows: list[dict], stack_count: int | None = None) -> int:
     return min(stack_count, max(KEEP_FLOOR, math.ceil(KEEP_PER_HOUR * shooting_hours(rows))))
 
 
-def build_stacks(rows: list[dict]) -> list[dict]:
+def build_stacks(rows: list[dict], measure=None) -> list[dict]:
     """A day's rows (any order) -> stacks in shot order. Panorama confirmation needs pixels, so
-    candidates come back as kind 'burst' with pano_candidate=True for the caller to confirm."""
+    burst candidates come back as kind 'burst' with pano_candidate=True for the caller to confirm.
+    With measure(a, b) (phase_step for two frames, or None), runs of separate presses that sweep
+    are joined into one stack of kind 'pano' (merge_press_sweeps)."""
     stacks = []
-    for group in group_bursts(pair_frames(rows)):
-        bracket = is_bracket(group)
+    groups = group_bursts(pair_frames(rows))
+    panos: set[int] = set()
+    if measure is not None:
+        groups, panos = merge_press_sweeps(groups, measure)
+    for gi, group in enumerate(groups):
+        swept = gi in panos
+        bracket = not swept and is_bracket(group)
         lead = lead_of(group, bracket)
-        kind = "single" if len(group) == 1 else ("bracket" if bracket else "burst")
+        kind = "pano" if swept else "single" if len(group) == 1 else ("bracket" if bracket else "burst")
         stacks.append({
             "kind": kind,
             "lead": lead["rowid"],

@@ -212,3 +212,78 @@ class Panorama(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PressSweeps(unittest.TestCase):
+    """A panorama shot press by press: each frame its own press, so group_bursts keeps them apart,
+    and merge_press_sweeps joins the presses whose pictures slide steadily one way."""
+
+    def presses(self, n, start=0.0, gap=1.0, camera="SONY ILCE-7RM3"):
+        return [row(f"P{i:02d}.ARW", start + i * gap, drive="continuous", seq=1, camera=camera,
+                    sharp=200.0 + i) for i in range(n)]
+
+    @staticmethod
+    def measure_from(steps_by_pair):
+        return lambda a, b: steps_by_pair.get((a["filename"], b["filename"]))
+
+    def sweep_measure(self, rows, step=(0.0, -0.22, 0.10)):
+        return self.measure_from({(a["filename"], b["filename"]): step for a, b in zip(rows, rows[1:])})
+
+    def test_segments_of_a_clean_sweep(self):
+        self.assertEqual(stacks.sweep_segments([(0, -0.2, 0.1)] * 5), [(0, 5)])
+
+    def test_a_reversal_or_a_weak_overlap_splits_or_ends_a_sweep(self):
+        left, right, weak = (0, -0.2, 0.1), (0, 0.2, 0.1), (0, -0.2, 0.02)
+        self.assertEqual(stacks.sweep_segments([left, left, right, right]), [(0, 2), (2, 4)])
+        self.assertEqual(stacks.sweep_segments([left, left, weak, left, left]), [(0, 2), (3, 5)])
+        self.assertEqual(stacks.sweep_segments([left, None, left]), [])              # too short either side
+
+    def test_small_or_sideways_or_uneven_steps_are_no_sweep(self):
+        self.assertEqual(stacks.sweep_segments([(0, -0.05, 0.1)] * 4), [])           # under 8 % of the frame
+        self.assertEqual(stacks.sweep_segments([(0.15, -0.12, 0.1)] * 4), [(0, 4)])   # mostly down: a vertical sweep
+        self.assertEqual(stacks.sweep_segments([(0.12, -0.12, 0.1)] * 4), [])         # as much across as along
+        self.assertEqual(stacks.sweep_segments([(0, -0.1, 0.1), (0, -0.4, 0.1), (0, -0.1, 0.1)]), [])  # uneven
+
+    def test_presses_that_sweep_become_one_pano_stack(self):
+        rows = self.presses(6)
+        sts = stacks.build_stacks(rows, measure=self.sweep_measure(rows))
+        self.assertEqual([s["kind"] for s in sts], ["pano"])
+        self.assertEqual([f["file"] for f in sts[0]["frames"]], [r["filename"] for r in rows])
+        self.assertEqual(sts[0]["lead"], rows[-1]["rowid"])                         # the sharpest frame
+        self.assertFalse(sts[0]["pano_candidate"])
+
+    def test_without_a_measure_they_stay_separate(self):
+        self.assertEqual([s["kind"] for s in stacks.build_stacks(self.presses(6))], ["single"] * 6)
+
+    def test_frames_either_side_that_do_not_fit_stay_out(self):
+        rows = self.presses(7)
+        steps = {(a["filename"], b["filename"]): (0, -0.22, 0.1) for a, b in zip(rows[1:6], rows[2:6])}
+        steps[(rows[0]["filename"], rows[1]["filename"])] = (0.03, 0.0, 0.03)          # a different shot first
+        sts = stacks.build_stacks(rows, measure=self.measure_from(steps))
+        self.assertEqual([(s["kind"], len(s["frames"])) for s in sts],
+                         [("single", 1), ("pano", 5), ("single", 1)])
+
+    def test_presses_too_far_apart_or_from_two_cameras_are_not_joined(self):
+        slow = self.presses(5, gap=4.0)
+        self.assertEqual({s["kind"] for s in stacks.build_stacks(slow, measure=self.sweep_measure(slow))}, {"single"})
+        mixed = self.presses(4)
+        mixed[2]["camera"] = "Apple iPhone 17 Pro"
+        self.assertNotIn("pano", {s["kind"] for s in stacks.build_stacks(mixed, measure=self.sweep_measure(mixed))})
+
+    def test_a_burst_in_the_middle_ends_the_run(self):
+        rows = self.presses(3) + [row("B1.ARW", 3.0, drive="continuous", seq=1), row("B2.ARW", 3.1, drive="continuous", seq=2)] \
+            + self.presses(3, start=4.0)
+        measure = lambda a, b: (0, -0.22, 0.1)
+        kinds = [(s["kind"], len(s["frames"])) for s in stacks.build_stacks(rows, measure=measure)]
+        self.assertEqual(kinds, [("pano", 3), ("burst", 2), ("pano", 3)])
+
+    def test_phase_step_finds_a_known_slide(self):
+        rng = np.random.default_rng(1)
+        scene = rng.random((120, 400)).astype(np.float32)
+        a, b = scene[:, :200], scene[:, 40:240]                                        # b is 40 px further right
+        dy, dx, peak = stacks.phase_step(a, b)
+        self.assertAlmostEqual(dx, -40 / 200, places=2)
+        self.assertAlmostEqual(dy, 0.0, places=2)
+        self.assertGreater(peak, 0.1)
+        _, _, unrelated = stacks.phase_step(a, rng.random((120, 200)).astype(np.float32))
+        self.assertLess(unrelated, stacks.PANO_STEP_MIN_PEAK)
