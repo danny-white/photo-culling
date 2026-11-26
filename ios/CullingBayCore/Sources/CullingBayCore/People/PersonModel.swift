@@ -24,9 +24,33 @@ public final class PersonModel {
         case deleted
     }
 
+    /// What "Not Alex" took off one photo, kept for Undo.
+    public struct PhotoRemoval: Sendable, Hashable {
+        /// The faces that stopped being theirs: every face of theirs in the photo, or in each frame of the
+        /// burst the tile stands for.
+        public let faces: [Int]
+        /// The photos those faces are in.
+        public let photos: [Int]
+        let tiles: FeedModel.RemovedTiles
+    }
+
+    /// How `removeFromPhoto` ended.
+    public enum PhotoRemovalResult: Sendable, Hashable {
+        case removed(PhotoRemoval)
+        /// None of their faces is in the photo (or in the burst's frames): the answer the grid gave is out
+        /// of date, or the face was fixed elsewhere. Nothing was sent or changed.
+        case notInPhoto
+        /// Nothing changed; `message` says why.
+        case failed
+    }
+
     public let id: Int
     public private(set) var phase: Phase
     public private(set) var person: Person?
+    /// Changes when their photos changed behind the grid's back (a review added some, the fix screen
+    /// took faces away), so the screen reads the grid again. It is `[photos, faces]` as of the last such
+    /// change. "Not Alex" on a tile and its Undo change the grid themselves and leave it alone.
+    public private(set) var feedKey: [Int]
     /// Why the last write (or a reload with someone on screen) failed; empty when it didn't.
     public private(set) var message = ""
     public private(set) var ending: Ending?
@@ -40,9 +64,12 @@ public final class PersonModel {
     public init(id: Int, person: Person? = nil, client: CullingBayClient) {
         self.id = id
         self.person = person
+        self.feedKey = Self.key(person)
         self.phase = person == nil ? .idle : .loaded
         self.client = client
     }
+
+    private static func key(_ person: Person?) -> [Int] { [person?.photos ?? 0, person?.faces ?? 0] }
 
     // MARK: Reading
 
@@ -70,10 +97,12 @@ public final class PersonModel {
             guard mine == generation else { return }
             if let found = list.people.first(where: { $0.id == id }) {
                 person = found
+                feedKey = Self.key(found)
                 message = ""
                 phase = .loaded
             } else {
                 person = nil
+                feedKey = Self.key(nil)
                 phase = .failed("That person isn’t in the library any more.")
             }
         } catch {
@@ -95,6 +124,7 @@ public final class PersonModel {
     public func update(_ changed: Person) {
         guard changed.id == id else { return }
         person = changed
+        feedKey = Self.key(changed)
         phase = .loaded
     }
 
@@ -146,6 +176,96 @@ public final class PersonModel {
         else { return false }
         update(changed)
         return true
+    }
+
+    // MARK: One photo
+
+    /// "Not Alex" on one photo of their grid: every face of theirs in it stops being theirs, now and for
+    /// any later suggestion (the same write as the fix screen's). The tile goes from `feed` at once and
+    /// their photo count drops; nothing is read again.
+    ///
+    /// With "1/burst" on, a tile stands for a whole burst: the grid shows the first frame of each stack
+    /// that has them, and a `Photo` doesn't say what its other frames are. So the stack is read from the
+    /// day (`GET /m/api/day/<day>`, the Cull tab's route) and every frame that has their face is dealt
+    /// with, or the tile would only change to the next frame. With it off, a tile is one photo.
+    ///
+    /// Any failure sends nothing more, leaves `feed` as it was and says why in `message`.
+    @discardableResult
+    public func removeFromPhoto(_ photo: Photo, in feed: FeedModel) async -> PhotoRemovalResult {
+        guard !isWorking else {
+            message = PeopleMessages.busy
+            return .failed
+        }
+        message = ""
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let frames = feed.bursts ? try await framesOfTile(photo) : [photo.id]
+            let theirs = try await theirFaces(in: frames)
+            guard !theirs.isEmpty else { return .notInPhoto }
+            let changed = try await client.removeFaces(theirs.map(\.face), from: id)
+            let photos = theirs.map(\.photo).reduce(into: [Int]()) { if !$0.contains($1) { $0.append($1) } }
+            let tiles = feed.remove(Set(photos + [photo.id]), lowersTotalBy: photos.count)
+            person = changed
+            return .removed(PhotoRemoval(faces: theirs.map(\.face), photos: photos, tiles: tiles))
+        } catch {
+            if !(error is CancellationError) { message = PeopleMessages.failure(error) }
+            return .failed
+        }
+    }
+
+    /// Undo of `removeFromPhoto`: the faces are theirs again (`add`, which also takes back the "not"),
+    /// and the tile goes back in the grid where it was. If the grid has been loaded again since, it is
+    /// loaded once more instead, so it is right either way. False when the write failed; nothing changed.
+    @discardableResult
+    public func undoRemoval(_ removal: PhotoRemoval, in feed: FeedModel) async -> Bool {
+        guard !isWorking else {
+            message = PeopleMessages.busy
+            return false
+        }
+        message = ""
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let changed = try await client.addFaces(to: id, faces: removal.faces)
+            person = changed
+        } catch {
+            if !(error is CancellationError) { message = PeopleMessages.failure(error) }
+            return false
+        }
+        if !feed.restore(removal.tiles) { await feed.load() }
+        return true
+    }
+
+    /// The photos one tile stands for: its stack's frames, or just itself when the day doesn't know it
+    /// (a JPEG that rides along with a RAW is not a stack's frame, and shows as a tile of its own).
+    private func framesOfTile(_ photo: Photo) async throws -> [Int] {
+        do {
+            let day = try await client.cullDay(photo.day)
+            guard let stack = day.stacks.first(where: { $0.frames.contains { $0.id == photo.id } })
+            else { return [photo.id] }
+            return stack.frames.map(\.id)
+        } catch CullingBayError.http(404, _) {
+            return [photo.id]
+        }
+    }
+
+    /// Their faces in these photos, in photo order, asked for together.
+    private func theirFaces(in photos: [Int]) async throws -> [(photo: Int, face: Int)] {
+        let client = self.client
+        let person = id
+        let found = try await withThrowingTaskGroup(of: (Int, [Int]).self) { group in
+            for photo in photos {
+                group.addTask {
+                    let faces = try await client.photoFaces(photo)
+                    return (photo, faces.filter { $0.person?.id == person }.map(\.id))
+                }
+            }
+            var byPhoto: [Int: [Int]] = [:]
+            for try await (photo, faces) in group { byPhoto[photo] = faces }
+            return byPhoto
+        }
+        return photos.flatMap { photo in (found[photo] ?? []).map { (photo: photo, face: $0) } }
     }
 
     /// Runs one write: clears the old message, holds the menu, and turns a failure into `message`

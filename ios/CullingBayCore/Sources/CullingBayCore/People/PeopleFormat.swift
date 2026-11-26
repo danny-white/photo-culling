@@ -36,6 +36,16 @@ public enum PeopleFormat {
         "Review \(suggestions) suggestion" + (suggestions == 1 ? "" : "s")
     }
 
+    /// `"Removed Alex from this photo"`, the toast after "Not Alex" on a tile.
+    public static func removedFromPhoto(_ name: String) -> String {
+        "Removed \(name) from this photo"
+    }
+
+    /// The toast when "Not Alex" finds no face of Alex's in the photo.
+    public static func notInPhoto(_ name: String) -> String {
+        "\(name)’s face isn’t in this photo. Use Show faces to fix it."
+    }
+
     /// `"31 photos"` under a person's name.
     public static func personCaption(_ person: Person, locale: Locale = .current) -> String {
         GalleryFormat.photoCount(person.photos, locale: locale)
@@ -45,6 +55,7 @@ public enum PeopleFormat {
 /// The sentences a People screen shows when a write fails.
 enum PeopleMessages {
     static let nameLength = "A name needs 1 to \(PeopleFormat.maxNameLength) characters."
+    static let busy = "Still saving the last change. Try again in a moment."
 
     static func failure(_ error: any Error) -> String {
         if let taken = error as? PersonNameTaken {

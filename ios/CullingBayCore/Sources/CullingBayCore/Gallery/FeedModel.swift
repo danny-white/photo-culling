@@ -54,6 +54,9 @@ public final class FeedModel {
 
     public private(set) var isSelecting = false
     public private(set) var selected: Set<Int> = []
+    /// How many times tiles were taken out of the grid or put back by `remove` and `restore`. A view
+    /// animates on this, so a tile sliding out is animated and a load replacing the photos is not.
+    public private(set) var edits = 0
 
     @ObservationIgnored private let client: CullingBayClient
     @ObservationIgnored private let settings: any GallerySettings
@@ -194,6 +197,54 @@ public final class FeedModel {
     /// Whether tiles carry their date: results from many days do; a single day does not.
     public var showsDates: Bool {
         if case .day = source { false } else { true }
+    }
+
+    // MARK: Taking tiles out and putting them back
+
+    /// Tiles `remove(_:lowersTotalBy:)` took out of the grid, and where each was, so `restore(_:)` can
+    /// put them back. It remembers which load the grid was from: after another load the old places
+    /// mean nothing.
+    public struct RemovedTiles: Sendable, Hashable {
+        public struct Tile: Sendable, Hashable {
+            public let index: Int
+            public let photo: Photo
+        }
+
+        /// In grid order.
+        public let tiles: [Tile]
+        let total: Int
+        let generation: Int
+
+        public var isEmpty: Bool { tiles.isEmpty }
+    }
+
+    /// Takes these photos out of the grid at once, without asking the server again, and lowers `total`
+    /// by `dropped` (the photos of the person the screen is about that went, which a tile standing for a
+    /// burst counts more than once). The person's screen uses it after "Not Alex" has been saved.
+    @discardableResult
+    public func remove(_ ids: Set<Int>, lowersTotalBy dropped: Int = 0) -> RemovedTiles {
+        let tiles = photos.enumerated()
+            .filter { ids.contains($0.element.id) }
+            .map { RemovedTiles.Tile(index: $0.offset, photo: $0.element) }
+        photos.removeAll { ids.contains($0.id) }
+        selected.subtract(ids)
+        total = max(0, total - dropped)
+        if !tiles.isEmpty { edits += 1 }
+        return RemovedTiles(tiles: tiles, total: dropped, generation: generation)
+    }
+
+    /// Puts tiles back where `remove` found them. Answers false, and puts nothing back, when the grid
+    /// has been loaded again since (its places are not these any more): the caller loads it instead.
+    @discardableResult
+    public func restore(_ removed: RemovedTiles) -> Bool {
+        guard removed.generation == generation else { return false }
+        let present = Set(photos.map(\.id))
+        for tile in removed.tiles where !present.contains(tile.photo.id) {
+            photos.insert(tile.photo, at: min(tile.index, photos.count))
+        }
+        total += removed.total
+        if photos.count > present.count { edits += 1 }
+        return true
     }
 
     // MARK: Selection
