@@ -158,6 +158,119 @@ do
     title, info = C.offerText(1, { 'a', 'b', 'c', 'd' }, 1)
     eq('offer title, one', title, '1 phone cull is waiting from Culling Bay')
     eq('offer, many shoots', info:sub(1, 30), 'From a to d (1 photo in this c')
+    eq('offer: no people, no mention', select(2, C.offerText(26, folders, 32, 0)):find('People', 1, true), nil)
+    title, info = C.offerText(26, folders, 32, 5)
+    eq('offer with people: same title', title, '26 phone culls are waiting from Culling Bay')
+    eq('offer with people: says so', info:find('Also waiting: People keywords for 5 photos.', 1, true) ~= nil, true)
+    title, info = C.offerText(0, {}, 0, 1)
+    eq('offer, people only', title, 'People keywords are waiting from Culling Bay for 1 photo')
+    eq('offer, people only: keeps your own', info:find('keywords you added yourself are kept', 1, true) ~= nil, true)
+    eq('offer, people only: asks first', info:find('Nothing changes unless you say so', 1, true) ~= nil, true)
+end
+
+-- people.tsv: the rows ------------------------------------------------------------------------
+do
+    local key, r = C.parsePeopleLine('2026-10-01\tDSC05012.ARW\tAlex|Sam\r')
+    eq('people key', key, '2026-10-01/DSC05012.ARW')
+    eq('people folder', r.folder, '2026-10-01')
+    eq('people file', r.fname, 'DSC05012.ARW')
+    eq('people names', table.concat(r.names, ','), 'Alex,Sam')
+    local _, empty = C.parsePeopleLine('2026-10-01\tDSC05013.ARW\t')
+    eq('people: a row with no names is kept', #empty.names, 0)
+    local k2, bare = C.parsePeopleLine('2026-10-01\tDSC05013.ARW')
+    eq('people: a row with no third column is kept too', k2, '2026-10-01/DSC05013.ARW')
+    eq('people: ... as no names', #bare.names, 0)
+    local _, spaced = C.parsePeopleLine('f\tx.ARW\t Alex | sam ||alex|')
+    eq('people: trimmed, no empties, one of each case aside', table.concat(spaced.names, ','), 'Alex,sam')
+    local _, extra = C.parsePeopleLine('f\tx.ARW\tAlex\tsomething else')
+    eq('people: only the third column is names', table.concat(extra.names, ','), 'Alex')
+    eq('people header skipped', C.parsePeopleLine('#people v1'), nil)
+    eq('people blank skipped', C.parsePeopleLine(''), nil)
+    eq('people: no file name', C.parsePeopleLine('f\t\tAlex'), nil)
+    eq('people: not a row', C.parsePeopleLine('just words'), nil)
+    eq('people header', C.isPeopleHeader('#people v1\r'), true)
+    eq('people: the decisions header is not it', C.isPeopleHeader('#cull-decisions v1'), false)
+    eq('people: a nil first line (empty file)', C.isPeopleHeader(nil), false)
+    eq('people: the other parsers skip the header', C.parseAILine('#people v1') == nil
+        and C.parseDecisionLine('#people v1') == nil, true)
+end
+
+-- people.tsv: the set stored in the hidden field ------------------------------------------------
+do
+    eq('set: alphabetical, case aside', C.serializePeopleSet({ 'sam', 'Alex', 'Zoe' }), 'Alex|sam|Zoe')
+    eq('set: the same set gives the same string', C.serializePeopleSet({ 'Sam', 'Alex' }), C.serializePeopleSet({ 'Alex', 'Sam' }))
+    eq('set: a name once', C.serializePeopleSet({ 'Alex', 'alex' }), 'Alex')
+    eq('set: empty clears the field', C.serializePeopleSet({}), nil)
+    eq('set: nil too', C.serializePeopleSet(nil), nil)
+    eq('set: read back', table.concat(C.parsePeopleSet('Alex|Sam'), ','), 'Alex,Sam')
+    eq('set: nothing stored', #C.parsePeopleSet(nil), 0)
+    eq('set: an empty string', #C.parsePeopleSet(''), 0)
+    eq('differs: same names', C.peopleDiffers({ 'Sam', 'Alex' }, 'Alex|Sam'), false)
+    eq('differs: a new name', C.peopleDiffers({ 'Alex', 'Sam' }, 'Alex'), true)
+    eq('differs: nothing wanted, nothing set', C.peopleDiffers({}, nil), false)
+    eq('differs: nothing wanted, something set', C.peopleDiffers({}, 'Alex'), true)
+    eq('differs: something wanted, nothing set', C.peopleDiffers({ 'Alex' }, nil), true)
+end
+
+-- people.tsv: what to add and remove -------------------------------------------------------------
+do
+    local function names(t) return table.concat(t, ',') end
+    local add, remove = C.peopleChanges({ 'Alex', 'Sam' }, {}, {})
+    eq('first sync: add both', names(add), 'Alex,Sam'); eq('first sync: remove none', names(remove), '')
+
+    add, remove = C.peopleChanges({ 'Alex', 'Sam' }, { 'Alex' }, { 'Alex' })
+    eq('a new name is added', names(add), 'Sam'); eq('nothing removed', names(remove), '')
+
+    add, remove = C.peopleChanges({ 'Alex' }, { 'Alex' }, { 'Alex' })
+    eq('already there: nothing to add', names(add), ''); eq('still wanted: nothing to remove', names(remove), '')
+
+    add, remove = C.peopleChanges({ 'Alex' }, {}, { 'Alex' })
+    eq('you added it by hand: not added again', names(add), ''); eq('... and not removed', names(remove), '')
+
+    add, remove = C.peopleChanges({}, { 'Alex', 'Sam' }, { 'Alex', 'Sam' })
+    eq('no longer in the photo: add none', names(add), ''); eq('no longer in the photo: remove what we set', names(remove), 'Alex,Sam')
+
+    add, remove = C.peopleChanges({}, { 'Alex' }, { 'Alex', 'Pat' })
+    eq('a keyword we did not set survives', names(remove), 'Alex')
+
+    add, remove = C.peopleChanges({}, {}, { 'Pat' })
+    eq('never set by us: never removed', names(remove), '')
+
+    add, remove = C.peopleChanges({}, { 'Alex' }, {})
+    eq('we set it, you removed it: nothing left to remove', names(remove), '')
+
+    add, remove = C.peopleChanges({ 'Alex' }, { 'Alex' }, {})
+    eq('you removed a wanted keyword: it comes back', names(add), 'Alex')
+
+    add, remove = C.peopleChanges({ 'alex' }, { 'Alex' }, { 'Alex' })
+    eq('renamed in case only: not added', names(add), ''); eq('... and the keyword is not removed', names(remove), '')
+
+    add, remove = C.peopleChanges({ 'Alexander' }, { 'Alex' }, { 'Alex' })
+    eq('renamed: the new name added', names(add), 'Alexander'); eq('renamed: the old name removed', names(remove), 'Alex')
+
+    add, remove = C.peopleChanges({ 'Alex', 'ALEX' }, {}, {})
+    eq('a name once', names(add), 'Alex')
+
+    add, remove = C.peopleChanges(nil, nil, nil)
+    eq('nothing at all', #add + #remove, 0)
+end
+
+do
+    eq('plan: nothing to do', C.peoplePlan({ 'Alex' }, 'Alex', { 'Alex' }), nil)
+    eq('plan: nothing wanted, nothing set', C.peoplePlan({}, nil, {}), nil)
+    eq('plan: a name that is not ours stays out of it', C.peoplePlan({}, nil, { 'Pat' }), nil)
+    local p = C.peoplePlan({ 'Alex', 'Sam' }, nil, {})
+    eq('plan: add', table.concat(p.add, ','), 'Alex,Sam'); eq('plan: store', p.store, 'Alex|Sam')
+    p = C.peoplePlan({ 'Alex' }, 'Alex', {})
+    eq('plan: the keyword is gone, put it back', table.concat(p.add, ','), 'Alex'); eq('plan: store unchanged', p.store, 'Alex')
+    p = C.peoplePlan({}, 'Alex', { 'Alex', 'Pat' })
+    eq('plan: remove ours', table.concat(p.remove, ','), 'Alex'); eq('plan: field cleared', p.store, nil)
+    p = C.peoplePlan({ 'Alex' }, nil, { 'Alex' })
+    eq('plan: held by hand, now wanted: nothing to add', #p.add, 0)
+    eq('plan: ... remembered, so a later removal is ours', p.store, 'Alex')
+    p = C.peoplePlan({}, 'Alex', {})
+    eq('plan: set by us, gone by hand, no longer wanted: just forget it', #p.add + #p.remove, 0)
+    eq('plan: ... forgotten', p.store, nil)
 end
 
 print(string.format('%d passed, %d failed', passed, failed))

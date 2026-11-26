@@ -3,7 +3,8 @@
 Merges `photo_cull`'s AI **keywords + caption** into your LrC catalog (never a colour label:
 v2.2), and (v2)
 your **phone culls** from Culling Bay Mobile: pick/reject flags, stars and burst notes, and (v2.1)
-offers waiting phone culls when Lightroom starts. It
+offers waiting phone culls when Lightroom starts, and (v2.3) the **people** you named in Culling
+Bay, as `People > name` keywords. It
 uses the Lightroom SDK, so — unlike "Read Metadata from File" — it never overwrites anything you
 set by hand. Hidden plugin fields ([`AICullMetadata.lua`](AICull.lrplugin/AICullMetadata.lua))
 record exactly what the plugin itself wrote, and only that is ever replaced. Re-run it as often as
@@ -18,6 +19,8 @@ Who owns what:
 | Caption: the AI sentence | **AI** — replaced only while it is exactly what the plugin wrote |
 | Caption: a first line `Burst reject · kept DSC05015` | **phone** — added and removed by the plugin |
 | Caption: anything else | **you** — never touched |
+| `People > <name>` keywords | **Culling Bay** — added for the people you named; removed only when Culling Bay no longer has that person in the photo, and only if this plugin added it |
+| any other keyword, under `People` or not | **you** — never removed |
 | pick / reject flag | **you**, then the phone — set only on unflagged photos, or ones the plugin flagged itself |
 | star rating | **you**, then the phone — the phone's stars land only on unrated photos |
 
@@ -32,7 +35,7 @@ can safely cover the **whole library at once**; you don't have to select one sho
    photo_cull.py export --plugin-data /path/aicull.tsv --db trial_out/trial.db
    ```
 2. Copy the `AICull.lrplugin` folder to your Mac (scp/AirDrop/share) — one-time, since it's just
-   code. The TSV itself lives on the passport drive (`/mnt/Passport_AICullInbox/` from this
+   code. The TSVs themselves live on the passport drive (`/mnt/Passport_AICullInbox/` from this
    Linux box — a narrow read-write mount scoped to just that subfolder, separate from the
    read-only `/mnt/passport` used to scan the library — `/Volumes/Passport/AICullInbox/` from the
    Mac), which the plugin's file picker defaults into — no copying needed for each sync.
@@ -43,22 +46,53 @@ can safely cover the **whole library at once**; you don't have to select one sho
    indexes a plug-in's scripts only at launch. A file added while it runs, Reload Plug-in
    included, gives "No script by the name …" until a restart (`AICullMetadata.lua` in v2,
    `Startup.lua` in v2.1, where the plug-in then fails to start at all). Lightroom asks once per
-   catalog to update it for the hidden fields.
+   catalog to update it for the hidden fields. **2.3.0 adds one (`peopleSet`)**, so replace the
+   folder with Lightroom quit, as above, and accept the catalog update at the next launch: a
+   Reload Plug-in is not enough.
 
 ## Each sync
 
 1. In the Library grid, **select the photos to update** — "All Photographs" for a full-library
    sync, or a subset if you just want to touch a few shoots.
 2. **Library → Plug-in Extras → Sync AI Cull Data (AI + phone culls)…**
-3. Pick `pending.tsv` (AI) or `cull-decisions.tsv` (phone) from `/Volumes/Passport/AICullInbox/`;
-   the other one is applied in the same pass when it is in the same folder. It reports what it
-   applied and what it left alone.
+3. Pick `pending.tsv` (AI), `cull-decisions.tsv` (phone) or `people.tsv` (people) from
+   `/Volumes/Passport/AICullInbox/`; the others are applied in the same pass when they are in the
+   same folder. It reports what it applied and what it left alone.
 4. On a full, uncanceled run it writes `applied/<time>-receipt.tsv` (one outcome per phone row:
-   `applied`, `your_flag_kept`, `your_stars_kept`, `caption_left`, `missing`), which Culling Bay
-   reads back, and moves each input to `applied/<time>-<name>`. A canceled run leaves its inputs
-   in place, since it may not have covered every photo yet.
+   `applied`, `your_flag_kept`, `your_stars_kept`, `caption_left`, `missing`, and a comment line
+   `#people photos=… added=… removed=…` when people keywords changed), which Culling Bay reads
+   back, and moves `pending.tsv` and `cull-decisions.tsv` to `applied/<time>-<name>`. A canceled
+   run leaves its inputs in place, since it may not have covered every photo yet. `people.tsv`
+   stays where it is (below).
 
 A flag or rating you set by hand always wins, so cull however you like, before or after syncing.
+
+### People keywords (v2.3)
+
+When you name someone in Culling Bay, the server writes `people.tsv` into the inbox (about 10
+seconds after the last change): one row per photo that has ever had a named person, with the
+names in it. The sync turns each name into a keyword under a top-level **`People`** keyword
+(`People > Alex`): `People` is not included on export, each name is, so a name exports as plain
+`Alex`. Per photo it:
+
+- **adds** the names the photo doesn't hold;
+- **removes** a name only if this plugin added it earlier (the hidden `peopleSet` field records
+  the names it set) and Culling Bay no longer has that person in the photo;
+- **leaves everything else alone**: a keyword you added by hand, under `People` or anywhere else,
+  is never removed. If you add `People > Alex` by hand to a photo Culling Bay also names Alex, the
+  plugin treats it as its own from then on;
+- puts a keyword back if you take a wanted one off by hand (the sync makes the catalog match Culling Bay).
+
+A photo whose last person was taken off keeps a row with no names, so its keyword comes off; a
+person renamed in Culling Bay (`Alex` → `Alexander`) gets the new keyword and loses the old one
+from the photos (the old keyword stays in the keyword list with no photos).
+
+**`people.tsv` is left in the inbox**, not moved to `applied/` like the other two. The server
+rewrites all of it at every change, so it is the current state rather than a batch of work;
+running it twice changes nothing (a photo whose names match `peopleSet` and which holds them
+costs one keyword read and no write); and a sync of a selection or of the launch offer's shoots
+must not use it up for photos it didn't cover. The sync reports `People: N row(s); P photo(s)
+changed, A keyword(s) added and R removed.`
 
 ### At launch (v2.1)
 
@@ -70,6 +104,14 @@ time. It applies only the phone's file: the AI's `pending.tsv` can name shoots y
 imported yet, and a sync files its input under `applied/` whether or not every row found a
 photo, so the AI data waits for **Sync AI Cull Data** as before. Nothing is asked when the inbox
 isn't mounted, nothing is waiting, or none of the shoots are in the open catalog.
+
+(v2.3) `people.tsv` is looked at too. A photo counts as waiting only when the names Culling Bay
+has for it differ from the ones the plugin last set (read from the hidden field in bulk, so it is
+quick even on a big library), so the file sitting in the inbox doesn't ask at every launch. If
+any photo in the open catalog is waiting, the question says so, together with the phone culls
+(*"Also waiting: People keywords for 12 photos."*), or on its own (*"People keywords are waiting
+from Culling Bay for 12 photos"*). **Apply** applies `people.tsv` to those photos alongside the
+phone culls. A hand-removed keyword isn't noticed here; **Sync AI Cull Data** puts it back.
 
 ### Caption rules
 
@@ -99,7 +141,9 @@ lua5.1 lightroom-plugin/tests/test_sync.lua       # the menu sync and the launch
 ```
 
 The fake SDK can't prove what Lightroom does. [`TESTING.md`](TESTING.md) is the 15-minute
-scratch-catalog checklist that does, using the same two-run kit in `tests/kit/`.
+scratch-catalog checklist that does, using the same two-run kit in `tests/kit/`, and (at the top)
+the People keywords checklist for 2.3. `review/tests/test_round_trip.py` runs the server's
+`people.tsv` through the plugin on the fake SDK.
 
 ## AI Semantic Search
 

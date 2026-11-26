@@ -159,6 +159,198 @@ dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
 eq('launch: nothing waiting, nothing asked', #F.dialog.confirms, nConfirms + 2)
 eq('launch: and nothing said', #F.dialog.messages, nMsgs)
 
+-- people.tsv ----------------------------------------------------------------------------------------
+-- (v2.3) People > name keywords from Culling Bay. The AI file left waiting above would come along
+-- with the menu sync, so clear it first.
+os.remove(inbox .. '/pending.tsv')
+local function put(name, text)
+    local out = io.open(inbox .. '/' .. name, 'wb'); out:write(text); out:close()
+end
+local function putPeople(rows)
+    put('people.tsv', '#people v1\n' .. table.concat(rows, '\n') .. '\n')
+end
+local function lastMessage() return F.dialog.messages[#F.dialog.messages] end
+local function receiptText(stampN)
+    local f = assert(io.open(inbox .. '/applied/' .. string.format('20261010-12000%d', stampN) .. '-receipt.tsv'))
+    local text = f:read('*a'); f:close()
+    return text
+end
+local function names(photo)    -- the keywords a photo holds, sorted, as one string
+    local t = {}
+    for k in pairs(photo.keywords) do t[#t + 1] = k end
+    table.sort(t)
+    return table.concat(t, '; ')
+end
+
+for id, field in pairs(F.declaredFields) do
+    eq('hidden field ' .. id .. ' declares no dataType (Lightroom rejects the schema)', field.dataType, nil)
+    eq('hidden field ' .. id .. ' has no title (it stays hidden)', field.title, nil)
+end
+eq('peopleSet is declared', F.declaredFields.peopleSet ~= nil, true)
+
+-- the very first people sync: the plugin creates People (not exported) and the name under it (exported)
+local PD = '/Volumes/Passport/Pictures/2026/2026-10-04/'
+local P0 = F.photo(PD .. 'IMG_0000.ARW')
+F.catalog.photos = { P0 }
+putPeople({ '2026-10-04\tIMG_0000.ARW\tZoe' })
+F.dialog.openPath = inbox .. '/people.tsv'
+dofile('lightroom-plugin/AICull.lrplugin/SyncAICull.lua')
+eq('people first: Zoe', names(P0), 'People > Zoe')
+eq('people first: the parent is not exported', F.catalog.keywords['People'].includeOnExport, false)
+eq('people first: a name is exported', F.catalog.keywords['People > Zoe'].includeOnExport, true)
+eq('people first: a name sits under the parent', F.catalog.keywords['People > Zoe']:getParent(), F.catalog.keywords['People'])
+eq('people first: the parent is top level', F.catalog.keywords['People']:getParent(), nil)
+
+-- keywords you have already, made by hand: created by the fake as plain exported keywords
+local P1  = F.photo(PD .. 'IMG_0001.ARW')
+local P1v = F.photo(PD .. 'IMG_0001.ARW', { virtual = true })
+local P2  = F.photo(PD .. 'IMG_0002.ARW', { keywords = { 'Family', 'People > Pat' } })       -- yours, by hand
+local P3  = F.photo(PD .. 'IMG_0003.ARW')
+local P5  = F.photo(PD .. 'IMG_0005.ARW', { keywords = { 'People > Pat' } })                 -- not in the file
+local P6  = F.photo(PD .. 'IMG_0006.ARW', { keywords = { 'Alex' } })                         -- an Alex elsewhere
+local P7  = F.photo(PD .. 'IMG_0007.ARW', { keywords = { 'Family > People > Alex' } })       -- under another People
+local P8  = F.photo(PD .. 'IMG_0008.ARW', { keywords = { 'People > Pat' } })                 -- an empty row, never set by us
+local P9  = F.photo(PD .. 'IMG_0009.ARW', { keywords = { 'People > Alex' } })                -- you already added Alex
+F.catalog.photos = { P1, P1v, P2, P3, P5, P6, P7, P8, P9 }
+
+-- run 5: the first sync of people.tsv, picked from the menu
+putPeople({
+    '2026-10-04\tIMG_0001.ARW\tAlex|Sam', '2026-10-04\tIMG_0002.ARW\tAlex', '2026-10-04\tIMG_0003.ARW\tSam',
+    '2026-10-04\tIMG_0006.ARW\tAlex', '2026-10-04\tIMG_0007.ARW\tAlex', '2026-10-04\tIMG_0008.ARW\t',
+    '2026-10-04\tIMG_0009.ARW\tAlex', '2026-10-04\tNOTREAL.ARW\tAlex' })
+F.dialog.openPath = inbox .. '/people.tsv'
+local writes0, reads0, stamp0 = F.writes, F.keywordReads, F.stampN or 0
+dofile('lightroom-plugin/AICull.lrplugin/SyncAICull.lua')
+print(lastMessage())
+eq('people: Alex and Sam on P1', names(P1), 'People > Alex; People > Sam')
+eq('people: P1 remembers the pair', P1.props.peopleSet, 'Alex|Sam')
+eq('people: a virtual copy gets them too', names(P1v), 'People > Alex; People > Sam')
+eq('people: your own keywords stay on P2', names(P2), 'Family; People > Alex; People > Pat')
+eq('people: P2 remembers only Alex', P2.props.peopleSet, 'Alex')
+eq('people: P3', names(P3), 'People > Sam')
+eq('people: an Alex elsewhere is not People > Alex', names(P6), 'Alex; People > Alex')
+eq('people: People under another parent is not People', names(P7), 'Family > People > Alex; People > Alex')
+eq('people: a photo with no row is untouched', names(P5), 'People > Pat')
+eq('people: an empty row that was never ours does nothing', names(P8), 'People > Pat')
+eq('people: nothing remembered for it', P8.props.peopleSet, nil)
+eq('people: a keyword you had added is taken as ours from here', P9.props.peopleSet, 'Alex')
+eq('people: ... and not added twice', names(P9), 'People > Alex')
+eq('people: a name is exported', F.catalog.keywords['People > Alex'].includeOnExport, true)
+eq('people: the file stays in the inbox', exists(inbox .. '/people.tsv'), true)
+eq('people: and is not filed under applied/', exists(inbox .. '/applied/20261010-12000' .. F.stampN .. '-people.tsv'), false)
+eq('people: summary counts rows, photos, keywords',
+    lastMessage():find('People: 8 row(s); 7 photo(s) changed, 8 keyword(s) added and 0 removed.', 1, true) ~= nil, true)
+eq('people: the receipt counts them (as a comment line the server skips)',
+    receiptText(F.stampN):find('#cull-receipt v1\n#people photos=7 added=8 removed=0', 1, true) == 1, true)
+eq('people: keywords read only for photos with names or something of ours', F.keywordReads - reads0, 7)
+
+-- run 6: the same file again changes nothing at all
+writes0, reads0 = F.writes, F.keywordReads
+local msgs = #F.dialog.messages
+dofile('lightroom-plugin/AICull.lrplugin/SyncAICull.lua')
+eq('people again: no catalog change', F.writes - writes0, 0)
+eq('people again: the keywords are checked, not rewritten', F.keywordReads - reads0, 7)
+eq('people again: counted as nothing',
+    lastMessage():find('People: 8 row(s); 0 photo(s) changed, 0 keyword(s) added and 0 removed.', 1, true) ~= nil, true)
+
+-- run 7: Culling Bay took Sam off P1 and Alex off P2 and P9, and added Alex to P3. You added Zed to P1
+-- and Pat to P3 yourself.
+local function addByHand(photo, full)
+    local kw = F.photo('x', { keywords = { full } }).kwObjs[full]
+    photo.keywords[full], photo.kwObjs[full] = true, kw
+end
+addByHand(P1, 'People > Zed'); addByHand(P3, 'People > Pat')
+putPeople({
+    '2026-10-04\tIMG_0001.ARW\tAlex', '2026-10-04\tIMG_0002.ARW\t', '2026-10-04\tIMG_0003.ARW\tAlex|Sam',
+    '2026-10-04\tIMG_0006.ARW\tAlex', '2026-10-04\tIMG_0007.ARW\tAlex', '2026-10-04\tIMG_0008.ARW\t',
+    '2026-10-04\tIMG_0009.ARW\t' })
+writes0, reads0 = F.writes, F.keywordReads
+dofile('lightroom-plugin/AICull.lrplugin/SyncAICull.lua')
+print(lastMessage())
+eq('people 2: Sam off P1, your Zed stays', names(P1), 'People > Alex; People > Zed')
+eq('people 2: P1 remembers Alex only', P1.props.peopleSet, 'Alex')
+eq('people 2: and the virtual copy follows', names(P1v), 'People > Alex')
+eq('people 2: Alex off P2, your Family and Pat stay', names(P2), 'Family; People > Pat')
+eq('people 2: P2 remembers nobody', P2.props.peopleSet, nil)
+eq('people 2: Alex added to P3, your Pat stays', names(P3), 'People > Alex; People > Pat; People > Sam')
+eq('people 2: P3 remembers both', P3.props.peopleSet, 'Alex|Sam')
+eq('people 2: the Alex you had added is ours once Culling Bay has said so, and goes', names(P9), '')
+eq('people 2: P5, P6, P7, P8 as they were', names(P5) .. '|' .. names(P6) .. '|' .. names(P7) .. '|' .. names(P8),
+    'People > Pat|Alex; People > Alex|Family > People > Alex; People > Alex|People > Pat')
+eq('people 2: summary',
+    lastMessage():find('People: 7 row(s); 5 photo(s) changed, 1 keyword(s) added and 4 removed.', 1, true) ~= nil, true)
+eq('people 2: the empty rows read nothing but P9 (which was ours)', F.keywordReads - reads0, 7)
+
+-- run 8: you take a wanted keyword off by hand: it comes back. You also remove one we set: nothing to remove.
+P3.keywords['People > Alex'], P3.kwObjs['People > Alex'] = nil, nil
+writes0 = F.writes
+dofile('lightroom-plugin/AICull.lrplugin/SyncAICull.lua')
+eq('people 3: the wanted keyword is put back', names(P3), 'People > Alex; People > Pat; People > Sam')
+eq('people 3: nothing else changed', lastMessage():find('1 photo(s) changed, 1 keyword(s) added and 0 removed.', 1, true) ~= nil, true)
+
+-- the launch offer for people: the shoots are found without a selection, and only photos whose names
+-- differ from what we set are counted; people.tsv stays, so it must not be offered twice
+local Q1 = F.photo('/Volumes/Passport/Pictures/2026/2026-10-05/IMG_1001.ARW')
+local Q2 = F.photo('/Volumes/Passport/Pictures/2026/2026-10-05/IMG_1002.ARW')
+local Q3 = F.photo('/Volumes/Passport/Pictures/2026/2026-10-06/IMG_1003.ARW')
+F.catalog.folders = { F.folder('Pictures', { F.folder('2026', {
+    F.folder('2026-10-05', {}, { Q1, Q2 }), F.folder('2026-10-06', {}, { Q3 }) }) }) }
+F.catalog.photos = { P1 }                    -- the selection plays no part
+putPeople({ '2026-10-05\tIMG_1001.ARW\tAlex', '2026-10-05\tIMG_1002.ARW\tSam', '2026-10-06\tIMG_1003.ARW\t',
+            '2026-11-01\tNOTHERE.ARW\tAlex' })       -- the last shoot is not in this catalog
+nConfirms, nMsgs = #F.dialog.confirms, #F.dialog.messages
+F.dialog.answers = { 'cancel' }
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+eq('launch people: asked once', #F.dialog.confirms, nConfirms + 1)
+eq('launch people: counts the two photos that would change',
+    F.dialog.confirms[#F.dialog.confirms], 'People keywords are waiting from Culling Bay for 2 photos')
+eq('launch people: Not now applies nothing', names(Q1) .. names(Q2), '')
+eq('launch people: Not now leaves the file', exists(inbox .. '/people.tsv'), true)
+F.dialog.answers = { 'ok' }
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+eq('launch people: Apply adds Alex', names(Q1), 'People > Alex')
+eq('launch people: Apply adds Sam', names(Q2), 'People > Sam')
+eq('launch people: an empty row never set by us does nothing', names(Q3), '')
+eq('launch people: the file stays in the inbox', exists(inbox .. '/people.tsv'), true)
+eq('launch people: the selection is not touched', names(P1), 'People > Alex; People > Zed')
+nConfirms = #F.dialog.confirms
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+eq('launch people: nothing differs now, so nothing is asked', #F.dialog.confirms, nConfirms)
+
+-- a phone cull and a people change at once: one question, one pass
+putPeople({ '2026-10-05\tIMG_1001.ARW\tAlex|Sam', '2026-10-05\tIMG_1002.ARW\tSam', '2026-10-06\tIMG_1003.ARW\t' })
+put('cull-decisions.tsv', '#cull-decisions v1\n2026-10-06\tIMG_1003.ARW\treject\t\t\n')
+F.dialog.answers = { 'ok' }
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+local title = F.dialog.confirms[#F.dialog.confirms]
+eq('launch both: the culls head the question', title, '1 phone cull is waiting from Culling Bay')
+eq('launch both: Q3 rejected', Q3.pickStatus, -1)
+eq('launch both: Q1 gets Sam too', names(Q1), 'People > Alex; People > Sam')
+eq('launch both: the phone file is filed under applied/', exists(inbox .. '/cull-decisions.tsv'), false)
+eq('launch both: the people file is not', exists(inbox .. '/people.tsv'), true)
+eq('launch both: the summary has both',
+    lastMessage():find('1 flag(s) set', 1, true) ~= nil and lastMessage():find('1 photo(s) changed, 1 keyword(s) added', 1, true) ~= nil, true)
+
+-- only shoots this catalog doesn't have: silent
+putPeople({ '2026-11-01\tNOTHERE.ARW\tAlex' })
+nConfirms = #F.dialog.confirms
+dofile('lightroom-plugin/AICull.lrplugin/Startup.lua')
+eq('launch people: shoots not in the catalog are not offered', #F.dialog.confirms, nConfirms)
+
+-- the menu sync takes the phone file along with people.tsv and files only that one
+putPeople({ '2026-10-05\tIMG_1002.ARW\tSam|Alex' })
+put('cull-decisions.tsv', '#cull-decisions v1\n2026-10-05\tIMG_1002.ARW\tpick\t3\t\n')
+F.catalog.photos = { Q1, Q2, Q3 }
+F.dialog.openPath = inbox .. '/people.tsv'
+dofile('lightroom-plugin/AICull.lrplugin/SyncAICull.lua')
+eq('menu: people from the picked file', names(Q2), 'People > Alex; People > Sam')
+eq('menu: the phone file came along', Q2.pickStatus .. ' ' .. tostring(Q2.rating), '1 3')
+eq('menu: the phone file was filed', exists(inbox .. '/cull-decisions.tsv'), false)
+eq('menu: people.tsv was not', exists(inbox .. '/people.tsv'), true)
+eq('menu: one receipt holds both',
+    receiptText(F.stampN):find('#people photos=1 added=1 removed=0\n', 1, true) ~= nil
+        and receiptText(F.stampN):find('IMG_1002.ARW\tapplied\tpick', 1, true) ~= nil, true)
+
 os.execute('rm -rf "' .. inbox .. '"')
 print(string.format('%d passed, %d failed', passed, failed))
 os.exit(failed == 0 and 0 or 1)

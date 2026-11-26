@@ -10,6 +10,7 @@ return {
         { id = 'aiCaption' },  -- AI sentence last written into Caption, or '[yours]'
         { id = 'cullFlag' },   -- pick/reject flag last set from the phone: '1' or '-1'
         { id = 'cullStars' },  -- star rating last set from the phone (Hero = '5')
+        { id = 'peopleSet' },  -- People keywords last set from Culling Bay: the names, pipe-joined ('Alex|Sam')
     },
-    schemaVersion = 1,
+    schemaVersion = 2,         -- 2.3.0 added peopleSet
 }

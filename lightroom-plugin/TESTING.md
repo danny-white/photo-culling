@@ -1,3 +1,87 @@
+# AI Cull Sync v2.3 — People keywords
+
+About 20 minutes at the Mac, in a **scratch catalog**. v2.3 turns the people you name in Culling
+Bay into `People > <name>` keywords. The fake SDK in `tests/` checks the rules; this checks the
+parts only Lightroom can: the new hidden field, the keyword hierarchy and the export flags, and
+that your own keywords survive. The names below ("Alex", "Pat") stand for anyone: use real ones in
+your own catalog.
+
+## Set up
+
+1. Copy `AICull.lrplugin` from the repo (branch `people-lr`) to the Mac. **Quit Lightroom (⌘Q)**,
+   keep the old plugin folder as `AICull-2.2.lrplugin` somewhere else (to roll back to), and
+   replace the folder's contents (Plug-in Manager shows where it loads from). Reload Plug-in is
+   not enough: 2.3 adds a hidden field, `peopleSet`, and Lightroom reads those only at launch.
+2. Reopen Lightroom. **File → New Catalog**, `AI Cull people test`. Accept the prompt to update
+   the catalog for the plugin's metadata. Plug-in Manager should show **AI Cull Sync 2.3.0**,
+   enabled, with no "error reading the schema" message (that message means a hidden field
+   declares a `dataType`).
+3. Import with **Add** (not Move) one shoot folder that has people in it, so Culling Bay has
+   faces there: about 30 photos is plenty.
+4. In Culling Bay (the app), name one group **Alex** (People tab → Not named yet → the group →
+   Add name). Wait 15 seconds, then on the Mac open
+   `/Volumes/Passport/AICullInbox/people.tsv`: the first line is `#people v1`, then one row per
+   photo of Alex's: `2026-…<tab>DSC….ARW<tab>Alex`, with the names of the other people the
+   same way (`Alex|Sam`).
+
+## Add
+
+5. **Select All Photographs → Library → Plug-in Extras → Sync AI Cull Data…** → pick `people.tsv`.
+   The summary ends `People: N row(s); P photo(s) changed, A keyword(s) added and 0 removed.`,
+   and **there is no caption question** (nothing else was applied).
+6. Check:
+   - Keyword List panel: a top-level keyword **People** with **Alex** under it.
+   - Right-click **People → Edit Keyword Tag…**: *Include on Export* is **off**. On **Alex** it is **on**.
+   - Filter by the Alex keyword: exactly the photos in `people.tsv`'s Alex rows (rows for photos
+     of the shoot you didn't import match nothing; that is fine).
+   - `people.tsv` is **still in the inbox** (it isn't moved to `applied/`); `applied/` holds a
+     new `…-receipt.tsv` whose second line is `#people photos=… added=… removed=0`.
+7. Sync again, same file: the summary says `0 photo(s) changed`.
+
+## Your own keywords survive
+
+8. Pick a photo **A** that has Alex, and add the keyword `Family` by hand. Pick another photo
+   **B** that has Alex and add `People > Pat` by hand (create **Pat** under **People** in the
+   Keyword List).
+9. In Culling Bay take Alex off photo **B** only: Person screen → Manage faces → select B's face →
+   **Not Alex** (or open B's (i) sheet and use *Not Alex* on the face). Wait 15 seconds: the
+   `people.tsv` row for B now ends with a tab and no name.
+10. Sync again with `people.tsv`. Check: **B has lost `People > Alex` but keeps `People > Pat`**
+    (`1 removed`); **A still has Family and People > Alex**.
+11. Sync once more: `0 photo(s) changed`. **Pat is still on B.**
+
+## Put back, rename, delete
+
+12. Take `People > Alex` off photo **A** by hand. Sync: it comes back (`1 added`).
+13. In Culling Bay rename Alex to **Alexander**. Wait, sync: photos get `People > Alexander`
+    and lose `People > Alex` (the empty keyword `Alex` stays in the Keyword List; delete it by
+    hand if you like). Pat and Family are untouched.
+14. In Culling Bay use *Remove name* on Alexander. Wait, sync: every photo loses
+    `People > Alexander`; the rows in `people.tsv` stay, with no names.
+
+## The launch offer
+
+15. In Culling Bay name a group again (any name), wait 15 seconds, quit Lightroom and reopen the
+    scratch catalog. About 5 seconds after it opens: **"People keywords are waiting from Culling
+    Bay for N photos"**. Click **Not now**: nothing changes. Quit and reopen: **Apply**: the
+    keywords arrive and the usual summary shows. Quit and reopen once more: **no question**,
+    although `people.tsv` is still in the inbox.
+16. Send a phone cull with the same launch: the question is the phone culls', with *"Also waiting:
+    People keywords for N photos."* underneath, and Apply does both.
+
+## If something is off
+
+Note the photo, the step and what you saw (a screenshot of any error dialog helps; the dialog
+names the photo and the SDK call that failed). Two things the fake SDK can't settle are worth
+watching: that a photo's keyword list holds only the keywords on the photo itself (so `People`
+never shows as a keyword on a photo, only `Alex` under it), and that the sync of thousands of
+photos stays quick (time a full-library sync on the real catalog once; the second sync reads each
+named photo's keywords and writes nothing). To roll back, put `AICull-2.2.lrplugin`'s contents
+back and restart Lightroom; the hidden field stays in the catalog, unused, and the keywords stay
+on the photos.
+
+---
+
 # AI Cull Sync v2.1 — the launch offer
 
 About 5 minutes, on your **real** catalog. v2.1 adds one thing: when Lightroom starts, it offers

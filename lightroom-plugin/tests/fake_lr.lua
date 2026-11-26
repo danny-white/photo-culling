@@ -7,21 +7,68 @@
 local F = {}
 
 local inWrite = false
+F.writes = 0           -- catalog changes made so far, so a test can tell "wrote nothing" from "wrote the same"
+F.keywordReads = 0     -- photos whose keywords were read
 local function needWrite(what)
     if not inWrite then error(what .. ' called outside withWriteAccessDo', 2) end
+    F.writes = F.writes + 1
+end
+
+-- the plugin's hidden fields, read from the plugin itself so the fake accepts exactly those
+local declared = {}
+do
+    local chunk = assert(loadfile('lightroom-plugin/AICull.lrplugin/AICullMetadata.lua'),
+        'fake: run from the repo root')
+    for _, field in ipairs(chunk().metadataFieldsForPhotos) do declared[field.id] = field end
+end
+F.declaredFields = declared
+
+-- keywords ---------------------------------------------------------------------------------
+-- An LrKeyword: getName() is the keyword's own name, getParent() the keyword above it (nil at the
+-- top). `full` ("People > Alex") is the fake's own handle, and what Photo.keywords is keyed by.
+-- Lightroom keeps one keyword per name under a parent and ignores case when it looks one up.
+local Keyword = {}
+Keyword.__index = Keyword
+function Keyword:getName() return self.leaf end
+function Keyword:getParent() return self.parent end
+
+local registry = {}      -- lower-case full name -> keyword
+local function makeKeyword(name, include, parent)
+    local full = (parent and parent.full .. ' > ' or '') .. name
+    local kw = registry[full:lower()]
+    if not kw then
+        kw = setmetatable({ full = full, leaf = name, parent = parent, includeOnExport = include }, Keyword)
+        registry[full:lower()] = kw
+    end
+    return kw
+end
+-- Keywords that exist before the sync, outside any write access: "People > Pat" is Pat under People.
+local function keywordByPath(full)
+    local parent
+    for part in full:gmatch('[^>]+') do
+        part = part:match('^%s*(.-)%s*$')
+        parent = makeKeyword(part, true, parent)
+    end
+    return parent
 end
 
 -- photos -----------------------------------------------------------------------------------
 local Photo = {}
 Photo.__index = Photo
 
+-- t.keywords: the keywords the photo has before the sync, as full names ("Family", "People > Pat").
 function F.photo(path, t)
     t = t or {}
-    return setmetatable({
+    local photo = setmetatable({
         path = path, virtual = t.virtual or false,
         caption = t.caption or '', pickStatus = t.pickStatus or 0, rating = t.rating,
-        label = '', keywords = {}, props = {},
+        label = '', keywords = {}, kwObjs = {}, props = {},
     }, Photo)
+    for _, full in ipairs(t.keywords or {}) do
+        local kw = keywordByPath(full)
+        photo.keywords[kw.full], photo.kwObjs[kw.full] = true, kw
+    end
+    return photo
 end
 
 function Photo:getRawMetadata(k)
@@ -29,6 +76,13 @@ function Photo:getRawMetadata(k)
     if k == 'pickStatus' then return self.pickStatus end
     if k == 'rating' then return self.rating end
     if k == 'isVirtualCopy' then return self.virtual end
+    if k == 'keywords' then       -- an array of LrKeyword, only those on the photo itself
+        F.keywordReads = F.keywordReads + 1
+        local list = {}
+        for _, kw in pairs(self.kwObjs) do list[#list + 1] = kw end
+        table.sort(list, function(a, b) return a.full < b.full end)
+        return list
+    end
     error('fake: unknown raw key ' .. k)
 end
 function Photo:getFormattedMetadata(k)
@@ -52,15 +106,20 @@ function Photo:getPropertyForPlugin(plugin, f) assert(plugin == _PLUGIN); return
 function Photo:setPropertyForPlugin(plugin, f, v)
     needWrite('setPropertyForPlugin')
     assert(plugin == _PLUGIN)
-    assert(f == 'aiCaption' or f == 'cullFlag' or f == 'cullStars', 'undeclared field ' .. tostring(f))
+    assert(declared[f], 'undeclared field ' .. tostring(f))
     assert(v == nil or type(v) == 'string', 'plugin fields are strings')
     self.props[f] = v
 end
-function Photo:addKeyword(kw) needWrite('addKeyword'); self.keywords[kw.name] = true end
+function Photo:addKeyword(kw)
+    needWrite('addKeyword')
+    assert(getmetatable(kw) == Keyword, 'fake: addKeyword wants an LrKeyword')
+    self.keywords[kw.full], self.kwObjs[kw.full] = true, kw
+end
 function Photo:removeKeyword(kw)
     needWrite('removeKeyword')
-    if not self.keywords[kw.name] then error('fake: keyword not on photo') end  -- be strict
-    self.keywords[kw.name] = nil
+    assert(getmetatable(kw) == Keyword, 'fake: removeKeyword wants an LrKeyword')
+    if not self.keywords[kw.full] then error('fake: keyword not on photo') end  -- be strict
+    self.keywords[kw.full], self.kwObjs[kw.full] = nil, nil
 end
 
 -- folders ----------------------------------------------------------------------------------
@@ -113,9 +172,10 @@ function catalog:withWriteAccessDo(name, fn)
 end
 function catalog:createKeyword(name, syn, include, parent, returnExisting)
     needWrite('createKeyword')
-    local full = (parent and parent.name .. ' > ' or '') .. name
-    if not self.keywords[full] then self.keywords[full] = { name = full } end
-    return self.keywords[full]
+    assert(parent == nil or getmetatable(parent) == Keyword, 'fake: createKeyword wants an LrKeyword parent')
+    local kw = makeKeyword(name, include, parent)
+    self.keywords[kw.full] = kw
+    return kw
 end
 function catalog:createSmartCollection(name, desc, parent, canReturnPrior)
     needWrite('createSmartCollection')

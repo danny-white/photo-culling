@@ -220,4 +220,12 @@ Follow the app's existing split: screen state lives in `CullingBayCore` as `@Mai
     - store the desired set in `peopleSet`.
   - It never removes a keyword it didn't set.
   - The receipt counts people added and removed.
+- **As built (2.3.0):**
+  - The file is described in [`API.md`](API.md) (People, "Lightroom: `people.tsv`"). Its first line is `#people v1`, which is how the plugin tells it from the other two inbox files.
+  - `peopleChanges` takes names without regard to case and returns `add, remove`. A name set last time that is no longer on the photo (Danny took it off by hand) is not in `remove`: there is nothing left to take off.
+  - `peopleSet` is the *desired* set after each sync, as written above. So a `People > Alex` that Danny added by hand to a photo Culling Bay also names Alex is the plugin's from then on, and goes if Culling Bay later drops Alex from it. Any other keyword, under People or not, is never removed.
+  - The plugin leaves `people.tsv` in the inbox, where it moves `pending.tsv` and `cull-decisions.tsv` to `applied/`. They are batches of work that the next one must not repeat. This file is the whole current state: a sync of part of the library (or the launch offer, which covers the shoots it names) must not use it up for the photos it didn't reach, shoots not imported yet still need it later, and a second run changes nothing.
+  - A repeat sync reads the keywords of the photos with names (or with something of the plugin's on them) and writes nothing when they match. The launch offer decides from the hidden field alone, with no per-photo calls, and asks only when a photo's names differ from what the plugin last set, so a file that stays in the inbox doesn't ask at every launch.
+  - The receipt gets one comment line, `#people photos=N added=A removed=R`; the server's receipt reader skips `#` lines.
+  - `schemaVersion` in `AICullMetadata.lua` went from 1 to 2 for the new field.
 - **Mac install:** the plugin needs the usual Mac install. Quit Lightroom, replace the plugin folder and restart, because a new metadata field needs a full restart. Danny tests it on a scratch catalog first: a Needs-Danny issue.

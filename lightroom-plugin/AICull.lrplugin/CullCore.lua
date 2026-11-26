@@ -1,7 +1,8 @@
 --[[
-  Pure logic for AI Cull Sync: parsing the two inbox files, merging Caption, and deciding whether
-  a flag or star rating may be written. No Lightroom imports, so it also runs under plain Lua 5.1
-  for the tests in lightroom-plugin/tests/test_cullcore.lua.
+  Pure logic for AI Cull Sync: parsing the three inbox files, merging Caption, deciding whether
+  a flag or star rating may be written, and which People keywords to add or remove. No Lightroom
+  imports, so it also runs under plain Lua 5.1 for the tests in
+  lightroom-plugin/tests/test_cullcore.lua.
 ]]
 
 local M = {}
@@ -11,6 +12,9 @@ M.DECISIONS_FILE   = 'cull-decisions.tsv'
 M.DECISIONS_HEADER = '#cull-decisions v1'
 M.RECEIPT_HEADER   = '#cull-receipt v1'
 M.CATALOG_HEADER   = '#cull-catalog v1'
+M.PEOPLE_FILE      = 'people.tsv'
+M.PEOPLE_HEADER    = '#people v1'
+M.PEOPLE_PARENT    = 'People'                       -- the keyword the named people go under
 M.NOTE_PREFIX      = 'Burst reject \194\183 kept '   -- "Burst reject · kept " (UTF-8 middle dot)
 
 -- Stored in the hidden aiCaption field once a caption is settled as yours (you kept it at the
@@ -55,6 +59,117 @@ end
 
 function M.isDecisionsHeader(line)
     return line ~= nil and chomp(line) == M.DECISIONS_HEADER
+end
+
+function M.isPeopleHeader(line)
+    return line ~= nil and chomp(line) == M.PEOPLE_HEADER
+end
+
+-- A set of names as a list: split on '|', trimmed, no empty names, one of each (case aside),
+-- in the order given. nil or '' is the empty set.
+function M.parsePeopleSet(str)
+    local names, seen = {}, {}
+    for name in (str or ''):gmatch('[^|]+') do
+        name = name:match('^%s*(.-)%s*$')
+        local lower = name:lower()
+        if name ~= '' and not seen[lower] then
+            seen[lower] = true
+            names[#names + 1] = name
+        end
+    end
+    return names
+end
+
+-- ... and back: the pipe-joined string kept in the hidden peopleSet field, names in alphabetical
+-- order (case aside) so equal sets give equal strings. nil for the empty set, which clears the field.
+function M.serializePeopleSet(names)
+    local list = M.parsePeopleSet(table.concat(names or {}, '|'))
+    if #list == 0 then return nil end
+    table.sort(list, function(a, b)
+        local x, y = a:lower(), b:lower()
+        if x ~= y then return x < y end
+        return a < b
+    end)
+    return table.concat(list, '|')
+end
+
+-- People rows (Culling Bay's people.tsv, review/people.py): the named people in each photo
+--   shootFolder \t filename \t name1|name2|...
+-- The names are empty when the last person was taken off the photo; the row stays so that the
+-- keyword this plugin added can be removed.
+function M.parsePeopleLine(line)
+    line = chomp(line)
+    if line == '' or line:sub(1, 1) == '#' then return nil end
+    local folder, fname, namestr = line:match('^([^\t]*)\t([^\t]*)\t?([^\t]*)')
+    if not folder or fname == '' then return nil end
+    return folder .. '/' .. fname,
+        { folder = folder, fname = fname, names = M.parsePeopleSet(namestr) }
+end
+
+local function lowerSet(names)
+    local set = {}
+    for _, name in ipairs(names or {}) do set[name:lower()] = true end
+    return set
+end
+
+--[[
+  peopleChanges(desired, previouslySet, current) -> add, remove   (all three are lists of names)
+
+    desired        the names Culling Bay says are in the photo now
+    previouslySet  the names this plugin set last time (the hidden peopleSet field)
+    current        the names under People that the photo holds now
+
+  add     desired names the photo does not hold
+  remove  names the photo holds that this plugin set last time and that are no longer desired
+
+  Names are compared without regard to case (Lightroom's keywords are not case-sensitive, so
+  renaming "alex" to "Alex" must not remove the keyword it just matched). A keyword the plugin
+  did not set is never in `remove`, whatever the photo holds, so what you add by hand stays. A name
+  that was set last time and is no longer on the photo (you removed it by hand) is not in `remove`
+  either: there is nothing to take off.
+]]
+function M.peopleChanges(desired, previouslySet, current)
+    local want, mine, have = lowerSet(desired), lowerSet(previouslySet), lowerSet(current)
+    local add, remove, seen = {}, {}, {}
+    for _, name in ipairs(desired or {}) do
+        local lower = name:lower()
+        if not have[lower] and not seen[lower] then
+            seen[lower] = true
+            add[#add + 1] = name
+        end
+    end
+    seen = {}
+    for _, name in ipairs(current or {}) do
+        local lower = name:lower()
+        if mine[lower] and not want[lower] and not seen[lower] then
+            seen[lower] = true
+            remove[#remove + 1] = name
+        end
+    end
+    return add, remove
+end
+
+--[[
+  peoplePlan(desired, stored, current) -> plan or nil
+
+    stored   the hidden peopleSet field (a pipe-joined string, or nil)
+
+  nil when there is nothing to do: the desired set is what the plugin set last time and the photo
+  holds all of it. Otherwise { add = {...}, remove = {...}, store = string or nil }: `store` is the
+  new peopleSet, the desired set, and is what the next sync compares against.
+]]
+function M.peoplePlan(desired, stored, current)
+    local previous = M.parsePeopleSet(stored)
+    local add, remove = M.peopleChanges(desired, previous, current)
+    local store = M.serializePeopleSet(desired)
+    if #add == 0 and #remove == 0 and store == M.serializePeopleSet(previous) then return nil end
+    return { add = add, remove = remove, store = store }
+end
+
+-- Whether the names Culling Bay wants differ from the ones this plugin set last time. A cheap
+-- check that reads no keywords: it is what the launch offer counts.
+function M.peopleDiffers(desired, stored)
+    return M.serializePeopleSet(desired) ~= M.serializePeopleSet(M.parsePeopleSet(stored))
 end
 
 -- Splits a caption into the plugin's note line (when its first line is one) and the rest.
@@ -182,14 +297,30 @@ function M.foldersOf(byKey)
     return list, seen
 end
 
-function M.offerText(decRows, folders, nPhotos)
-    local shoots = #folders == 1 and folders[1]
-        or (#folders <= 3 and table.concat(folders, ', ') or (folders[1] .. ' to ' .. folders[#folders]))
-    local title = string.format('%d phone cull%s waiting from Culling Bay', decRows, decRows == 1 and ' is' or 's are')
-    local info = string.format('From %s (%d photo%s in this catalog).', shoots, nPhotos, nPhotos == 1 and '' or 's')
-        .. '\n\nApply them now? Nothing changes unless you say so; your own flags and stars are kept, '
-        .. 'as in Sync AI Cull Data. Not now leaves them waiting for next time. The AI\'s labels and '
-        .. 'captions wait for Sync AI Cull Data.'
+-- nPeople (optional): photos with People keywords waiting (Culling Bay's people.tsv).
+function M.offerText(decRows, folders, nPhotos, nPeople)
+    nPeople = nPeople or 0
+    local tail = '\n\nApply them now? Nothing changes unless you say so; '
+    local title, info
+    if decRows > 0 then
+        local shoots = #folders == 1 and folders[1]
+            or (#folders <= 3 and table.concat(folders, ', ') or (folders[1] .. ' to ' .. folders[#folders]))
+        title = string.format('%d phone cull%s waiting from Culling Bay', decRows, decRows == 1 and ' is' or 's are')
+        info = string.format('From %s (%d photo%s in this catalog).', shoots, nPhotos, nPhotos == 1 and '' or 's')
+        if nPeople > 0 then
+            info = info .. string.format('\n\nAlso waiting: People keywords for %d photo%s.',
+                nPeople, nPeople == 1 and '' or 's')
+        end
+        info = info .. tail .. 'your own flags and stars are kept, as in Sync AI Cull Data. '
+    else
+        title = string.format('People keywords are waiting from Culling Bay for %d photo%s',
+            nPeople, nPeople == 1 and '' or 's')
+        info = 'The names you gave people in Culling Bay become People keywords on those photos, and a '
+            .. 'name you took off a photo loses its keyword.' .. tail
+            .. 'keywords you added yourself are kept, as in Sync AI Cull Data. '
+    end
+    info = info .. 'Not now leaves them waiting for next time. The AI\'s labels and captions wait for '
+        .. 'Sync AI Cull Data.'
     return title, info
 end
 

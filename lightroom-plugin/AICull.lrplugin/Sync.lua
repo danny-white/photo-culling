@@ -1,19 +1,21 @@
 --[[
-  The sync itself (v2.1), shared by the menu item (SyncAICull.lua: the selected photos and a file
+  The sync itself (v2.3), shared by the menu item (SyncAICull.lua: the selected photos and a file
   you pick) and the launch offer (Startup.lua: the photos of the shoots the waiting rows name,
   after you say yes).
 
-  Applies up to two files from the AICullInbox to a set of photos (from the menu, the SELECTED
+  Applies up to three files from the AICullInbox to a set of photos (from the menu, the SELECTED
   photos: "All Photographs" for a full sync):
 
       pending.tsv         the AI's keywords and caption (never a colour label: v2.2)
                           (photo_cull.py export --plugin-data)
       cull-decisions.tsv  your phone culls: pick/reject flags, stars, burst notes
                           (Culling Bay Mobile's Send)
+      people.tsv          the people you named in Culling Bay, as People > name keywords (v2.3)
+                          (review/people.py)
 
-  Pick either file in the dialog; the other is applied in the same pass when it sits in the same
-  folder. Match is by (shoot folder name, file name), not file name alone -- Sony resets its file
-  counter across shoots, so one file can safely cover the whole library.
+  Pick any of them in the dialog; the others are applied in the same pass when they sit in the
+  same folder. Match is by (shoot folder name, file name), not file name alone -- Sony resets its
+  file counter across shoots, so one file can safely cover the whole library.
 
   What it will and won't overwrite (the rules live in CullCore.lua, which has unit tests):
     * Flags and stars: set only on a photo with none, or whose flag or stars this plugin set
@@ -23,13 +25,20 @@
       AI sentence it last wrote, remembered exactly. It replaces only those, so anything you typed
       stays. If you edit the AI's sentence, the caption becomes yours and the AI stops writing it.
     * Keywords: the AI's, applied as before.
+    * People keywords: People > name, for each name people.tsv gives a photo. The names it set
+      are remembered in the hidden peopleSet field, and only those are ever removed (when Culling
+      Bay no longer has that person in the photo). A keyword you added by hand is never removed.
     * Colour label: never set (v2.2). You stripped them all on 2026-10-11 and want none; the
       label column of pending.tsv, empty since then, is ignored even when an old file has one.
 
   After a complete (uncanceled) run it writes applied/<time>-receipt.tsv, one outcome per row,
   and applied/<time>-catalog.tsv, the flag and rating of every selected photo (so the phone can
-  show what you already culled here). Culling Bay reads both back. Each input file moves to
-  applied/<time>-<name>.
+  show what you already culled here). Culling Bay reads both back. pending.tsv and
+  cull-decisions.tsv move to applied/<time>-<name>. people.tsv stays where it is: the server
+  rewrites all of it at every change, so it is the current state rather than a batch of work;
+  applying it twice changes nothing; and a run on part of the library (a selection, or the launch
+  offer's shoots) must not use it up for the photos it did not cover. A canceled run leaves
+  all the inputs in place.
 ]]
 
 local LrApplication     = import 'LrApplication'
@@ -50,6 +59,7 @@ local COLLECTION_NAME = 'Burst rejects, similar kept'
 local BATCH_SIZE      = 100  -- photos per write transaction; yield + update progress between batches
                              -- (the SDK disallows yielding while holding write access, so a batch
                              -- boundary is the only place progress can actually redraw)
+local PEOPLE_READ_YIELD = 200 -- photos whose keywords are read between yields, before any writing
 
 -- Copy a fully-applied input into applied/ under a timestamped name, then delete the original.
 -- Copy via plain io (the same calls that read it), delete via LrFileUtils.delete: Lightroom's
@@ -144,6 +154,41 @@ local function firstLineOf(path)
     return line
 end
 
+-- The photo's keywords that are children of the top-level keyword People: their names, and the
+-- keywords themselves keyed by lower-case name (what removeKeyword needs). A keyword of the same
+-- name anywhere else is not one of ours and is not counted.
+local function peopleOnPhoto(photo)
+    local names, objs = {}, {}
+    for _, kw in ipairs(photo:getRawMetadata('keywords') or {}) do
+        local parent = kw:getParent()
+        if parent and parent:getName():lower() == Core.PEOPLE_PARENT:lower() and parent:getParent() == nil then
+            local name = kw:getName()
+            names[#names + 1] = name
+            objs[name:lower()] = kw
+        end
+    end
+    return names, objs
+end
+
+-- For the launch offer: which of `photos` people.tsv would change. A bulk read of the path and
+-- the hidden peopleSet field, no per-photo calls: a photo counts when the names Culling Bay has
+-- are not the names this plugin set last time. (A keyword you removed by hand is not noticed here;
+-- Sync AI Cull Data puts it back.) Returns those photos and how many there are.
+function M.peopleWaiting(catalog, photos, byKey)
+    if #photos == 0 then return {}, 0 end
+    local raw   = catalog:batchGetRawMetadata(photos, { 'path' })
+    local props = catalog:batchGetPropertyForPlugin(photos, _PLUGIN, { 'peopleSet' })
+    local waiting = {}
+    for _, photo in ipairs(photos) do
+        local folder, fname = ((raw[photo] or {}).path or ''):match('([^/\\]+)[/\\]([^/\\]+)$')
+        local row = folder and byKey[folder .. '/' .. fname]
+        if row and Core.peopleDiffers(row.names, (props[photo] or {}).peopleSet) then
+            waiting[#waiting + 1] = photo
+        end
+    end
+    return waiting, #waiting
+end
+
 -- Run fn and turn any error into one that names the photo, so a failed sync says where.
 local function try(what, key, fn)
     local ok, err = LrTasks.pcall(fn)
@@ -165,7 +210,7 @@ function M.run(context, opts)
 
     -- 2. Choose an input; its partner in the same folder comes along.
     local chosen = opts.path and { opts.path } or LrDialogs.runOpenPanel {
-        title                   = 'Choose AI cull data (pending.tsv or cull-decisions.tsv)',
+        title                   = 'Choose AI cull data (pending.tsv, cull-decisions.tsv or people.tsv)',
         canChooseFiles          = true,
         canChooseDirectories    = false,
         allowsMultipleSelection = false,
@@ -173,22 +218,33 @@ function M.run(context, opts)
     }
     if not chosen or #chosen == 0 then return end
     local dir = LrPathUtils.parent(chosen[1])
-    local aiPath, decPath
-    if Core.isDecisionsHeader(firstLineOf(chosen[1])) then
+    local aiPath, decPath, peoplePath
+    local first = firstLineOf(chosen[1])
+    if Core.isDecisionsHeader(first) then
         decPath = chosen[1]
-        local p = LrPathUtils.child(dir, Core.AI_FILE)
-        if not opts.alone and LrFileUtils.exists(p) == 'file' then aiPath = p end
+    elseif Core.isPeopleHeader(first) then
+        peoplePath = chosen[1]
     else
         aiPath = chosen[1]
-        local p = LrPathUtils.child(dir, Core.DECISIONS_FILE)
-        if not opts.alone and LrFileUtils.exists(p) == 'file' then decPath = p end
     end
+    if not opts.alone then      -- the other files in the same folder come along
+        local function partner(name)
+            local p = LrPathUtils.child(dir, name)
+            return LrFileUtils.exists(p) == 'file' and p or nil
+        end
+        aiPath     = aiPath or partner(Core.AI_FILE)
+        decPath    = decPath or partner(Core.DECISIONS_FILE)
+        peoplePath = peoplePath or partner(Core.PEOPLE_FILE)
+    end
+    if opts.people then peoplePath = opts.people end    -- the launch offer asks for it by name
 
     -- 3. Parse.
     local aiByKey, aiRows = {}, 0
     local decByKey, decRows = {}, 0
+    local peopleByKey, peopleRows = {}, 0
     if aiPath then aiByKey, aiRows = M.readFile(aiPath, Core.parseAILine) end
     if decPath then decByKey, decRows = M.readFile(decPath, Core.parseDecisionLine) end
+    if peoplePath then peopleByKey, peopleRows = M.readFile(peoplePath, Core.parsePeopleLine) end
 
     local progress = LrProgressScope { title = 'Syncing AI Cull Data', functionContext = context }
     progress:setCancelable(true)
@@ -198,7 +254,7 @@ function M.run(context, opts)
     local total = #photos
     local raw   = catalog:batchGetRawMetadata(photos, { 'path', 'isVirtualCopy' })
     local fmt   = catalog:batchGetFormattedMetadata(photos, { 'caption' })
-    local props = catalog:batchGetPropertyForPlugin(photos, _PLUGIN, { 'aiCaption' })
+    local props = catalog:batchGetPropertyForPlugin(photos, _PLUGIN, { 'aiCaption', 'peopleSet' })
     local state = {}
     for idx, photo in ipairs(photos) do
         local path = (raw[photo] and raw[photo].path) or ''
@@ -208,6 +264,7 @@ function M.run(context, opts)
             virtual   = raw[photo] and raw[photo].isVirtualCopy or false,
             caption   = (fmt[photo] and fmt[photo].caption) or '',
             aiCaption = props[photo] and props[photo].aiCaption or nil,
+            peopleSet = props[photo] and props[photo].peopleSet or nil,
         }
     end
 
@@ -259,6 +316,35 @@ function M.run(context, opts)
         if not ok then collectionNote = 'Could not create the "' .. COLLECTION_NAME .. '" smart collection: ' .. tostring(err) end
     end
 
+    -- 6b. People: what each photo named in people.tsv holds now, read before any writing, in plain
+    -- reads that may yield, so a sync of thousands of photos stays responsive and the write batches
+    -- below touch only the photos that change. A photo with no names now and none set before costs
+    -- nothing; one whose names are what this plugin set last time costs a keyword read and no write.
+    local peoplePlan = {}       -- photo index -> Core.peoplePlan(...), plus .objs: the keywords to remove
+    if peopleRows > 0 then
+        progress:setCaption('Reading People keywords…')
+        local reads = 0
+        for idx = 1, total do
+            local s = state[idx]
+            local row = peopleByKey[s.key]
+            if row and (#row.names > 0 or (s.peopleSet or '') ~= '') then
+                local current, objs = {}, {}
+                try('read keywords', s.key, function() current, objs = peopleOnPhoto(photos[idx]) end)
+                local plan = Core.peoplePlan(row.names, s.peopleSet, current)
+                if plan then
+                    plan.objs = objs
+                    peoplePlan[idx] = plan
+                end
+                reads = reads + 1
+                if reads % PEOPLE_READ_YIELD == 0 then
+                    progress:setPortionComplete(idx, total)
+                    LrTasks.yield()
+                    if progress:isCanceled() then break end    -- the loop below stops before writing
+                end
+            end
+        end
+    end
+
     -- 7. Apply in batches. Keywords are created ONCE and cached by name: calling createKeyword
     -- repeatedly for the same name within one write transaction can hand back a stale reference
     -- that addKeyword then rejects. Keyword objects are catalog-level, so the cache is safe
@@ -271,9 +357,23 @@ function M.run(context, opts)
         return keywordCache[kw]
     end
 
+    -- People > name: the parent (not exported) is created with the first child, then both are cached.
+    local peopleParent, personCache = nil, {}
+    local function personKeyword(name)
+        local lower = name:lower()
+        if not personCache[lower] then
+            if not peopleParent then
+                peopleParent = catalog:createKeyword(Core.PEOPLE_PARENT, {}, false, nil, true)
+            end
+            personCache[lower] = catalog:createKeyword(name, {}, true, peopleParent, true)
+        end
+        return personCache[lower]
+    end
+
     local receipt = {}
     local seenDec = {}
-    local counts = { ai = 0, dec = 0, flags = 0, flagKept = 0, starsKept = 0, captionLeft = 0 }
+    local counts = { ai = 0, dec = 0, flags = 0, flagKept = 0, starsKept = 0, captionLeft = 0,
+                     peoplePhotos = 0, peopleAdded = 0, peopleRemoved = 0 }
 
     local function applyOne(photo, s, ai, dec)
         local folder, fname = s.key:match('^([^/]*)/(.*)$')
@@ -361,6 +461,29 @@ function M.run(context, opts)
         end
     end
 
+    -- Add the names the photo lacks, remove only the ones this plugin set before, and remember the
+    -- names now wanted. The plan came from Core.peoplePlan, so nothing here decides what to remove.
+    local function applyPeople(photo, s, plan)
+        for _, name in ipairs(plan.add) do
+            try(string.format('addKeyword(People > %q)', name), s.key, function()
+                photo:addKeyword(personKeyword(name))
+            end)
+        end
+        for _, name in ipairs(plan.remove) do
+            try(string.format('removeKeyword(People > %q)', name), s.key, function()
+                photo:removeKeyword(plan.objs[name:lower()])
+            end)
+        end
+        if plan.store ~= s.peopleSet then
+            try('setPropertyForPlugin(peopleSet)', s.key, function()
+                photo:setPropertyForPlugin(_PLUGIN, 'peopleSet', plan.store)
+            end)
+        end
+        counts.peoplePhotos = counts.peoplePhotos + 1
+        counts.peopleAdded = counts.peopleAdded + #plan.add
+        counts.peopleRemoved = counts.peopleRemoved + #plan.remove
+    end
+
     local i = 1
     while i <= total do
         if progress:isCanceled() then break end
@@ -370,10 +493,12 @@ function M.run(context, opts)
                 local s = state[idx]
                 local ai, dec = aiByKey[s.key], decByKey[s.key]
                 if ai or dec then applyOne(photos[idx], s, ai, dec) end
+                if peoplePlan[idx] then applyPeople(photos[idx], s, peoplePlan[idx]) end
             end
         end, { timeout = 60 })
         progress:setPortionComplete(batchEnd, total)
-        progress:setCaption(string.format('%d / %d photos (%d AI, %d phone)', batchEnd, total, counts.ai, counts.dec))
+        progress:setCaption(string.format('%d / %d photos (%d AI, %d phone, %d people)',
+            batchEnd, total, counts.ai, counts.dec, counts.peoplePhotos))
         LrTasks.yield()  -- only safe between batches, outside write access
         i = batchEnd + 1
     end
@@ -385,6 +510,10 @@ function M.run(context, opts)
             .. 'Captions left as yours: %d.',
         total, aiRows, counts.ai, decRows, counts.dec, counts.flags, counts.flagKept, counts.starsKept,
         counts.captionLeft)
+    if peoplePath then
+        summary = summary .. string.format('\nPeople: %d row(s); %d photo(s) changed, %d keyword(s) added and %d removed.',
+            peopleRows, counts.peoplePhotos, counts.peopleAdded, counts.peopleRemoved)
+    end
     if collectionNote then summary = summary .. '\n\n' .. collectionNote end
 
     if progress:isCanceled() then
@@ -402,6 +531,10 @@ function M.run(context, opts)
             receipt[#receipt + 1] = Core.receiptLine(dec.folder, dec.fname, 'missing', 'not in the selection')
         end
     end
+    if counts.peoplePhotos > 0 then      -- a comment line: Culling Bay's receipt reader skips these
+        table.insert(receipt, 1, string.format('#people photos=%d added=%d removed=%d',
+            counts.peoplePhotos, counts.peopleAdded, counts.peopleRemoved))
+    end
     local stamp = LrDate.timeToUserFormat(LrDate.currentTime(), '%Y%m%d-%H%M%S')
     local notes = {}
     if decPath or #receipt > 0 then
@@ -409,6 +542,7 @@ function M.run(context, opts)
         notes[#notes + 1] = ok and ('Receipt: applied/' .. LrPathUtils.leafName(info))
             or ('Could not write the receipt: ' .. tostring(info))
     end
+    -- people.tsv is not moved: see the top of this file.
     local inputs = {}   -- not { aiPath, decPath }: ipairs stops at the first nil, so a missing
     if aiPath then inputs[#inputs + 1] = aiPath end      -- pending.tsv would skip the decisions file
     if decPath then inputs[#inputs + 1] = decPath end
