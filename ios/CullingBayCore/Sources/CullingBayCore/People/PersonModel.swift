@@ -95,6 +95,12 @@ public final class PersonModel {
         return PeopleFormat.reviewTitle(person.suggestions)
     }
 
+    /// `"Maybe not Alex? Check 250 faces"`, nil when the server has no doubts about their faces.
+    public var checkBanner: String? {
+        guard let person, person.doubts > 0 else { return nil }
+        return PeopleFormat.checkBanner(person.doubts, name: person.name)
+    }
+
     // MARK: Loading
 
     /// Reads the person again from the `people` list (a 304 makes it cheap). If someone is already

@@ -43,6 +43,19 @@ struct PersonModelTests {
         #expect(makeModel(serve(), person: makePerson(2, suggestions: 0)).reviewBanner == nil)
     }
 
+    @Test func theCheckBannerCountsDoubtsAndIsGoneAtZero() async {
+        let server = serve()
+        #expect(makeModel(server).checkBanner == nil, "no one on screen yet")
+        #expect(makeModel(server, person: alex).checkBanner == nil, "a server with no doubts")
+        #expect(makeModel(server, person: makePerson(2, "Alex", doubts: 250)).checkBanner
+            == "Maybe not Alex? Check 250 faces")
+        #expect(makeModel(server, person: makePerson(2, "Alex", doubts: 1)).checkBanner
+            == "Maybe not Alex? Check 1 face")
+        let model = makeModel(server, person: makePerson(2, "Alex", doubts: 4))
+        model.update(makePerson(2, "Alex", doubts: 0))
+        #expect(model.checkBanner == nil, "after the last one is checked")
+    }
+
     // MARK: Loading
 
     @Test func aPersonWhoIsNotInTheListIsGone() async {

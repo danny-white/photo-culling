@@ -46,6 +46,12 @@ public enum PeopleFormat {
         "\(name)’s face isn’t in this photo. Use Show faces to fix it."
     }
 
+    /// `"Maybe not Alex? Check 250 faces"`, `"Maybe not Alex? Check 1 face"`: the banner for the faces the
+    /// server filed as them on a weak match.
+    public static func checkBanner(_ count: Int, name: String) -> String {
+        "Maybe not \(name)? Check \(count) face" + (count == 1 ? "" : "s")
+    }
+
     /// The review sheet's Confirm button: `"Confirm 58 as Alex"`, `"Confirm 56 as Alex, 2 not"`, and when
     /// every face is no, `"Confirm 8 as not Alex"`.
     public static func reviewConfirm(yes: Int, no: Int, name: String) -> String {

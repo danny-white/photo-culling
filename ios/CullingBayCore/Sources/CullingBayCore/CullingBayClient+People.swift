@@ -62,6 +62,13 @@ extension CullingBayClient {
         return fetched.value
     }
 
+    /// Up to 60 faces the server filed as this person on a weak match, least sure first, in the shape of
+    /// `suggestions(for:)` (its `groups` is empty). Answering them goes through `reviewSuggestions`.
+    public func doubts(for id: Int) async throws -> PersonSuggestions {
+        let fetched: Fetched<PersonSuggestions> = try await fetch(path: "/m/api/people/\(id)/doubts")
+        return fetched.value
+    }
+
     /// The faces in one photo, left to right. A 404 (unknown photo) throws `.http`.
     public func photoFaces(_ photo: Int) async throws -> [PhotoFace] {
         let fetched: Fetched<PhotoFaces> = try await fetch(path: "/m/api/photo/\(photo)/faces")

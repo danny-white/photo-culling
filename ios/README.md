@@ -83,7 +83,7 @@ Scope and decisions: https://claude.ai/artifact/FQv95YRVDg1DK6tBvruvob (picks ma
 | 2 · Cull core | Days, card, stars, keep/reject, undo, Send, receipts, haptics, keep-awake | contract and client ready (156 tests) |
 | 3 · Bursts & focus | Picker (filmstrip up to 6 frames, knock-out grid above), 1:1 focus check from the RAW, linked zoom, swipe up and Choose open the picker | written, compiles on the Mac, not yet on a phone |
 | 4 · Finishing & extras | Review, budget, rescue, start over, widget, App Intents, Spotlight | |
-| 5 · People | People tab: name unnamed face groups, person screens over the Gallery's results, review suggestions, fix faces, the (i) sheet's People section (`review/PEOPLE.md`, DAN-142) | compiles on the Mac and runs in the simulator against the sandbox server; not on a phone yet (1063 core tests) |
+| 5 · People | People tab: name unnamed face groups, person screens over the Gallery's results, review suggestions, fix faces, the (i) sheet's People section (`review/PEOPLE.md`, DAN-142) | compiles on the Mac and runs in the simulator against the sandbox server; not on a phone yet (1079 core tests) |
 
 ## Building on the Mac (Monday)
 

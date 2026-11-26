@@ -167,6 +167,131 @@ struct ReviewModelTests {
         #expect(model.allNo && model.faces.map(\.id) == [501, 502])
     }
 
+    // MARK: Maybe not Alex?
+
+    private func makeDoubtsModel(_ server: PeopleServer, doubts: Int = 130) -> ReviewModel {
+        ReviewModel(person: makePerson(2, "Alex", photos: 31, faces: 38, suggestions: 5, doubts: doubts), client: server.client(), kind: .doubts)
+    }
+
+    @Test func aReviewChecksSuggestionsUnlessItIsAskedToCheckDoubts() {
+        #expect(makeModel(PeopleServer()).kind == .suggestions)
+        #expect(makeDoubtsModel(PeopleServer()).kind == .doubts)
+    }
+
+    @Test func doubtsAreReadFromTheDoubtsRouteNotTheSuggestionsOne() async {
+        let server = PeopleServer()
+        server.reply("GET /m/api/people/2/doubts", batch([601, 602, 603]))
+        server.reply("GET /m/api/people/2/suggestions", batch([501]))
+        let model = makeDoubtsModel(server)
+        #expect(model.phase == .loading)
+        await model.load()
+        #expect(model.phase == .reviewing)
+        #expect(model.faces.map(\.id) == [601, 602, 603], "least sure first, as the server sent them")
+        #expect(model.yesCount == 3 && model.noCount == 0, "every face starts as yes")
+        #expect(model.groups.isEmpty)
+        #expect(server.calls("GET /m/api/people/2/doubts").count == 1)
+        #expect(server.calls("GET /m/api/people/2/suggestions").isEmpty)
+    }
+
+    @Test func suggestionsAreStillReadFromTheSuggestionsRoute() async {
+        let server = PeopleServer()
+        server.reply("GET /m/api/people/2/suggestions", batch([501]))
+        let model = makeModel(server)
+        await model.load()
+        #expect(model.faces.map(\.id) == [501])
+        #expect(server.calls("GET /m/api/people/2/doubts").isEmpty)
+    }
+
+    @Test func theWordsFollowTheKind() {
+        let suggestions = makeModel(PeopleServer())
+        #expect(suggestions.title == "Is this Alex?")
+        #expect(suggestions.subtitle == "Every face counts as Alex. Tap the ones that are not.")
+        #expect(suggestions.emptyText == "No suggestions for Alex right now.")
+        let doubts = makeDoubtsModel(PeopleServer())
+        #expect(doubts.title == "Maybe not Alex?")
+        #expect(doubts.subtitle == "Filed as Alex, least sure first. Every face counts as Alex. Tap the ones that are not.")
+        #expect(doubts.emptyText == "Nothing to check for Alex right now.")
+    }
+
+    @Test func theCountOfFacesStillToComeFollowsTheKind() async {
+        let server = PeopleServer()
+        server.reply("GET /m/api/people/2/doubts", batch([601, 602, 603]))
+        server.reply("GET /m/api/people/2/suggestions", batch([501, 502]))
+        let doubts = makeDoubtsModel(server, doubts: 130)
+        await doubts.load()
+        #expect(doubts.moreAfterThis == 127, "130 doubts, three shown (not the 5 suggestions)")
+        let suggestions = makeModel(server)
+        await suggestions.load()
+        #expect(suggestions.moreAfterThis == 3, "five suggestions, two shown (not the doubts)")
+        let last = makeDoubtsModel(server, doubts: 2)
+        await last.load()
+        #expect(last.moreAfterThis == 0)
+    }
+
+    @Test func nothingToCheckIsDone() async {
+        let server = PeopleServer()
+        server.reply("GET /m/api/people/2/doubts", batch([]))
+        let model = makeDoubtsModel(server, doubts: 0)
+        await model.load()
+        #expect(model.phase == .done)
+    }
+
+    @Test func aFailedDoubtsLoadSaysWhy() async {
+        let server = PeopleServer()
+        server.reply("GET /m/api/people/2/doubts", #"{"error":"busy"}"#, status: 503)
+        let model = makeDoubtsModel(server)
+        await model.load()
+        #expect(model.phase == .failed("Couldn’t load the suggestions: busy"))
+    }
+
+    @Test func confirmingADoubtsBatchPostsTheReviewAndReadsTheDoubtsAgain() async {
+        let server = PeopleServer()
+        server.on("GET /m/api/people/2/doubts") { _, count in
+            Reply(body: count == 0 ? self.batch([601, 602, 603]) : self.batch([604, 605]))
+        }
+        server.reply("GET /m/api/people/2/suggestions", batch([501]))
+        server.reply(
+            "POST /m/api/people/2/review",
+            peopleJSON(makePerson(2, "Alex", photos: 30, faces: 37, suggestions: 5, doubts: 2)))
+        let model = makeDoubtsModel(server)
+        await model.load()
+        model.toggle(602)
+        await model.confirm()
+        let reviews = server.calls("POST /m/api/people/2/review")
+        #expect(reviews.count == 1)
+        #expect(reviews.first?.json["yes"] as? [Int] == [601, 603])
+        #expect(reviews.first?.json["no"] as? [Int] == [602])
+        #expect(server.calls("GET /m/api/people/2/doubts").count == 2)
+        #expect(server.calls("GET /m/api/people/2/suggestions").isEmpty, "the other list is not read")
+        #expect(model.faces.map(\.id) == [604, 605])
+        #expect(model.noCount == 0, "the next batch starts as yes")
+        #expect(model.person.doubts == 2 && model.moreAfterThis == 0)
+        #expect(model.confirmedTotal == 2 && model.removedTotal == 1)
+    }
+
+    @Test func noneAreAlexWorksOnADoubtsBatchToo() async {
+        let server = PeopleServer()
+        server.on("GET /m/api/people/2/doubts") { _, count in
+            Reply(body: count == 0 ? self.batch([601, 602, 603]) : self.batch([]))
+        }
+        server.reply("POST /m/api/people/2/review", peopleJSON(makePerson(2, "Alex", doubts: 0)))
+        let model = makeDoubtsModel(server)
+        await model.load()
+        model.markAll(no: true)
+        #expect(model.allNo && model.noCount == 3)
+        #expect(server.calls().allSatisfy { $0.method == "GET" }, "only Confirm sends")
+        model.markAll(no: false)
+        #expect(model.noCount == 0 && !model.allNo)
+        model.markAll(no: true)
+        await model.confirm()
+        let reviews = server.calls("POST /m/api/people/2/review")
+        #expect(reviews.count == 1)
+        #expect(reviews.first?.json["yes"] as? [Int] == [])
+        #expect(reviews.first?.json["no"] as? [Int] == [601, 602, 603])
+        #expect(model.phase == .done)
+        #expect(model.removedTotal == 3)
+    }
+
     // MARK: Confirm
 
     @Test func confirmSendsOneReviewThenLoadsTheNextBatch() async {

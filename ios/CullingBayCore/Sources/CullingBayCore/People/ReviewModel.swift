@@ -5,9 +5,22 @@ import Observation
 /// starts as yes and a tap turns it into no; Confirm sends the batch (yes becomes a confirmed
 /// face, no means never suggest it for them again) and loads the next, until none are left.
 /// Unnamed groups that look like them come first, each with its own Yes and No, which send at once.
+///
+/// The same screen also checks the other way round (`Kind.doubts`, "Maybe not Alex?"): the faces the
+/// server filed as them on the weakest matches, least sure first. Every face is yes until tapped, and
+/// Confirm sends the same `review` (yes makes a face confirmed, so it leaves the doubts; no takes it off
+/// them). Only the list it reads, and the words, differ.
 @MainActor
 @Observable
 public final class ReviewModel {
+    /// Which faces are asked about.
+    public enum Kind: Sendable, Hashable {
+        /// Faces that may be them and are not filed yet: "Is this Alex?".
+        case suggestions
+        /// Faces filed as them on a weak match: "Maybe not Alex?".
+        case doubts
+    }
+
     public enum Phase: Sendable, Hashable {
         case loading
         case reviewing
@@ -17,6 +30,7 @@ public final class ReviewModel {
     }
 
     public let personID: Int
+    public let kind: Kind
     /// The person as the server last said, so the title and the count to go are current.
     public private(set) var person: Person
     public private(set) var phase: Phase = .loading
@@ -35,23 +49,53 @@ public final class ReviewModel {
 
     @ObservationIgnored private let client: CullingBayClient
 
-    public init(person: Person, client: CullingBayClient) {
+    public init(person: Person, client: CullingBayClient, kind: Kind = .suggestions) {
         self.personID = person.id
         self.person = person
         self.client = client
+        self.kind = kind
     }
 
     // MARK: Reading
 
-    /// `"Is this Alex?"`
-    public var title: String { "Is this \(person.name)?" }
+    /// `"Is this Alex?"`, or `"Maybe not Alex?"` for faces already filed as them.
+    public var title: String {
+        switch kind {
+        case .suggestions: "Is this \(person.name)?"
+        case .doubts: "Maybe not \(person.name)?"
+        }
+    }
+
+    /// The line under the title: what every face counts as, and what to tap.
+    public var subtitle: String {
+        let rule = "Every face counts as \(person.name). Tap the ones that are not."
+        switch kind {
+        case .suggestions: return rule
+        case .doubts: return "Filed as \(person.name), least sure first. " + rule
+        }
+    }
+
+    /// What the done screen says when there was nothing to review.
+    public var emptyText: String {
+        switch kind {
+        case .suggestions: "No suggestions for \(person.name) right now."
+        case .doubts: "Nothing to check for \(person.name) right now."
+        }
+    }
 
     /// Faces of this batch that stay yes, and those turned into no.
     public var yesCount: Int { faces.count - noes.count }
     public var noCount: Int { noes.count }
 
-    /// Suggestions the server still has after this batch; 0 when it is the last.
-    public var moreAfterThis: Int { max(0, person.suggestions - faces.count) }
+    /// Faces the server still has to ask about after this batch (suggestions, or doubts); 0 when it is
+    /// the last.
+    public var moreAfterThis: Int {
+        let left = switch kind {
+        case .suggestions: person.suggestions
+        case .doubts: person.doubts
+        }
+        return max(0, left - faces.count)
+    }
 
     public func isNo(_ face: Int) -> Bool { noes.contains(face) }
 
@@ -64,7 +108,7 @@ public final class ReviewModel {
     public func load() async {
         phase = .loading
         do {
-            let batch = try await client.suggestions(for: personID)
+            let batch = try await nextBatch()
             faces = batch.faces
             groups = batch.groups
             noes = []
@@ -125,10 +169,18 @@ public final class ReviewModel {
                 person = try await client.removeGroup(group.key, from: personID)
             }
             groups.removeAll { $0.key == group.key }
-            if let batch = try? await client.suggestions(for: personID) { groups = batch.groups }
+            if let batch = try? await nextBatch() { groups = batch.groups }
             if faces.isEmpty && groups.isEmpty { phase = .done }
         } catch {
             if !(error is CancellationError) { message = PeopleMessages.failure(error) }
+        }
+    }
+
+    /// The faces and groups to ask about: from `suggestions` or from `doubts`.
+    private func nextBatch() async throws -> PersonSuggestions {
+        switch kind {
+        case .suggestions: try await client.suggestions(for: personID)
+        case .doubts: try await client.doubts(for: personID)
         }
     }
 }

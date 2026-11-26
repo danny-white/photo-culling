@@ -40,6 +40,12 @@ struct PeopleFormatTests {
         #expect(PeopleFormat.reviewTitle(12) == "Review 12 suggestions")
     }
 
+    @Test func theCheckBannerCountsTheFacesFiledOnAWeakMatch() {
+        #expect(PeopleFormat.checkBanner(250, name: "Alex") == "Maybe not Alex? Check 250 faces")
+        #expect(PeopleFormat.checkBanner(1, name: "Alex") == "Maybe not Alex? Check 1 face")
+        #expect(PeopleFormat.checkBanner(2, name: "Sam Lee") == "Maybe not Sam Lee? Check 2 faces")
+    }
+
     @Test func theConfirmButtonSaysHowManyAreAndAreNotThePerson() {
         #expect(PeopleFormat.reviewConfirm(yes: 58, no: 0, name: "Alex") == "Confirm 58 as Alex")
         #expect(PeopleFormat.reviewConfirm(yes: 56, no: 2, name: "Alex") == "Confirm 56 as Alex, 2 not")

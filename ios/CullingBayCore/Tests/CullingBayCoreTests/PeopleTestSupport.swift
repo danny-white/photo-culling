@@ -46,9 +46,11 @@ let photoFacesJSON = """
 
 func makePerson(
     _ id: Int, _ name: String = "Alex", photos: Int = 10, faces: Int = 12, cover: Int? = nil,
-    suggestions: Int = 0
+    suggestions: Int = 0, doubts: Int = 0
 ) -> Person {
-    Person(id: id, name: name, photos: photos, faces: faces, cover: cover ?? id * 100, suggestions: suggestions)
+    Person(
+        id: id, name: name, photos: photos, faces: faces, cover: cover ?? id * 100, suggestions: suggestions,
+        doubts: doubts)
 }
 
 func makeGroup(

@@ -33,6 +33,27 @@ struct PeopleModelsTests {
         #expect(person.cover == nil)
     }
 
+    @Test func aPersonCarriesTheDoubtsTheServerCounts() throws {
+        let json = #"{"cover":412,"doubts":250,"faces":38,"id":2,"name":"Alex","photos":31,"suggestions":12}"#
+        let person = try decoder.decode(Person.self, from: Data(json.utf8))
+        #expect(person.doubts == 250)
+        #expect(person == Person(id: 2, name: "Alex", photos: 31, faces: 38, cover: 412, suggestions: 12, doubts: 250))
+        #expect(person != Person(id: 2, name: "Alex", photos: 31, faces: 38, cover: 412, suggestions: 12))
+    }
+
+    @Test func aPersonFromAnOlderServerHasNoDoubts() throws {
+        let json = #"{"cover":412,"faces":38,"id":2,"name":"Alex","photos":31,"suggestions":12}"#
+        let person = try decoder.decode(Person.self, from: Data(json.utf8))
+        #expect(person.doubts == 0)
+        #expect(person.suggestions == 12 && person.cover == 412)
+    }
+
+    @Test func aPersonWithDoubtsSurvivesBeingWrittenAndReadAgain() throws {
+        let person = makePerson(2, "Alex", photos: 31, faces: 38, suggestions: 3, doubts: 7)
+        let data = try JSONEncoder().encode(person)
+        #expect(try decoder.decode(Person.self, from: data) == person)
+    }
+
     @Test func emptyListsDecodeBeforeTheFirstGroupingRun() throws {
         let json = #"{"people":[],"groups":[],"faces_checked":0,"photos_ok":43195}"#
         let list = try decoder.decode(PeopleList.self, from: Data(json.utf8))

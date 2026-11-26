@@ -71,6 +71,30 @@ struct PeopleClientTests {
         #expect(await transport2.requests.first?.url?.path == "/m/api/photo/43203/faces")
     }
 
+    @Test func doubtsGetsTheFacesFiledOnAWeakMatchAndRevalidatesWithItsETag() async throws {
+        let transport = FakeTransport { request, index in
+            index == 0
+                ? (Data(suggestionsJSON.utf8), makeResponse(for: request, headers: ["ETag": "\"d1\""]))
+                : (Data(), makeResponse(for: request, status: 304))
+        }
+        let client = CullingBayClient(baseURL: testBaseURL, transport: transport)
+        let first = try await client.doubts(for: 2)
+        let second = try await client.doubts(for: 2)
+        #expect(first == second)
+        #expect(first.faces.map(\.id) == [501, 502], "the same shape as the suggestions")
+        let requests = await transport.requests
+        #expect(requests[0].url?.absoluteString == "http://100.82.57.4:8000/m/api/people/2/doubts")
+        #expect(requests[0].httpMethod == "GET")
+        #expect(requests[1].value(forHTTPHeaderField: "If-None-Match") == "\"d1\"")
+    }
+
+    @Test func doubtsOfAnUnknownPersonIsA404() async throws {
+        let (client, _) = client(status: 404, body: #"{"error":"not found"}"#)
+        await #expect(throws: CullingBayError.http(status: 404, message: "not found")) {
+            try await client.doubts(for: 99)
+        }
+    }
+
     @Test func anUnknownPhotoIsA404() async throws {
         let (client, _) = client(status: 404, body: #"{"error":"not found"}"#)
         await #expect(throws: CullingBayError.http(status: 404, message: "not found")) {

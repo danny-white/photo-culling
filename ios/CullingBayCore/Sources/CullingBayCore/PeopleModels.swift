@@ -47,14 +47,35 @@ public struct Person: Codable, Sendable, Hashable, Identifiable {
     public let cover: Int?
     /// Faces that may be them, for "Review N suggestions".
     public let suggestions: Int
+    /// Faces the server filed as them on a weak match (under 0.55), for "Check N faces". A server
+    /// that doesn't send it, which is an older one, counts as 0.
+    public let doubts: Int
 
-    public init(id: Int, name: String, photos: Int, faces: Int, cover: Int? = nil, suggestions: Int = 0) {
+    public init(
+        id: Int, name: String, photos: Int, faces: Int, cover: Int? = nil, suggestions: Int = 0, doubts: Int = 0
+    ) {
         self.id = id
         self.name = name
         self.photos = photos
         self.faces = faces
         self.cover = cover
         self.suggestions = suggestions
+        self.doubts = doubts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, photos, faces, cover, suggestions, doubts
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(Int.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        photos = try container.decode(Int.self, forKey: .photos)
+        faces = try container.decode(Int.self, forKey: .faces)
+        cover = try container.decodeIfPresent(Int.self, forKey: .cover)
+        suggestions = try container.decode(Int.self, forKey: .suggestions)
+        doubts = try container.decodeIfPresent(Int.self, forKey: .doubts) ?? 0
     }
 }
 
@@ -197,7 +218,8 @@ public struct FaceSuggestion: Codable, Sendable, Hashable, Identifiable {
 }
 
 /// Up to 60 faces that may be this person, most alike first, and the unnamed groups whose
-/// `maybe` is them.
+/// `maybe` is them. `GET /people/<id>/doubts` answers in the same shape: up to 60 faces filed as them
+/// on a weak match, least sure first, and no groups.
 public struct PersonSuggestions: Codable, Sendable, Hashable {
     public let faces: [FaceSuggestion]
     public let groups: [FaceGroup]
