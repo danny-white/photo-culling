@@ -76,7 +76,7 @@ struct CullCardsView: View {
             .overlay(alignment: .trailing) { CullAFToggle().padding(.trailing, 8) }
             CullProgressBar(fraction: session.progressFraction)
             if let bar = session.budgetBar {
-                CullBudgetBarView(bar: bar)
+                CullBudgetBarView(bar: bar) { session.explainGoal() }
             }
             CullOfflineBanner(queue: session.queue)
         }
@@ -213,11 +213,23 @@ struct CullProgressBar: View {
     }
 }
 
-/// `Kept 4 of 5`, with a bar that fills as stacks are kept and turns amber over the budget.
+/// `Kept 4 of 5`, with a bar that fills as stacks are kept and turns amber over the goal. A tap
+/// says what the goal is based on, in a toast; it decides nothing.
 struct CullBudgetBarView: View {
     let bar: CullBudgetBar
+    let onExplain: () -> Void
 
     var body: some View {
+        Button(action: onExplain) { content }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Goal")
+            .accessibilityValue("\(bar.text). \(bar.explanation)")
+            .accessibilityHint("Shows what the goal is based on")
+            .accessibilityAddTraits(.isButton)
+    }
+
+    private var content: some View {
         HStack(spacing: 10) {
             Text(bar.text)
                 .font(.caption.weight(.semibold))
@@ -235,8 +247,6 @@ struct CullBudgetBarView: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 6)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Budget")
-        .accessibilityValue("\(bar.text). \(bar.detail)")
+        .contentShape(Rectangle())
     }
 }

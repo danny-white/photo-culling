@@ -22,6 +22,20 @@ struct CullModelsTests {
         #expect(day.stacks.allSatisfy { stack in stack.frames.contains { $0.id == stack.lead } })
     }
 
+    @Test func theGoalsBasisDecodesWhenSentAndIsNilFromAnOlderServer() throws {
+        let sent = #"{"stacks":11,"per_hour":10,"hours":1.2,"basis":"a third of 33 stacks"}"#
+        #expect(try decoder.decode(Budget.self, from: Data(sent.utf8))
+            == Budget(stacks: 11, perHour: 10, hours: 1.2, basis: "a third of 33 stacks"))
+        let older = #"{"stacks":5,"per_hour":10,"hours":0.19}"#
+        #expect(try decoder.decode(Budget.self, from: Data(older.utf8)).basis == nil)
+        let empty = #"{"stacks":0,"per_hour":10,"hours":0,"basis":""}"#
+        #expect(try decoder.decode(Budget.self, from: Data(empty.utf8)).basis == "")
+        let null = #"{"stacks":5,"per_hour":10,"hours":0.19,"basis":null}"#
+        #expect(try decoder.decode(Budget.self, from: Data(null.utf8)).basis == nil)
+        // A day saved on the phone before this build has no basis and still opens.
+        #expect(try decoder.decode(CullDay.self, from: Data(cullDayJSON.utf8)).budget.basis == nil)
+    }
+
     @Test func aFrameDecodesEveryField() throws {
         let day = try decoder.decode(CullDay.self, from: Data(cullDayJSON.utf8))
         let frame = day.stacks[2].frames[1]

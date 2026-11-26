@@ -273,12 +273,62 @@ struct CullCardTests {
         let over = await open(reviewDay(budget: 2)).summary       // five stacks kept (100, 101, 111's, 130, 150)
         #expect(over.overBudget == 3)
         #expect(over.budgetHeading == "Kept · 5 of 2")
-        #expect(over.budgetNote == "3 over this shoot’s budget of 2 (10 stacks an hour of shooting).")
+        #expect(over.budgetNote == "3 over this shoot’s goal of 2 (10 stacks an hour of shooting).")
         #expect(over.budgetDropHint == "Tap a stack to drop it.")
         let within = await open(reviewDay(budget: 9)).summary
         #expect(within.overBudget == 0 && within.budgetHeading == nil && within.budgetDropHint == nil)
-        #expect(within.budgetNote == "Kept 5 of this shoot’s budget of 9.")
+        #expect(within.budgetNote == "Kept 5 of this shoot’s goal of 9.")
         #expect(await open(reviewDay(budget: 0)).summary.budgetNote == nil)
+    }
+
+    /// `day` with the goal the server gives and what set it.
+    private func goal(_ day: CullDay, _ stacks: Int, basis: String?) -> CullDay {
+        CullDay(
+            day: day.day, folder: day.folder, date: day.date, summary: day.summary,
+            budget: Budget(stacks: stacks, perHour: 10, hours: 1.2, basis: basis), stacks: day.stacks,
+            progress: day.progress)
+    }
+
+    @Test func theGoalSaysWhatItIsBasedOn() async throws {
+        let over = await open(goal(reviewDay(), 2, basis: "a third of 6 stacks")).summary
+        #expect(over.budgetNote == "3 over this shoot’s goal of 2 (a third of 6 stacks).")
+        let within = await open(goal(reviewDay(), 11, basis: "a third of 33 stacks")).summary
+        #expect(within.budgetNote == "Kept 5 of this shoot’s goal of 11 (a third of 33 stacks).")
+
+        let cards = await open(goal(cullDay((0..<4).map { cullStack($0, .single, [cullFrame(10 + $0)]) }), 11,
+                                    basis: "a third of 33 stacks"))
+        let bar = try #require(cards.budgetBar)
+        #expect(bar.text == "Kept 0 of 11")
+        #expect(bar.detail == "Goal 11: a third of 33 stacks")
+        #expect(bar.explanation == "Goal 11: a third of 33 stacks. A pano or bracket counts as one.")
+        let hourly = await open(goal(cullDay([cullStack(0, .single, [cullFrame(1)])]), 23,
+                                     basis: "10 an hour for 2.2 h of shooting"))
+        #expect(hourly.budgetBar?.detail == "Goal 23: 10 an hour for 2.2 h of shooting")
+    }
+
+    @Test func withoutABasisTheGoalKeepsTodaysWords() async throws {
+        for basis in [nil, ""] as [String?] {
+            let cards = await open(goal(cullDay((0..<4).map { cullStack($0, .single, [cullFrame(10 + $0)]) }), 5,
+                                        basis: basis))
+            let bar = try #require(cards.budgetBar)
+            #expect(bar.detail == "10 stacks an hour of shooting (1.2 h)")
+            #expect(bar.explanation == "Goal 5: 10 stacks an hour of shooting (1.2 h). A pano or bracket counts as one.")
+            #expect(await open(goal(reviewDay(), 9, basis: basis)).summary.budgetNote == "Kept 5 of this shoot’s goal of 9.")
+        }
+    }
+
+    @Test func aTapOnTheGoalShowsItsBasisAndChangesNothing() async throws {
+        let rig = CullRig(day: goal(cullDay((0..<4).map { cullStack($0, .single, [cullFrame(10 + $0)]) }), 11,
+                                    basis: "a third of 33 stacks"))
+        let model = rig.session()
+        await model.load()
+        let before = (model.cursor, model.decisions, model.screen, model.card)
+        model.explainGoal()
+        #expect(model.toast?.text == "Goal 11: a third of 33 stacks. A pano or bracket counts as one.")
+        #expect(model.toast?.offersUndo == false)
+        #expect(model.cursor == before.0 && model.decisions == before.1 && model.screen == before.2 && model.card == before.3)
+        #expect(rig.queue.pending == 0)
+        #expect(rig.server.allCalls.filter { $0.method != "GET" }.isEmpty)
     }
 
     @Test func theSendLabelFollowsTheDecisionsStates() async {

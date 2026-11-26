@@ -210,24 +210,39 @@ public struct CullDay: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
-/// The soft limit of stacks to keep in a day.
+/// The soft limit of stacks to keep in a day: the goal, as the app calls it.
 public struct Budget: Codable, Sendable, Hashable {
-    /// Stacks to keep: `perHour` per hour of shooting, at least 5.
+    /// Stacks to keep: a third of the day's stacks, but no more than `perHour` an hour of
+    /// shooting (a cap never below 5).
     public let stacks: Int
     public let perHour: Int
     /// Shooting time in hours (pauses over 10 minutes count as 10), 2 decimals.
     public let hours: Double
+    /// What set the goal, for the words around it: `a third of 33 stacks`, `10 an hour for 2.2 h
+    /// of shooting`. Nil from a server older than 25 Nov 2026, and empty for a day with no stacks.
+    public let basis: String?
 
-    public init(stacks: Int, perHour: Int, hours: Double) {
+    public init(stacks: Int, perHour: Int, hours: Double, basis: String? = nil) {
         self.stacks = stacks
         self.perHour = perHour
         self.hours = hours
+        self.basis = basis
+    }
+
+    /// `basis` is optional: an older server does not send it.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        stacks = try container.decode(Int.self, forKey: .stacks)
+        perHour = try container.decode(Int.self, forKey: .perHour)
+        hours = try container.decode(Double.self, forKey: .hours)
+        basis = try container.decodeIfPresent(String.self, forKey: .basis)
     }
 
     enum CodingKeys: String, CodingKey {
         case stacks
         case perHour = "per_hour"
         case hours
+        case basis
     }
 }
 

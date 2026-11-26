@@ -57,8 +57,11 @@ public struct CullBudgetBar: Sendable, Hashable {
     public var isOver: Bool { kept > limit }
     /// How full the bar is, 0 to 1.
     public let fraction: Double
-    /// `10 stacks an hour of shooting (0.19 h)`.
+    /// `Goal 11: a third of 33 stacks`, or from an older server, which does not say what set the
+    /// goal, `10 stacks an hour of shooting (0.19 h)`.
     public let detail: String
+    /// What a tap on the bar shows: `Goal 11: a third of 33 stacks. A pano or bracket counts as one.`
+    public let explanation: String
 }
 
 /// Everything the Cull card shows for the stack the cursor is on, ported from `vCull`. The photo
@@ -155,8 +158,10 @@ public struct CullSummary: Sendable, Hashable {
     public let overBudget: Int
     /// `Kept · 7 of 5` over the stacks to trim; nil unless over budget.
     public let budgetHeading: String?
-    /// `2 over this shoot’s budget of 5 (10 stacks an hour of shooting).` when over, else
-    /// `Kept 4 of this shoot’s budget of 5.`; nil without a budget.
+    /// `2 over this shoot’s goal of 11 (a third of 33 stacks).` when over, else `Kept 4 of this
+    /// shoot’s goal of 11 (a third of 33 stacks).`; from a server that does not say what set the
+    /// goal, `2 over this shoot’s goal of 5 (10 stacks an hour of shooting).` and `Kept 4 of this
+    /// shoot’s goal of 5.`; nil without a budget.
     public let budgetNote: String?
     /// `Tap a stack to drop it.`, which follows the over-budget note once the view can drop one.
     public let budgetDropHint: String?

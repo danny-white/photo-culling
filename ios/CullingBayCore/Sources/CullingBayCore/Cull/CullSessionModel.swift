@@ -351,16 +351,32 @@ public final class CullSessionModel {
         board.stacks.isEmpty ? 0 : Double(board.doneCount) / Double(board.stacks.count)
     }
 
-    /// The budget bar; nil when the day has no budget.
+    /// The budget bar (the goal, as the app says); nil when the day has no budget.
     public var budgetBar: CullBudgetBar? {
         guard let budget = day?.budget, budget.stacks > 0 else { return nil }
         let kept = board.keptCount
         let over = kept - budget.stacks
+        let hourly = "\(budget.perHour) stacks an hour of shooting (\(CullFormat.number(budget.hours)) h)"
+        let basis = Self.basis(of: budget)
         return CullBudgetBar(
             kept: kept, limit: budget.stacks,
             text: over > 0 ? "Kept \(kept) · \(over) over \(budget.stacks)" : "Kept \(kept) of \(budget.stacks)",
             fraction: min(1, Double(kept) / Double(budget.stacks)),
-            detail: "\(budget.perHour) stacks an hour of shooting (\(CullFormat.number(budget.hours)) h)")
+            detail: basis.map { "Goal \(budget.stacks): \($0)" } ?? hourly,
+            explanation: "Goal \(budget.stacks): \(basis ?? hourly). A pano or bracket counts as one.")
+    }
+
+    /// What set the goal, when the server says; nil from an older server or for an empty basis.
+    private static func basis(of budget: Budget) -> String? {
+        guard let basis = budget.basis, !basis.isEmpty else { return nil }
+        return basis
+    }
+
+    /// A tap on the goal's bar: a toast that says what the goal is based on. It decides and moves
+    /// nothing.
+    public func explainGoal() {
+        guard let bar = budgetBar else { return }
+        showToast(bar.explanation)
     }
 
     /// `vCull`: the card for the stack under the cursor; nil when there is none.
@@ -466,12 +482,13 @@ public final class CullSessionModel {
         var heading: String?
         var note: String?
         var dropHint: String?
+        let basis = day.flatMap { Self.basis(of: $0.budget) }
         if over > 0, let budget = day?.budget {
             heading = "Kept · \(keptStacks) of \(limit)"
-            note = "\(over) over this shoot’s budget of \(limit) (\(budget.perHour) stacks an hour of shooting)."
+            note = "\(over) over this shoot’s goal of \(limit) (\(basis ?? "\(budget.perHour) stacks an hour of shooting"))."
             dropHint = "Tap a stack to drop it."
         } else if limit > 0 {
-            note = "Kept \(keptStacks) of this shoot’s budget of \(limit)."
+            note = "Kept \(keptStacks) of this shoot’s goal of \(limit)" + (basis.map { " (\($0))." } ?? ".")
         }
 
         let burstNote: (Frame) -> Bool = { !(self.board.decisions[$0.id]?.note ?? "").isEmpty }
