@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 TRIAL_DB = ROOT / "trial_out" / "trial.db"
 DAY = "2026/2026-10-01"
 from review.tests.helpers import FakePC, anno_connection, require_nas  # noqa: E402
+from review.tests.people_world import World  # noqa: E402
 
 
 @unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
@@ -1643,6 +1644,241 @@ class PipelineHealthFaces(HealthFixture):
         self.assertEqual([(r["step"], r["resolved"]) for r in self.health()["recent"]], [("faces", False)])
         self.check(paths)
         self.assertEqual([(r["step"], r["resolved"]) for r in self.health()["recent"]], [("faces", True)])
+
+
+class PipelineHealthPeople(HealthFixture):
+    """The People alerts: faces at the current version that were never grouped, or grouped over a day
+    before the newest one was found. The fix is `faces-group`."""
+    FIX = "photo_cull.py faces-group --db trial_out/trial.db"
+
+    def faces(self, n=3, at="2026-03-02T12:00:00+00:00", version=None):
+        import photo_cull as pc
+        con = pc.connect(self.db)
+        con.executemany("INSERT INTO faces(path, face_version, created_at) VALUES(?,?,?)",
+                        [(f"/x/{i}.ARW", version or pc.FACE_VERSION, at) for i in range(n)])
+        con.commit()
+        con.close()
+
+    def grouped(self, at):
+        import photo_cull as pc
+        con = pc.connect(self.db)
+        con.execute("INSERT OR REPLACE INTO face_groups_meta(k, v) VALUES('computed_at', ?)", (at,))
+        con.commit()
+        con.close()
+
+    def title(self):
+        found = [a for a in self.health()["alerts"] if "people" in a["title"].lower()]
+        return found[0] if found else None
+
+    def test_faces_never_grouped(self):
+        self.faces(3)
+        a = self.title()
+        self.assertEqual((a["level"], a["title"]), ("warn", "Faces not grouped into people yet"))
+        self.assertIn("3 faces", a["detail"])
+        self.assertIn(self.FIX, a["fix"])
+
+    def test_faces_grouped_recently_are_fine(self):
+        self.faces(3, at="2026-03-02T12:00:00+00:00")
+        self.grouped("2026-03-02T09:00:00.123456+00:00")           # newer faces, but under a day behind
+        self.assertIsNone(self.title())
+        self.grouped("2026-03-03T00:00:00.000000+00:00")
+        self.assertIsNone(self.title())
+
+    def test_a_grouping_over_a_day_older_than_the_newest_face(self):
+        self.faces(3, at="2026-03-05T12:00:00+00:00")
+        self.grouped("2026-03-02T09:00:00.123456+00:00")
+        a = self.title()
+        self.assertEqual((a["level"], a["title"]), ("warn", "People grouping is out of date"))
+        self.assertIn("2026-03-05", a["detail"])
+        self.assertIn("2026-03-02", a["detail"])
+        self.assertIn(self.FIX, a["fix"])
+
+    def test_no_faces_and_faces_of_another_version_need_no_grouping(self):
+        self.assertIsNone(self.title())
+        self.faces(3, version="old-model")
+        self.assertIsNone(self.title())
+
+    def test_a_database_that_has_no_grouping_table_yet_counts_as_never_grouped(self):
+        import photo_cull as pc
+        self.faces(2)
+        con = pc.connect(self.db)
+        con.execute("DROP TABLE face_groups_meta")
+        con.commit()
+        con.close()
+        self.assertEqual(self.title()["title"], "Faces not grouped into people yet")
+
+    def test_a_faces_group_failure_in_the_log_is_resolved_once_the_faces_are_grouped(self):
+        from datetime import datetime
+        self.faces(2)
+        at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.log.write_text("first line is skipped as a possible partial line\n"
+                            f"[{at}] faces-group FAILED for /x/2026/2026-10-01 (non-fatal, continuing)\n")
+        self.assertEqual([(r["step"], r["resolved"]) for r in self.health()["recent"]], [("faces-group", False)])
+        self.grouped("2026-03-02T13:00:00.000000+00:00")
+        self.assertEqual([(r["step"], r["resolved"]) for r in self.health()["recent"]], [("faces-group", True)])
+
+
+class PeopleContract(unittest.TestCase):
+    """The shapes review/API.md promises for People, on a made-up library (review/tests/people_world.py):
+    no real photo or person, and it runs without trial.db."""
+    assert_shape = MobileApi.assert_shape
+    PHOTO = MobileApi.PHOTO
+    H = {"X-Culling-Bay": "1"}
+    PERSON = {"id": int, "name": str, "photos": int, "faces": int, "cover": (int, None), "suggestions": int}
+    GROUP = {"key": int, "faces": int, "photos": int, "days": int, "cover": int}
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+        self.w.group()
+        self.c = self.w.client()
+
+    def get(self, url, status=200):
+        r = self.c.get("/m/api" + url)
+        self.assertEqual(r.status_code, status, url)
+        return r.get_json()
+
+    def post(self, url, body, status=200):
+        r = self.c.post("/m/api" + url, json=body, headers=self.H)
+        self.assertEqual(r.status_code, status, f"{url} {body}: {r.get_json()}")
+        return r.get_json()
+
+    def name(self, who, person):
+        return self.post("/people", {"name": who, "group": min(self.w.ids(person))}, 201)
+
+    def error(self, body, where):
+        self.assert_shape(body, {"error": str}, where)
+
+    def test_contract_people_list(self):
+        alex = self.name("Alex", "alex")
+        self.name("Sam", "sam")
+        body = self.get("/people")
+        self.assert_shape(body, {"people": list, "groups": list, "faces_checked": int, "photos_ok": int}, "People")
+        self.assertEqual([p["name"] for p in body["people"]], ["Alex", "Sam"])           # most photos first
+        for p in body["people"]:
+            self.assert_shape(p, self.PERSON, "Person")
+        self.assertEqual(len(body["groups"]), 1)
+        for g in body["groups"]:
+            self.assert_shape(g, self.GROUP, "Group")
+            self.assertNotIn("maybe", g)                                                  # absent when there is none
+        self.assert_shape(alex, self.PERSON, "Person (201)")
+
+    def test_contract_people_list_before_any_grouping(self):
+        w = World()
+        self.addCleanup(w.close)
+        r = w.client().get("/m/api/people")
+        self.assertEqual(r.status_code, 200)
+        self.assert_shape(r.get_json(), {"people": list, "groups": list, "faces_checked": int, "photos_ok": int}, "People")
+        self.assertEqual((r.get_json()["people"], r.get_json()["groups"]), ([], []))
+
+    def test_contract_person_and_group_photos(self):
+        alex = self.name("Alex", "alex")
+        body = self.get(f"/people/{alex['id']}")
+        self.assert_shape(body, {"id": int, "name": str, "total": int, "photos": list}, "PersonPhotos")
+        self.assertGreater(len(body["photos"]), 0)
+        for p in body["photos"]:
+            self.assert_shape(p, self.PHOTO, "Photo")
+        group = self.get(f"/people/group/{min(self.w.ids('sam'))}")
+        self.assert_shape(group, {"key": int, "total": int, "photos": list}, "GroupPhotos")
+        for p in group["photos"]:
+            self.assert_shape(p, self.PHOTO, "Photo")
+        self.error(self.get("/people/9999", 404), "unknown person")
+        self.error(self.get("/people/group/9999", 404), "unknown group")
+
+    def test_contract_person_faces_and_suggestions(self):
+        alex = self.name("Alex", "alex")
+        faces = self.get(f"/people/{alex['id']}/faces?offset=1&limit=4")
+        self.assert_shape(faces, {"total": int, "faces": list}, "PersonFaces")
+        self.assertEqual((faces["total"], len(faces["faces"])), (18, 4))
+        for f in faces["faces"]:
+            self.assert_shape(f, {"id": int, "photo": int, "how": str}, "PersonFace")
+            self.assertIn(f["how"], ("confirmed", "auto"))
+        mine = self.w.add_lookalikes("alex", 4, "2026/2026-01-06")
+        self.w.add_group(mine)
+        sug = self.get(f"/people/{alex['id']}/suggestions")
+        self.assert_shape(sug, {"faces": list, "groups": list}, "Suggestions")
+        self.assertEqual(sorted(f["id"] for f in sug["faces"]), sorted(mine))
+        for f in sug["faces"]:
+            self.assert_shape(f, {"id": int, "photo": int, "sim": float}, "SuggestedFace")
+        (g,) = sug["groups"]
+        self.assert_shape(g, self.GROUP, "Group")
+        self.assert_shape(g["maybe"], {"id": int, "name": str}, "Group.maybe")
+        self.assertEqual(g["maybe"]["id"], alex["id"])
+        self.assertEqual(self.get("/people")["people"][0]["suggestions"], 4)
+        for url in ("/people/9999/faces", "/people/9999/suggestions"):
+            self.error(self.get(url, 404), url)
+        self.error(self.get(f"/people/{alex['id']}/faces?limit=0", 400), "bad limit")
+
+    def test_contract_photo_faces(self):
+        self.name("Alex", "alex")
+        face = self.w.ids("alex")[0]
+        photo = next(f["photo"] for f in self.w.faces if f["id"] == face)
+        body = self.get(f"/photo/{photo}/faces")
+        self.assert_shape(body, {"faces": list}, "PhotoFaces")
+        (f,) = body["faces"]
+        self.assert_shape(f, {"id": int, "box": list, "how": str}, "PhotoFace")
+        self.assertTrue(len(f["box"]) == 4 and all(isinstance(v, float) and 0 <= v <= 1 for v in f["box"]))
+        self.assert_shape(f["person"], {"id": int, "name": str}, "PhotoFace.person")
+        self.assertEqual(f["how"], "confirmed")
+        other = next(x["photo"] for x in self.w.faces if x["person"] == "robin")
+        (g,) = self.get(f"/photo/{other}/faces")["faces"]
+        self.assertEqual((g["how"], "person" in g), ("none", False))
+        self.error(self.get("/photo/99999999/faces", 404), "unknown photo")
+
+    def test_contract_face_picture(self):
+        from io import BytesIO
+        from PIL import Image
+        face = self.w.ids("alex")[0]
+        for s, edge in (("small", 160), ("large", 480)):
+            r = self.c.get(f"/m/api/face/{face}?s={s}")
+            self.assertEqual((r.status_code, r.mimetype), (200, "image/jpeg"))
+            self.assertEqual(Image.open(BytesIO(r.data)).size, (edge, edge))
+            self.assertIn("max-age=86400", r.headers["Cache-Control"])
+        self.error(self.get("/face/99999999", 404), "unknown face")
+
+    def test_contract_people_writes(self):
+        alex = self.name("Alex", "alex")
+        sam = self.name("Sam", "sam")
+        face = self.w.ids("alex")[0]
+        for body, where in ((self.post(f"/people/{alex['id']}", {"name": "Alexandra", "cover": face}), "rename"),
+                            (self.post(f"/people/{alex['id']}/add", {"faces": [self.w.ids("casey")[0]]}), "add"),
+                            (self.post(f"/people/{alex['id']}/review", {"yes": [], "no": [self.w.ids("casey")[0]]}), "review"),
+                            (self.post("/faces", {"faces": [face], "action": "not", "person": alex["id"]}), "not"),
+                            (self.post("/faces", {"faces": [face], "action": "move", "person": sam["id"]}), "move"),
+                            (self.post(f"/people/{sam['id']}/merge", {"into": alex["id"]}), "merge")):
+            self.assert_shape(body, self.PERSON, f"{where} -> Person")
+        self.assertEqual(body["id"], alex["id"])                                           # merge answers with `into`
+        self.assertEqual(self.post("/faces", {"faces": [face], "action": "ignore"}), {"ok": True})
+        self.assertEqual(self.post(f"/people/group/{min(self.w.ids('robin'))}/hide", {}), {"ok": True})
+        self.assertEqual(self.post(f"/people/{alex['id']}/delete", {}), {"ok": True})
+
+    def test_contract_people_write_errors(self):
+        alex = self.name("Alex", "alex")
+        taken = self.post("/people", {"name": "alex", "group": min(self.w.ids("sam"))}, 409)
+        self.assert_shape(taken, {"error": str, "person": dict}, "409")
+        self.assert_shape(taken["person"], self.PERSON, "409.person")
+        self.assertEqual(taken["person"], alex)
+        for url, body, status in (("/people", {"name": "", "group": 1}, 400), ("/people", {"name": "Z"}, 400),
+                                  ("/people", {"name": "Z", "group": 12345678}, 404),
+                                  ("/people", {"name": "Z", "faces": [12345678]}, 404),
+                                  ("/people/9999", {"name": "Z"}, 404), ("/people/9999/delete", {}, 404),
+                                  (f"/people/{alex['id']}/merge", {"into": alex["id"]}, 400),
+                                  (f"/people/{alex['id']}/merge", {"into": 9999}, 404),
+                                  ("/faces", {"faces": [], "action": "ignore"}, 400),
+                                  ("/faces", {"faces": [self.w.ids("alex")[0]], "action": "bogus"}, 400),
+                                  ("/people/group/9999/hide", {}, 404)):
+            self.error(self.post(url, body, status), f"{url} {body}")
+        r = self.c.post("/m/api/people", json={"name": "Z", "group": 1})
+        self.assertEqual(r.status_code, 403)                                               # no X-Culling-Bay header
+
+    def test_every_people_route_is_in_api_md(self):
+        import re
+        doc = (ROOT / "review" / "API.md").read_text()
+        rules = [r for r in self.w.app.url_map.iter_rules() if re.search(r"/api/(people|faces?|photo/<int:rowid>/faces)", r.rule)]
+        self.assertGreaterEqual(len(rules), 15)
+        for r in rules:
+            path = re.sub(r"<int:key>", "<key>", re.sub(r"<int:(?!key)\w+>", "<id>", r.rule))
+            self.assertTrue(path in doc, f"{r.rule} is not in review/API.md")
 
 
 class PipelineHealthWatcher(HealthFixture):

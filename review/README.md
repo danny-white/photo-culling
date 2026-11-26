@@ -125,6 +125,13 @@ caption line per burst in shot order, the GPS towns and the commonest subjects. 
 `photo_cull.py daysum`; the ingest watcher does it per new shoot, and a day is summarised again
 only when its facts change. Search matches the summaries too.
 
+**People** (server half; the app screens come later): `photo_cull.py faces` finds every face in each photo's
+preview, `photo_cull.py faces-group` clusters them by who they look like across the whole library (the
+ingest watcher runs both per shoot), and Danny's names and corrections go to `people`, `face_yes`, `face_no` and
+`face_ignored` in `annotations.db`. [`people.py`](people.py) works out from those who is in which photo (auto-filing,
+"Is this ...?" suggestions, unnamed groups worth naming), and the gallery search finds photos by name. The
+design and the measurements behind its thresholds are in [`PEOPLE.md`](PEOPLE.md); the routes in [`API.md`](API.md).
+
 **Lightroom read-back:** each sync, the plugin reports every selected photo's flag and rating.
 A stack you picked, or rated, in Lightroom counts as done in Culling Bay (a reject flag still
 rejects), and a Culling Bay decision that loses to your own flag shows under "Your Lightroom flag won".

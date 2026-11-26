@@ -16,6 +16,10 @@ photo ids, so the app can open the day with those stacks first.
 Years, months and ISO dates in a query ("snow 2019", "june 2015", "2026-10-01") narrow the days
 instead of being searched for. More like this ranks days by one photo's picture vector.
 
+People named in Culling Bay (review/people.py) narrow the gallery's search the same way: "Alex Smith",
+"Alex" when no other person is called Alex, or two people together ("Alex Sam") for the photos both are
+in. Their names are taken out of the query, and what is left is searched among their photos.
+
 The index (every photo's text and both vector matrices, about 220 MB) is rebuilt only when the
 library changes: index() looks at a cheap content signature at most every REFRESH_S and builds a
 new index off to the side, so searches keep using the old one meanwhile.
@@ -113,9 +117,11 @@ def cutoff(s: np.ndarray, margin: float, floor: float = -1.0) -> tuple[float, fl
 
 
 class Search:
-    def __init__(self, *, db_ro, pc, day_of, day_date, ollama_url: str, library_root: str, embed=None):
-        """embed(text) -> the caption vector for a query; by default Ollama's /api/embed (tests pass a fake)."""
+    def __init__(self, *, db_ro, pc, day_of, day_date, ollama_url: str, library_root: str, embed=None, people=None):
+        """embed(text) -> the caption vector for a query; by default Ollama's /api/embed (tests pass a fake).
+        people() -> {lower-case name: the ids of that person's photos}, for searching by who is in a photo."""
         self.db_ro, self.pc, self.day_of, self.day_date = db_ro, pc, day_of, day_date
+        self.people = people
         self.ollama = ollama_url.rstrip("/")
         self.root = library_root
         self._embed = embed or self._ollama_embed
@@ -314,12 +320,15 @@ class Search:
         sd = float(s[have].std()) or 1.0
         return s, match, strength, (top - float(s[have].mean())) / sd
 
-    def _score(self, idx, words, day_keep, notes, used):
-        """(match mask, score, word patterns) for a query's words over the photos in day_keep."""
+    def _score(self, idx, words, day_keep, notes, used, only=None):
+        """(match mask, score, word patterns) for a query's words over the photos in day_keep (and in
+        `only`, a mask over the index, when given: the field is narrowed before any cut is made)."""
         n = len(idx["ids"])
         lex_words = [w for w in words if w not in STOP] or words
         pats = [re.compile(r"\b" + re.escape(w)) for w in lex_words]
         in_days = np.fromiter((d in day_keep for d in idx["days"]), bool, n)
+        if only is not None:
+            in_days &= only
         with perf.stage("words"):
             lex = in_days & np.fromiter((all(p.search(b) for p in pats) for b in idx["blobs"]), bool, n)
         if lex.any():
@@ -431,21 +440,63 @@ class Search:
             r.pop("score")
         return {"days": out[:DAYS_OUT], "photos": int(match.sum()), "signals": [by], "notes": []}
 
+    def _find_people(self, q: str) -> tuple[set | None, str]:
+        """(the ids of the photos all the people named in a query are in, the query without their names);
+        None for the ids when it names nobody, and then the query comes back as it was. Whole names are
+        found first, the longest first, in any case; then a first name that no other person has."""
+        if self.people is None:
+            return None, q
+        try:
+            sets = self.people()
+        except Exception as e:  # noqa: BLE001 - the search goes on without people
+            log.warning("people not searched: %s: %s", type(e).__name__, e)
+            return None, q
+        toks = [t for t in re.split(r"[\s,]+", q.strip()) if t]
+        low = [t.lower() for t in toks]
+        used, found = [False] * len(toks), []
+        for name in sorted(sets, key=lambda nm: (-len(nm.split()), nm)):
+            parts = name.split()
+            for i in range(len(low) - len(parts) + 1):
+                if parts and low[i:i + len(parts)] == parts and not any(used[i:i + len(parts)]):
+                    used[i:i + len(parts)] = [True] * len(parts)
+                    found.append(name)
+                    break
+        firsts = [nm.split()[0] for nm in sets if nm.split()]
+        for i, t in enumerate(low):
+            if not used[i] and firsts.count(t) == 1:
+                name = next(nm for nm in sets if nm.split() and nm.split()[0] == t)
+                if name not in found:
+                    used[i] = True
+                    found.append(name)
+        if not found:
+            return None, q
+        return set.intersection(*(set(sets[nm]) for nm in found)), " ".join(t for t, u in zip(toks, used) if not u)
+
     def photos(self, q: str, limit: int = PHOTOS_OUT) -> dict:
         """Photos for a query, best match first, across every day (the gallery's search).
-        A query of only dates gives the photos in that span, newest first."""
+        A query of only dates gives the photos in that span, newest first. People named in it (all of
+        them, together) narrow the search to their photos: with nothing else to search for, those photos
+        newest first, narrowed by any dates; with words, the normal scoring among them."""
         with perf.stage("index"):
             idx = self.index()
-        words, dates = parse(q)
+        ids, rest = self._find_people(q)
+        words, dates = parse(rest)
+        if ids is not None and all(w in STOP for w in words):
+            words = []        # "photos of Alex", "Alex and Sam": nothing left to search for
         day_keep = {d for d, iso in idx["day_iso"].items() if date_ok(iso, dates)}
-        notes, used = [], []
+        notes, used = [], (["people"] if ids is not None else [])
+        only = None
+        if ids is not None:
+            only = np.fromiter((int(i) in ids for i in idx["ids"]), bool, len(idx["ids"]))
         if not words:
             keep = np.fromiter((d in day_keep for d in idx["days"]), bool, len(idx["ids"]))
+            if only is not None:
+                keep &= only
             order = sorted(np.flatnonzero(keep), key=lambda i: (idx["day_iso"].get(idx["days"][i]) or "", idx["ids"][i]),
                            reverse=True)
             return {"query": q, "ids": [int(idx["ids"][i]) for i in order[:limit]], "total": int(keep.sum()),
-                    "signals": ["dates"], "notes": []}
-        matched, score, _ = self._score(idx, words, day_keep, notes, used)
+                    "signals": used + (["dates"] if ids is None or any(dates.values()) else []), "notes": []}
+        matched, score, _ = self._score(idx, words, day_keep, notes, used, only=only)
         order = sorted(np.flatnonzero(matched), key=lambda i: -score[i])
         return {"query": q, "ids": [int(idx["ids"][i]) for i in order[:limit]], "total": int(matched.sum()),
                 "signals": used, "notes": notes}

@@ -30,6 +30,7 @@ from flask import (Blueprint, Response, abort, jsonify, render_template_string, 
                    send_file, send_from_directory, url_for)
 from PIL import Image, ImageOps
 
+import people
 import perf
 import previews
 import region_decode
@@ -51,6 +52,8 @@ DECISIONS_HEADER = "#cull-decisions v1"
 RECEIPT_RE = re.compile(r"^(\d{8}-\d{6})-(receipt|catalog)\.tsv$")   # the plugin's two report files
 LOST_AFTER = timedelta(seconds=60)                   # sent this long before a receipt that lacks it
 IMG_EDGE = {"thumb": 320, "view": 1616}   # 1616 = the embedded preview's full width
+FACE_EDGE = {"small": 160, "large": 480}  # a face's square picture, in px
+FACE_PAD = 1.3           # a face's picture is its box enlarged by this much, so a little hair and chin show
 DAYS_TTL_S = 30
 AS_IS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".heic": "image/heic", ".heif": "image/heif"}
 CROP_MAX = 2400          # longest side of a crop, in source pixels
@@ -204,11 +207,21 @@ def decode_failed(pc, rowid: int, path: str | None, e: Exception):
     return jsonify({"error": f"decode failed: {pc._exc_text(e)[:120]}"}), 415
 
 
+def face_square(box, width: int, height: int) -> tuple[int, int, int]:
+    """(left, top, side) in pixels of the square picture of a face: its box (fractions of the upright
+    photo) enlarged by FACE_PAD around its centre, and moved inside the photo if it would stick out."""
+    x0, y0, x1, y1 = box
+    side = max(8.0, min(max((x1 - x0) * width, (y1 - y0) * height) * FACE_PAD, width, height))
+    left = min(max((x0 + x1) / 2 * width - side / 2, 0.0), width - side)
+    top = min(max((y0 + y1) / 2 * height - side / 2, 0.0), height - side)
+    return round(left), round(top), round(side)
+
+
 def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_dir: Path,
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
                    known_unreadable: Path = KNOWN_UNREADABLE, ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
                    raw_decoder=None, region_decoder=None, backup_status: Path | None = None,
-                   prime_search: bool = False) -> Blueprint:
+                   prime_search: bool = False, people_refresh_s: float = people.REFRESH_S) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
@@ -218,7 +231,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     -> (image, box) replaces region_decode.decode_region for the offline crops. backup_status: the file
     ops/backup.sh writes after each run, read by the pipeline-health alerts (default: next to the DB).
     prime_search: after the search index is built, also load CLIP's text half and the caption model
-    in Ollama (the server turns it on; tests leave it off, so they don't load a 250 MB model each)."""
+    in Ollama, and build the People index (the server turns it on; tests leave it off, so they don't load
+    a 250 MB model each). people_refresh_s: how often the People index looks for a new grouping run."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
     ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
     backup_status = backup_status if backup_status is not None else state_dir.parent / "backup-status.json"
@@ -244,8 +258,9 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         import rawpy
         with rawpy.imread(str(path)) as raw:
             return Image.fromarray(raw.postprocess(use_camera_wb=True))
+    people_index = people.PeopleIndex(db_ro=db_ro, anno=anno, pc=pc, refresh_s=people_refresh_s)
     finder = search.Search(db_ro=db_ro, pc=pc, day_of=day_of, day_date=day_date, ollama_url=ollama_url,
-                           library_root=LIBRARY_ROOT)
+                           library_root=LIBRARY_ROOT, people=people_index.name_photos)
 
     def warm_search():   # the first search would otherwise wait a few seconds for the vectors to load
         try:
@@ -255,6 +270,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
         except Exception:  # noqa: BLE001 - a search will try again, and report what is wrong
             pass
     threading.Thread(target=warm_search, daemon=True, name="search-warm-up").start()
+    if prime_search:
+        threading.Thread(target=people_index.warm, daemon=True, name="people-warm-up").start()
 
     def offline_decode(path: str) -> Image.Image:
         """A full decode for the phone's offline copy of a day (`keep=0` on a crop): one at a
@@ -1420,6 +1437,15 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 "SELECT COUNT(*) FROM images i WHERE status='ok' AND COALESCE(processed_at, '') < ? AND NOT EXISTS "
                 "(SELECT 1 FROM faces_checked f WHERE f.path = i.path AND f.face_version = ?)",
                 (cutoff, pc.FACE_VERSION)).fetchone()[0]
+            try:
+                nfaces, newest_face = con.execute(
+                    "SELECT COUNT(*), MAX(created_at) FROM faces WHERE face_version=?", (pc.FACE_VERSION,)).fetchone()
+            except sqlite3.OperationalError:    # a database that never had the faces step
+                nfaces, newest_face = 0, None
+            try:
+                grouped_at = next((r[1] for r in con.execute("SELECT k, v FROM face_groups_meta") if r[0] == "computed_at"), None)
+            except sqlite3.OperationalError:    # faces-group has never run: the table isn't there
+                grouped_at = None
             noshot = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND shot_checked IS NULL "
                                  "AND COALESCE(processed_at, '') < ?", (cutoff,)).fetchone()[0]
             ungeo = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND gps_checked IS NULL "
@@ -1482,6 +1508,22 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             alert("warn", f"{noface:,} photos not checked for faces", "Their faces haven't been found yet, so they "
                   "won't show under People.",
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py faces --db trial_out/trial.db")
+        group_fix = "cd ~/photo-culling && ./venv/bin/python photo_cull.py faces-group --db trial_out/trial.db"
+        ungrouped = False
+        if nfaces and not grouped_at:
+            ungrouped = True
+            alert("warn", "Faces not grouped into people yet", f"{nfaces:,} faces have been found but the grouping step "
+                  "has never run, so People is empty.", group_fix)
+        elif nfaces:
+            try:
+                behind = datetime.fromisoformat(newest_face) - datetime.fromisoformat(grouped_at)
+            except (TypeError, ValueError):
+                behind = timedelta(0)
+            if behind > timedelta(days=1):
+                ungrouped = True
+                alert("warn", "People grouping is out of date",
+                      f"The newest face was found on {newest_face[:10]} but the faces were last grouped on "
+                      f"{grouped_at[:10]}, so newer faces are missing from People.", group_fix)
         if ungeo:
             alert("warn", f"{ungeo:,} photos not geotagged", "Their GPS and nearest town were never read.",
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py geotag --db trial_out/trial.db")
@@ -1552,7 +1594,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             folder = (re.search(r" for (\S+)", msg) or [None, ""])[1]
             recent.append({"at": at.isoformat(timespec="seconds"), "step": step, "folder": folder, "what": msg[:160]})
         for r in recent:
-            r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "faces": not noface, "geotag": not ungeo, "shotinfo": not noshot, "daysum": not unsummed,
+            r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "faces": not noface, "faces-group": not ungrouped, "geotag": not ungeo, "shotinfo": not noshot, "daysum": not unsummed,
                              "inbox": check_mount and not mount}.get(
                 r["step"], bool(r["folder"]) and done_after.get(r["folder"], "") > r["at"])
         if log_mtime is not None:
@@ -2038,6 +2080,19 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         perf.note(warm=queued)
         return "", 204
 
+    def make_preview(rowid: int, path: str, edge: int, cached: Path):
+        """Make a photo's missing preview JPEG at `edge` px. None on success, else the 415 response."""
+        try:
+            with perf.stage("load"):          # NAS read + embedded preview (or full open)
+                src = pc.load_source(Path(path))
+            with perf.stage("resize"):
+                im = pc.to_working(src, edge)
+            with perf.stage("encode"):
+                previews.write_atomic(im, cached)
+        except Exception as e:
+            return decode_failed(pc, rowid, path, e)
+        return None
+
     @bp.route("/api/img/<int:rowid>")
     def api_img(rowid):
         edge = IMG_EDGE.get(request.args.get("s", "view"), IMG_EDGE["view"])
@@ -2054,15 +2109,185 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         perf.note(cache="hit" if cached.exists() else "miss", size=request.args.get("s", "view"),
                   ext=Path(r["path"]).suffix.lower())
         if not cached.exists():
+            failed = make_preview(rowid, r["path"], edge, cached)
+            if failed:
+                return failed
+        return send_file(cached, mimetype="image/jpeg", max_age=86400)
+
+    # ---------------------------------------------------------------- routes: people (review/people.py)
+    def people_errors(fn):
+        """A PeopleError becomes its JSON error and status."""
+        @functools.wraps(fn)
+        def wrapper(*a, **kw):
             try:
-                with perf.stage("load"):          # NAS read + embedded preview (or full open)
-                    src = pc.load_source(Path(r["path"]))
-                with perf.stage("resize"):
-                    im = pc.to_working(src, edge)
-                with perf.stage("encode"):
-                    previews.write_atomic(im, cached)
+                return fn(*a, **kw)
+            except people.PeopleError as e:
+                return jsonify(e.body), e.status
+        return wrapper
+
+    def person_or_404(st, pid):
+        if pid not in st.people:
+            raise people.PeopleError(404, "no such person")
+        return st.people[pid]
+
+    @bp.route("/api/people")
+    def api_people():
+        st = people_index.state()
+        checked, ok = people_index.coverage()
+        return jsonify({"people": people_index.people_json(st), "groups": st.groups[:people.GROUPS_OUT],
+                        "faces_checked": checked, "photos_ok": ok})
+
+    @bp.route("/api/people", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_people_create():
+        body = request.get_json()
+        pid, st = people_index.create(body.get("name"), group=body.get("group"), faces=body.get("faces"))
+        return jsonify(people_index.person_json(st, pid)), 201
+
+    @bp.route("/api/people/<int:pid>")
+    @people_errors
+    def api_person(pid):
+        st = people_index.state()
+        row = person_or_404(st, pid)
+        best, bursts = gallery_flags()
+        ids = people_index.photos_of(st, pid)
+        return jsonify({"id": pid, "name": row["name"], "total": len(ids),
+                        "photos": gallery_items(ids, best=best, bursts=bursts)})
+
+    @bp.route("/api/people/<int:pid>", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_person_update(pid):
+        body = request.get_json()
+        st = people_index.update(pid, name=body.get("name"), cover=body.get("cover"), set_cover="cover" in body)
+        return jsonify(people_index.person_json(st, pid))
+
+    @bp.route("/api/people/group/<int:key>")
+    @people_errors
+    def api_people_group(key):
+        st = people_index.state()
+        if key not in st.base.group_faces:
+            raise people.PeopleError(404, "no such group")
+        best, bursts = gallery_flags()
+        ids = people_index.group_photos(st, key)
+        return jsonify({"key": key, "total": len(ids), "photos": gallery_items(ids, best=best, bursts=bursts)})
+
+    @bp.route("/api/people/group/<int:key>/hide", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_people_group_hide(key):
+        people_index.hide_group(key)
+        return jsonify(ok=True)
+
+    def page_arg(name: str, default: int, top: int | None = None) -> int:
+        raw = request.args.get(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if value < (1 if name == "limit" else 0):
+            raise people.PeopleError(400, f"{name} must be a whole number" + (" of 1 or more" if name == "limit" else ""))
+        return min(value, top) if top else value
+
+    @bp.route("/api/people/<int:pid>/faces")
+    @people_errors
+    def api_person_faces(pid):
+        st = people_index.state()
+        person_or_404(st, pid)
+        return jsonify(people_index.faces_of(st, pid, page_arg("offset", 0),
+                                             page_arg("limit", people.FACES_PAGE, people.FACES_PAGE_MAX)))
+
+    @bp.route("/api/people/<int:pid>/suggestions")
+    @people_errors
+    def api_person_suggestions(pid):
+        st = people_index.state()
+        person_or_404(st, pid)
+        return jsonify(people_index.suggestions_of(st, pid))
+
+    @bp.route("/api/people/<int:pid>/add", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_person_add(pid):
+        body = request.get_json()
+        st = people_index.add(pid, group=body.get("group"), faces=body.get("faces"))
+        return jsonify(people_index.person_json(st, pid))
+
+    @bp.route("/api/people/<int:pid>/merge", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_person_merge(pid):
+        into = request.get_json().get("into")
+        st = people_index.merge(pid, into)
+        return jsonify(people_index.person_json(st, into))
+
+    @bp.route("/api/people/<int:pid>/review", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_person_review(pid):
+        body = request.get_json()
+        st = people_index.review(pid, body.get("yes"), body.get("no"))
+        return jsonify(people_index.person_json(st, pid))
+
+    @bp.route("/api/people/<int:pid>/delete", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_person_delete(pid):
+        people_index.delete(pid)
+        return jsonify(ok=True)
+
+    @bp.route("/api/faces", methods=["POST"])
+    @guarded
+    @people_errors
+    def api_faces():
+        body = request.get_json()
+        action, person = body.get("action"), body.get("person")
+        st = people_index.act(body.get("faces"), action, person)
+        return jsonify(people_index.person_json(st, person) if action != "ignore" else {"ok": True})
+
+    @bp.route("/api/photo/<int:rowid>/faces")
+    def api_photo_faces(rowid):
+        con = db_ro()
+        try:
+            known = con.execute("SELECT 1 FROM images WHERE rowid=?", (rowid,)).fetchone()
+        finally:
+            con.close()
+        if not known:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"faces": people_index.photo_faces(people_index.state(), rowid)})
+
+    @bp.route("/api/face/<int:fid>")
+    def api_face(fid):
+        """A face's square picture, cut from the photo's `view` JPEG (made first if it isn't there; never
+        the background full decode) and kept on disk, so it is cacheable like /api/img."""
+        edge = FACE_EDGE.get(request.args.get("s", "small"), FACE_EDGE["small"])
+        con = db_ro()
+        try:
+            r = con.execute("SELECT f.x0, f.y0, f.x1, f.y1, i.path, i.rowid FROM faces f JOIN images i "
+                            "ON i.path = f.path WHERE f.id=? AND f.face_version=?", (fid, pc.FACE_VERSION)).fetchone()
+        finally:
+            con.close()
+        if not r:
+            return jsonify({"error": "not found"}), 404
+        box = tuple(r[:4])
+        key = f"f:{r['path']}:{fid}:{box[0]:.5f},{box[1]:.5f},{box[2]:.5f},{box[3]:.5f}:{edge}"
+        cached = cache_dir / f"f-{hashlib.md5(key.encode()).hexdigest()}.jpg"
+        perf.note(cache="hit" if cached.exists() else "miss", size=request.args.get("s", "small"))
+        if not cached.exists():
+            view = previews.preview_path(cache_dir, r["path"], IMG_EDGE["view"])
+            if not view.exists():
+                failed = make_preview(r["rowid"], r["path"], IMG_EDGE["view"], view)
+                if failed:
+                    return failed
+            try:
+                with perf.stage("crop"), Image.open(view) as im:
+                    left, top, side = face_square(box, *im.size)
+                    previews.write_atomic(im.convert("RGB").crop((left, top, left + side, top + side))
+                                          .resize((edge, edge), Image.LANCZOS), cached)
             except Exception as e:
-                return decode_failed(pc, rowid, r["path"], e)
+                return decode_failed(pc, r["rowid"], r["path"], e)
         return send_file(cached, mimetype="image/jpeg", max_age=86400)
 
     return bp

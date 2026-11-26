@@ -58,8 +58,18 @@ photo per stack; `bursts=0` returns every frame.
 - `GET /m/api/gallery/like/<id>` → `{total, signals, notes, photos: [Photo]}` (most similar first; 404 for an unknown id)
 - `GET /m/api/gallery/day/<day>` → `{day, date?, summary?, photos: [Photo]}` (time order; 404 for an unknown day)
 
-`signals` lists what matched: `words`, `captions`, `pictures`, `dates`. `notes` are sentences to
+`signals` lists what matched: `words`, `captions`, `pictures`, `dates`, `people`. `notes` are sentences to
 show when part of search is unavailable.
+
+**People in a search.** `gallery/search` finds the people named in Culling Bay (see People below). A query
+naming one or more of them (case does not matter) returns the photos they are all in: `alex smith`, or `alex`
+when no other person has the first name Alex, or `alex sam` for the photos both are in. Whole names are looked
+for first, then first names; the names are taken out of the query and what is left narrows to their photos.
+With nothing else left (or only words like "photos of"), the answer is those photos, newest first, narrowed by
+any dates in the query (`alex 2026-01`), with `signals: ["people"]` (and `"dates"` when dates were used). With
+words left (`alex birthday`) the usual word, caption and picture matching runs among those photos only, and
+`signals` is `"people"` plus what matched. A name no one has, or one two people share, is searched as an
+ordinary word. `search` (days) and `like` do not look at names.
 
 Photo:
 
@@ -77,6 +87,116 @@ Photo:
 | `stars` | int | 0–5, the higher of Lightroom and phone |
 | `picked`, `rejected` | bool | Lightroom or phone flag |
 | `raw` | bool | The original is a RAW (ARW, NEF, CR2, CR3, DNG, ...) |
+
+## People
+
+Faces are found in every photo's preview (`photo_cull.py faces`), grouped by who they look like across the whole
+library (`photo_cull.py faces-group`, which the ingest watcher runs after each shoot), and named in the app.
+Danny's answers are the only thing stored; who is in which photo is worked out from them each time, so a
+regrouping never undoes a correction. The design and the measurements behind the thresholds are in
+`review/PEOPLE.md`.
+
+A **face** is one detected face in one photo: its `id` is stable. A **group** is faces that look alike and
+nobody has named; its `key` is its smallest face id, which stays put while that face stays in it. A **person**
+has a name, the faces Danny confirmed and the faces the server filed under them.
+
+Every face is in exactly one state, its `how`:
+
+| `how` | Meaning |
+|---|---|
+| `confirmed` | Danny said so: named it, added it, answered "Is this ...?" with yes, or moved it there |
+| `auto` | The server filed it: it sits in a group where 2/3 or more of the confirmed faces are that person, or it is 0.55+ alike to their confirmed faces and 0.10 clear of the next person. Never when Danny said it is not them. |
+| `none` | Nobody's yet: a member of an unnamed group, or a suggestion (`Is this <name>?`: 0.40 to 0.55 alike) |
+
+Faces Danny marked **Not a face** are hidden everywhere.
+
+Until the first `faces-group` run, and on a database with no faces, `GET /people` is `200` with empty lists.
+Everything is rebuilt when a grouping run finishes (looked for every 30 s at most); faces found since do not
+show until the next run.
+
+### Reads
+
+- `GET /m/api/people` → `{people: [Person], groups: [Group], faces_checked, photos_ok}`. `people` has the
+  named people, most photos first. `groups` has the unnamed groups worth naming: 3 or more faces nobody has
+  claimed (a suggested face is not claimed), the groups seen on the most days first (friends and family above
+  a one-day crowd), then most photos, at most 300. `faces_checked` is the number of photos checked for faces
+  and `photos_ok` the number of photos in the library, so the app can say "faces found in N of M photos".
+- `GET /m/api/people/<id>` → `{id, name, total, photos: [Photo]}`, newest first (404 for an unknown person).
+  `?best=1` and `?bursts=` work as in Gallery; `total` counts the person's photos before them.
+- `GET /m/api/people/group/<key>` → `{key, total, photos: [Photo]}`, newest first, for the group's unclaimed
+  faces; the same flags (404 for an unknown group, `total: 0` for one with nothing left).
+- `GET /m/api/people/<id>/faces?offset=0&limit=100` → `{total, faces: [{id, photo, how}]}` for the fix screen
+  (`limit` 1 to 500, default 100; `400` for anything else). The faces the server filed itself come first, the
+  least sure first (the likeliest mistakes), then the confirmed ones, newest photo first. `how` is `auto` or `confirmed`.
+- `GET /m/api/people/<id>/suggestions` → `{faces: [{id, photo, sim}], groups: [Group]}`: up to 60 faces that
+  may be this person, most alike first (`sim` is 0.40 to 0.55), and the unnamed groups whose `maybe` is them.
+- `GET /m/api/photo/<id>/faces` → `{faces: [PhotoFace]}`, left to right; `404` for an unknown photo.
+- `GET /m/api/face/<id>?s=small|large` → a square JPEG of the face, 160 or 480 px (default `small`). It is cut
+  from the photo's 1616 px picture (the same file as `img?s=view`, made if missing; it never starts the RAW's
+  full decode), with the box enlarged by 30%. Cacheable for a day like `img`: `ETag`, `Last-Modified`,
+  `max-age=86400`. `404` for an unknown face, `415` for a photo that won't decode.
+
+Person:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | int | Person id, in every people route |
+| `name` | string | As given, trimmed; 1 to 80 characters. No two people share a name, case aside. |
+| `photos` | int | Photos with at least one face of theirs (confirmed or auto) |
+| `faces` | int | Their faces, confirmed and auto |
+| `cover` | int? | A face id for their picture: the one Danny chose, else the best confirmed face. `null` only when they have no faces left. |
+| `suggestions` | int | Faces that may be them, for "Review N suggestions" |
+
+Group:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `key` | int | Group id, in `group` of the writes and in `people/group/<key>` |
+| `faces`, `photos` | int | Unclaimed faces in the group, and the photos they are in |
+| `days` | int | How many different shoot folders they are from |
+| `cover` | int | Face id of its best face |
+| `maybe` | `{id, name}` | Only when the group looks 0.40+ like a named person, for "Is this Alex?". Absent otherwise. |
+
+PhotoFace:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | int | Face id |
+| `box` | [number] | `[x0, y0, x1, y1]` as fractions (0 to 1) of the upright photo |
+| `how` | string | As above |
+| `person` | `{id, name}` | Only when `how` is `confirmed` or `auto` |
+| `suggestion` | `{id, name}` | Only for a `none` face that may be that person |
+
+### Writes
+
+The same rules as Cull's writes (header, JSON object body). Unknown person, group or face ids are `404 {error}`;
+a bad body is `400 {error}` (a name that is not 1 to 80 characters after trimming, a `faces` that is not a list of
+ints, a missing field); a name that is taken is `409 {error, person}` with the existing Person, so the app can
+offer "Add to <name>?". A write that fails changes nothing. Unless said otherwise, a write answers with the
+changed Person.
+
+`group` is a group key; naming or adding a group takes the faces in it nobody has claimed yet (the ones the
+app shows), never ones already filed under someone else.
+
+- `POST /m/api/people` `{name, group?, faces?}` → `201` with the new Person. At least one of `group` and
+  `faces`, naming a face at least; each is a confirmed face (`named`).
+- `POST /m/api/people/<id>` `{name?, cover?}` → rename and/or choose the cover face (`cover: null` goes back to
+  the best confirmed face; `400` for a face that is not theirs; `409` for a taken name).
+- `POST /m/api/people/<id>/add` `{group?, faces?}` → these faces are this person (`added`); a "not this person"
+  on them is taken back. A face already someone else's becomes theirs.
+- `POST /m/api/people/<id>/merge` `{into}` → all that was said about this person becomes `into`'s and this person
+  is deleted; answers with `into`'s Person. Their "not" answers come too, except for a face that is `into`'s.
+  `400` when `into` is the person itself.
+- `POST /m/api/people/<id>/review` `{yes: [faces], no: [faces]}` → the answers to "Is this ...?": yes is a
+  confirmed face, no means never suggest it for them again. A face in both lists is `400`.
+- `POST /m/api/people/<id>/delete` → `{ok: true}`. Their confirmed and "not" answers are deleted; the faces
+  go back to their groups.
+- `POST /m/api/faces` `{faces: [ids], action, person?}` → fix faces. `action` is:
+  - `not`: these faces are not `person` (the "Not Alex" of Manage faces): no longer theirs, never suggested for
+    them again. Answers with `person`'s Person.
+  - `move`: they are `person` (`moved`). Answers with `person`'s Person.
+  - `ignore`: not a face, or a stranger: hidden everywhere. Answers `{ok: true}`.
+- `POST /m/api/people/group/<key>/hide` → `{ok: true}`: hides the group's unclaimed faces like `ignore`.
 
 ## Practice
 
@@ -313,6 +433,7 @@ per day. Opening a day, both lay the queued taps for it over what `day/<day>` re
 | `GET /m/api/ping` | `204`, no body. The iPhone app's connection check: it touches no database or file, so an answer means only that the PC can be reached. |
 | `GET /m/api/warm?ids=<id>,<id>` | `204`, no body. Queues the named RAWs' full decodes in the background, most urgent first, at most 4, as a `view` picture request would. For cards the phone shows from its own saved copy (offline days), whose pictures never reach the server. Unknown ids, non-RAW files and junk are skipped. |
 | `GET /m/api/info/<id>` | The camera details for the app's (i) sheet, read from the file with exiftool when first asked (~0.1 s) and kept in memory: `file`, `format`, `bytes`, `width`, `height`, `megapixels`, `camera` (e.g. "Sony ILCE-7RM3"), `make`, `model`, `lens`, `iso`, `shutter_s` (seconds), `aperture` (f-number), `focal_mm`, `focal_35mm`, `ev`, `program`, `metering`, `flash`, `white_balance`, `focus_mode` (exiftool's words), `taken` ("YYYY:MM:DD HH:MM:SS[.sub]", the camera's clock), `offset` ("-07:00"), `gps` ([lat, lon]), `place` (the nearest town, from the index). Anything the file lacks is `null`. `404` unknown id; `503 {error: "photo storage unavailable"}` when the NAS can't be reached; `415` when exiftool reads nothing. |
+| `GET /m/api/face/<id>?s=small` | JPEG, 160 px square: a face (`large` is 480). See People. |
 | `GET /m/api/export/<id>?s=large` | JPEG, longest side 3000, decoded from the original (about 1.5 s for a cold RAW) |
 | `GET /m/api/crop/<id>?x=&y=&w=&h=` | JPEG crop at full resolution: centre `x`,`y` as fractions of the upright frame, `w`,`h` in source pixels (64–2400). Header `X-Crop-Box: left,top,w,h of WxH` gives the box actually cut and the full size. |
 | `GET /m/api/export/<id>` | Full-size JPEG for saving: a RAW is decoded, with capture time and GPS in its EXIF; a JPEG or HEIC original is sent as it is. `?dl=1` makes it a download. |
@@ -332,6 +453,12 @@ itself once fixed. The failed-photo alerts and the `index` fields that go with t
 | `N originals can't be read` (warn) | error rows that no retry will help: `size = 0`, `error_class = 'empty'` or `attempts >= 4`, minus the paths in `trial_out/known-unreadable.txt` (one path per line, `#` starts a comment, a missing file is an empty list) | `unreadable` (after that list), `acknowledged_unreadable` (the ones it removed), `unreadable_files` (up to 100 of `{path, size, error}`, sorted by path) |
 
 `index.caption_errors` is every error row, retry or not, and is unchanged: the Pi dashboard may read it.
+
+`Faces not grouped into people yet` (warn) appears when faces have been found at the current face version but
+`face_groups_meta` has no `computed_at` (the `faces-group` step has never run); `People grouping is out of date`
+(warn) when the last grouping is over a day older than the newest face. Both say to run
+`photo_cull.py faces-group --db trial_out/trial.db`. A `faces-group FAILED` line in the log counts as resolved
+once neither alert is showing.
 
 `Ingest watcher hasn't run for N hours` (bad) appears when the ingest log exists and nothing has been written
 to it for over 2 hours. The watcher writes a `poll: ...` line at least once an hour, even when nothing
