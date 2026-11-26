@@ -4,7 +4,9 @@ import SwiftUI
 /// One challenge (`detailView` in `practice.js`): the picture, what to do and why, saving the RAW
 /// to Photos to edit in Lightroom, and marking it done with a note. A Needs Desktop challenge has
 /// no save buttons: it says it is done on the Mac, and links to its on-the-go version, which is
-/// the same screen for the same photo. The state lives in `PracticeModel`; what is typed in the note box is kept there too (and in a file,
+/// the same screen for the same photo. A photo that is already in Lightroom on the phone says so and
+/// says how to find it, with the save buttons behind a tap (`PracticeLightroomGuide`); that is only
+/// read from the challenge, nothing is asked of Lightroom. The state lives in `PracticeModel`; what is typed in the note box is kept there too (and in a file,
 /// for the next launch), so a note that did not save is still here when the screen is opened again.
 @MainActor
 struct PracticeDetailView: View {
@@ -12,6 +14,8 @@ struct PracticeDetailView: View {
     let id: String
     @State private var note: String
     @State private var export: ExportLaunch?
+    /// The "Download the RAW instead" row of the Lightroom card is open.
+    @State private var showDownload = false
     /// The height of the screen, for capping a tall photo.
     @State private var screenHeight: CGFloat = 0
     @FocusState private var noteFocused: Bool
@@ -78,8 +82,7 @@ struct PracticeDetailView: View {
             if challenge.needsDesktop {
                 desktopOnly(challenge)
             } else {
-                downloads(challenge)
-                howTo(challenge)
+                gettingThePhoto(challenge)
             }
             noteBox
             actions(challenge)
@@ -211,6 +214,105 @@ struct PracticeDetailView: View {
     }
 
     // MARK: Getting the RAW
+
+    /// What comes with the download buttons depends on where the photo is in Lightroom: in a synced
+    /// album, the card says so and the buttons wait behind a tap; in none, a line above them; not
+    /// checked, the buttons alone.
+    @ViewBuilder
+    private func gettingThePhoto(_ challenge: PracticeChallenge) -> some View {
+        switch PracticeLightroomGuide.plan(for: challenge) {
+        case .download:
+            downloads(challenge)
+            howTo(challenge)
+        case .downloadWithNote(let line):
+            VStack(alignment: .leading, spacing: 10) {
+                Text(line)
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                downloads(challenge)
+            }
+            howTo(challenge)
+        case .inLightroom(let guide):
+            lightroomCard(guide, challenge)
+        }
+    }
+
+    /// "Already in Lightroom on your phone": where the photo is, how to find it, a warning if it has
+    /// edits, when this was checked, and the way to the download after all.
+    private func lightroomCard(_ guide: PracticeLightroomGuide, _ challenge: PracticeChallenge) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(PracticeLightroomGuide.title)
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+            Text(guide.body).font(.subheadline)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("How to find it").font(.subheadline.weight(.semibold))
+                ForEach(guide.steps, id: \.number) { step in
+                    Text(attributed(step))
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel(step.text)
+                }
+            }
+            if let warning = guide.warning {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.orange)
+                    Text(warning)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(.footnote)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(guide.spokenWarning ?? warning)
+            }
+            if let footnote = guide.footnote {
+                Text(footnote).font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            downloadRow(guide.downloadTitle)
+            if showDownload {
+                downloads(challenge)
+                howTo(challenge)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// The row that opens and closes the download. It is a button that says whether it is open, which
+    /// a plain disclosure group does not tell VoiceOver outside a list.
+    private func downloadRow(_ title: String) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { showDownload.toggle() }
+        } label: {
+            HStack {
+                Text(title).font(.subheadline.weight(.semibold))
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+                    .rotationEffect(.degrees(showDownload ? 90 : 0))
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.accentColor)
+        .accessibilityValue(showDownload ? "Expanded" : "Collapsed")
+        .accessibilityHint(showDownload ? "Hides the download buttons" : "Shows the download buttons")
+    }
+
+    /// A step with its number, and the album and the photo in bold.
+    private func attributed(_ step: PracticeLightroomGuide.Step) -> AttributedString {
+        var text = AttributedString("\(step.number). ")
+        for piece in step.pieces {
+            var run = AttributedString(piece.text)
+            if piece.bold { run.inlinePresentationIntent = .stronglyEmphasized }
+            text += run
+        }
+        return text
+    }
 
     private func downloads(_ challenge: PracticeChallenge) -> some View {
         VStack(spacing: 10) {
