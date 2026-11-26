@@ -2,8 +2,9 @@ import CullingBayCore
 import SwiftUI
 
 /// "Is this Alex?": a grid of large face crops that may be one person. Every face counts as yes; a tap
-/// puts a red ✕ on it (no). Confirm sends the batch and shows the next until none are left. Unnamed
-/// groups that look like them come first, each with its own Yes and No. State lives in `ReviewModel`.
+/// puts a red ✕ on it (no), and "None are Alex" puts one on every face at once (then "Clear all" takes
+/// them off). Confirm sends the batch and shows the next until none are left. Unnamed groups that look
+/// like them come first, each with its own Yes and No. State lives in `ReviewModel`.
 struct ReviewSheet: View {
     @Environment(AppServices.self) private var services
     @Environment(\.dismiss) private var dismiss
@@ -83,9 +84,13 @@ struct ReviewSheet: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(model.title).font(.title2.bold())
                 if !model.faces.isEmpty {
-                    Text("Every face counts as \(model.person.name). Tap the ones that are not.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Every face counts as \(model.person.name). Tap the ones that are not.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        markAllButton
+                    }
                 }
                 ForEach(model.groups) { group in
                     groupRow(group)
@@ -108,6 +113,27 @@ struct ReviewSheet: View {
         .safeAreaInset(edge: .bottom) {
             if !model.faces.isEmpty { confirmBar }
         }
+    }
+
+    /// "None are Alex" puts the ✕ on every face of the batch; once every face has one it reads "Clear all"
+    /// and takes them off. Nothing is sent until Confirm.
+    private var markAllButton: some View {
+        let allNo = model.allNo
+        let name = model.person.name
+        let title: String = allNo ? "Clear all" : "None are \(name)"
+        let spoken: String = allNo ? "Clear all, every face counts as \(name) again" : "None of these faces are \(name)"
+        return Button {
+            model.markAll(no: !allNo)
+        } label: {
+            Label(title, systemImage: allNo ? "arrow.uturn.backward" : "xmark.circle")
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .tint(allNo ? Color.accentColor : Color.red)
+        .disabled(model.isWorking)
+        .accessibilityLabel(spoken)
     }
 
     private func groupRow(_ group: FaceGroup) -> some View {
@@ -161,7 +187,9 @@ struct ReviewSheet: View {
             Button {
                 Task { await model.confirm() }
             } label: {
-                Text(confirmTitle).fontWeight(.semibold).frame(maxWidth: .infinity)
+                Text(PeopleFormat.reviewConfirm(yes: model.yesCount, no: model.noCount, name: model.person.name))
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -170,11 +198,5 @@ struct ReviewSheet: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.bar)
-    }
-
-    /// `Confirm 58 as Alex`, or `Confirm 56 as Alex, 2 not`.
-    private var confirmTitle: String {
-        let base = "Confirm \(model.yesCount) as \(model.person.name)"
-        return model.noCount > 0 ? "\(base), \(model.noCount) not" : base
     }
 }

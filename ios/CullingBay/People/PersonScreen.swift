@@ -8,7 +8,9 @@ import SwiftUI
 ///
 /// A long press on a photo offers "Not <name>" (they come off that photo at once, and a toast with Undo
 /// stays a few seconds) and "Show faces in this photo" (the (i) sheet, to pick when it holds several
-/// people).
+/// people). Select puts a "Not <first name>" button in the selection bar that does the same for every
+/// selected photo in one go: one toast, with one Undo for all of them, saying how many photos it was and
+/// how many of the selected ones didn't have their face (those stay).
 struct PersonScreen: View {
     @Environment(AppServices.self) private var services
     @Environment(PeopleRouter.self) private var router
@@ -37,6 +39,7 @@ struct PersonScreen: View {
             source: .person(id, name: model.name), services: services, showsHeader: false,
             reloadKey: model.feedKey,
             tileMenu: { photo, feed in AnyView(tileMenu(photo, feed)) },
+            selectionActions: { feed in AnyView(notThemButton(feed)) },
             onOpen: { router.push(.results($0)) }
         ) {
             header
@@ -191,6 +194,44 @@ struct PersonScreen: View {
                 show(PeopleFormat.removedFromPhoto(name)) { undo(removal, in: feed) }
             case .notInPhoto:
                 show(PeopleFormat.notInPhoto(name))
+            case .failed:
+                if !model.message.isEmpty { show(model.message) }
+            }
+        }
+    }
+
+    // MARK: The selection bar's button
+
+    /// "Not Alex" for every selected photo. The label is short, the first word of the name, so it fits the
+    /// bar beside Clear and Save to phone; VoiceOver says the full name.
+    private func notThemButton(_ feed: FeedModel) -> some View {
+        let firstWord = model.name.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? model.name
+        return Button(role: .destructive) {
+            notThemSelected(in: feed)
+        } label: {
+            Label("Not \(firstWord)", systemImage: "person.crop.circle.badge.xmark").lineLimit(1)
+        }
+        .buttonStyle(.bordered)
+        .tint(Color.red)
+        .disabled(feed.selected.isEmpty || model.isWorking)
+        .accessibilityLabel("Not \(model.name)")
+    }
+
+    /// Takes them off every selected photo (or the bursts the tiles stand for). There is no confirm: the
+    /// toast's Undo is the way back. When it worked the selection ends; when none of the photos had their
+    /// face it stays, so the choice can be changed.
+    private func notThemSelected(in feed: FeedModel) {
+        let name = model.name
+        let photos = feed.selectedPhotos
+        Task {
+            switch await model.removeFromPhotos(photos, in: feed) {
+            case .removed(let removal):
+                feed.endSelection()
+                let text = PeopleFormat.removedFromPhotos(
+                    name, photos: removal.photos.count, skipped: removal.skippedTiles)
+                show(text) { undo(removal, in: feed) }
+            case .notInPhoto:
+                show(PeopleFormat.notInPhotos(name))
             case .failed:
                 if !model.message.isEmpty { show(model.message) }
             }

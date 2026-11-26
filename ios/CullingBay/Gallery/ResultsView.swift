@@ -18,7 +18,8 @@ struct ViewerLaunch: Identifiable {
 /// `tileMenu` gives each tile a long-press menu (and the same items as VoiceOver actions); it gets
 /// the photo and the feed, so an item can take the tile out of the grid. Only the person's screen
 /// passes one. A grid that is selecting photos has no menu, so a long press can't get in the way of
-/// Select.
+/// Select. `selectionActions` adds a button of its own to the selection bar, before Save to phone; it
+/// gets the feed, so it can act on `selectedPhotos`. Only the person's screen passes one.
 @MainActor
 struct ResultsView<Accessory: View>: View {
     @Environment(AppServices.self) private var services
@@ -32,6 +33,7 @@ struct ResultsView<Accessory: View>: View {
     private let showsHeader: Bool
     private let reloadKey: [Int]
     private let tileMenu: ((Photo, FeedModel) -> AnyView)?
+    private let selectionActions: ((FeedModel) -> AnyView)?
     private let accessory: Accessory
 
     private let columns = [GridItem(.adaptive(minimum: 112), spacing: 3)]
@@ -39,6 +41,7 @@ struct ResultsView<Accessory: View>: View {
     init(
         source: FeedModel.Source, services: AppServices, showsHeader: Bool = true, reloadKey: [Int] = [],
         tileMenu: ((Photo, FeedModel) -> AnyView)? = nil,
+        selectionActions: ((FeedModel) -> AnyView)? = nil,
         onOpen: @escaping (FeedModel.Source) -> Void, @ViewBuilder accessory: () -> Accessory
     ) {
         _feed = State(initialValue: FeedModel(
@@ -47,6 +50,7 @@ struct ResultsView<Accessory: View>: View {
         self.showsHeader = showsHeader
         self.reloadKey = reloadKey
         self.tileMenu = tileMenu
+        self.selectionActions = selectionActions
         self.accessory = accessory()
     }
 
@@ -175,21 +179,48 @@ struct ResultsView<Accessory: View>: View {
     }
 
     private var selectionBar: some View {
-        HStack(spacing: 12) {
-            Text("\(feed.selected.count) selected").font(.subheadline)
-            Spacer()
-            Button("Clear") { feed.clearSelection() }
-                .buttonStyle(.bordered)
-                .disabled(feed.selected.isEmpty)
-            Button("Save to phone") {
-                export = services.makeExport(feed.selectedPhotos, action: .save)
+        Group {
+            if selectionActions == nil {
+                selectionRow(saveIsIcon: false)
+            } else {
+                // One more button and a long name can leave no room for every label (402 pt on an iPhone 17):
+                // the controls are small, and if they still don't fit Save to phone is just its icon.
+                ViewThatFits(in: .horizontal) {
+                    selectionRow(saveIsIcon: false)
+                    selectionRow(saveIsIcon: true)
+                }
+                .controlSize(.small)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(feed.selected.isEmpty)
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
         .background(.bar)
+    }
+
+    private func selectionRow(saveIsIcon: Bool) -> some View {
+        HStack(spacing: 12) {
+            Text("\(feed.selected.count) selected")
+                .font(.subheadline)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer()
+            Button("Clear") { feed.clearSelection() }
+                .buttonStyle(.bordered)
+                .disabled(feed.selected.isEmpty)
+            if let selectionActions { selectionActions(feed) }
+            Button {
+                export = services.makeExport(feed.selectedPhotos, action: .save)
+            } label: {
+                if saveIsIcon {
+                    Image(systemName: "square.and.arrow.down")
+                } else {
+                    Text("Save to phone").lineLimit(1)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(feed.selected.isEmpty)
+            .accessibilityLabel("Save to phone")
+        }
     }
 
     // MARK: Actions
