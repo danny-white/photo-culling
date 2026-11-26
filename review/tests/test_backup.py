@@ -420,6 +420,7 @@ class BackupHealth(unittest.TestCase):
                 CREATE TABLE images (path TEXT, filename TEXT, status TEXT, processed_at TEXT, shot_checked TEXT, gps_checked TEXT,
                                      size INTEGER, attempts INTEGER, error_class TEXT, error_msg TEXT);
                 CREATE TABLE embeddings (path TEXT, embed_version TEXT);
+                CREATE TABLE faces_checked (path TEXT, face_version TEXT);
                 CREATE TABLE day_summaries (folder TEXT);""")
 
         def db_ro():

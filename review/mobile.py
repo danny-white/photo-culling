@@ -1416,6 +1416,10 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 "SELECT COUNT(*) FROM images i WHERE status='ok' AND COALESCE(processed_at, '') < ? AND NOT EXISTS "
                 "(SELECT 1 FROM embeddings e WHERE e.path = i.path AND e.embed_version = ?)",
                 (cutoff, pc.CLIP_VERSION)).fetchone()[0]
+            noface = con.execute(
+                "SELECT COUNT(*) FROM images i WHERE status='ok' AND COALESCE(processed_at, '') < ? AND NOT EXISTS "
+                "(SELECT 1 FROM faces_checked f WHERE f.path = i.path AND f.face_version = ?)",
+                (cutoff, pc.FACE_VERSION)).fetchone()[0]
             noshot = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND shot_checked IS NULL "
                                  "AND COALESCE(processed_at, '') < ?", (cutoff,)).fetchone()[0]
             ungeo = con.execute("SELECT COUNT(*) FROM images WHERE status='ok' AND gps_checked IS NULL "
@@ -1470,6 +1474,14 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         elif nopic:
             alert("warn", f"{nopic:,} photos without picture search", "They have no picture embedding yet.",
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py embed-images --db trial_out/trial.db")
+        if not (pc.FACE_DIR / "detection" / "model.onnx").exists():
+            alert("warn", "Face model missing", f"No face model in {pc.FACE_DIR}, so new shoots' faces can't be "
+                  "found and People stays empty.",
+                  f"Download detection/ and recognition/ from huggingface.co/immich-app/{pc.FACE_MODEL}")
+        elif noface:
+            alert("warn", f"{noface:,} photos not checked for faces", "Their faces haven't been found yet, so they "
+                  "won't show under People.",
+                  "cd ~/photo-culling && ./venv/bin/python photo_cull.py faces --db trial_out/trial.db")
         if ungeo:
             alert("warn", f"{ungeo:,} photos not geotagged", "Their GPS and nearest town were never read.",
                   "cd ~/photo-culling && ./venv/bin/python photo_cull.py geotag --db trial_out/trial.db")
@@ -1540,7 +1552,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
             folder = (re.search(r" for (\S+)", msg) or [None, ""])[1]
             recent.append({"at": at.isoformat(timespec="seconds"), "step": step, "folder": folder, "what": msg[:160]})
         for r in recent:
-            r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "geotag": not ungeo, "shotinfo": not noshot, "daysum": not unsummed,
+            r["resolved"] = {"embed": not unindexed, "embed-images": not nopic, "faces": not noface, "geotag": not ungeo, "shotinfo": not noshot, "daysum": not unsummed,
                              "inbox": check_mount and not mount}.get(
                 r["step"], bool(r["folder"]) and done_after.get(r["folder"], "") > r["at"])
         if log_mtime is not None:

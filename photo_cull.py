@@ -232,6 +232,31 @@ CREATE TABLE IF NOT EXISTS day_summaries (
     input_hash      TEXT,
     created_at      TEXT
 );
+
+-- Faces found in each photo (cmd_faces). id is stable once written: people/labels in
+-- annotations.db point at it, so never delete-and-reinsert a photo's faces on a re-run.
+CREATE TABLE IF NOT EXISTS faces (
+    id            INTEGER PRIMARY KEY,
+    path          TEXT NOT NULL,
+    face_version  TEXT NOT NULL,
+    x0 REAL, y0 REAL, x1 REAL, y1 REAL,   -- box as fractions (0..1) of the upright image, so any rendition can be cropped
+    kps           TEXT,                   -- JSON [[x,y]*5] as fractions, same frame
+    score         REAL,                   -- detector confidence
+    sharp         REAL,                   -- Laplacian variance of the aligned 112 px face
+    eye_px        REAL,                   -- eye distance in source pixels
+    box_px        REAL,                   -- box width in source pixels
+    vector        BLOB,                   -- 512 float32, pack_vector()
+    created_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS faces_path ON faces(path);
+-- One row per photo checked for faces, including photos with none, so runs are resumable.
+CREATE TABLE IF NOT EXISTS faces_checked (
+    path          TEXT NOT NULL,
+    face_version  TEXT NOT NULL,
+    faces         INTEGER,
+    checked_at    TEXT,
+    PRIMARY KEY (path, face_version)
+);
 """
 
 
@@ -908,6 +933,185 @@ class Clip:
         sess, tok = self._textual()
         ids = np.array([tok.encode(query).ids], np.int32)
         return self._unit(sess.run(None, {sess.get_inputs()[0].name: ids})[0])
+
+
+# ----------------------------------------------------------------------------
+# Faces: every face in a photo, with an ArcFace vector so a later phase can group them into people.
+# SCRFD finds the faces, each is aligned to ArcFace's 112 px template from its five landmarks, and
+# ArcFace turns it into a unit 512-d vector. Measured on real photos before it was ported: ~0.3 s
+# detecting and ~0.2 s embedding per photo on the CPU.
+# ----------------------------------------------------------------------------
+
+FACE_MODEL = "buffalo_l"   # Immich's mirror of InsightFace buffalo_l: huggingface.co/immich-app/buffalo_l
+FACE_DIR = Path(__file__).resolve().parent / "models" / FACE_MODEL   # detection/ and recognition/, ~185 MB, not in git
+FACE_VERSION = "buffalo_l-v1"   # face_version of its rows in `faces` and `faces_checked`
+FACE_DET_LONG = 1600     # detect on the picture at up to this long side ...
+FACE_DET_SMALL = 640     # ... plus a 640 pass for very large faces; the two are merged with NMS
+FACE_DET_THRESH = 0.5
+FACE_NMS_IOU = 0.4
+ARC_DST = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+                    [41.5493, 92.3655], [70.7299, 92.2041]], np.float32)   # ArcFace's 112x112 landmark template
+
+
+class Faces:
+    """Faces on the CPU via onnxruntime: find() takes an upright RGB picture and returns one dict per
+    face, with the columns of a `faces` row. A session loads on first use (~1 s); runs are thread-safe.
+    encode() is the second half on its own (landmarks -> vector), so a later pass can re-embed one
+    face row from a better rendition of the photo."""
+
+    def __init__(self, model_dir: Path = FACE_DIR, threads: int = 0):
+        self.dir, self.threads = Path(model_dir), threads
+        self._det = self._rec = None
+        self._lock = threading.Lock()
+
+    def _session(self, part: str):
+        import onnxruntime as ort
+        so = ort.SessionOptions()
+        so.log_severity_level = 3   # the detector's outputs are declared for 640x640, so every other size warns on stderr
+        if self.threads:
+            so.intra_op_num_threads = self.threads
+        return ort.InferenceSession(str(self.dir / part / "model.onnx"), so, providers=["CPUExecutionProvider"])
+
+    def _detector(self):
+        with self._lock:
+            if self._det is None:
+                self._det = self._session("detection")
+        return self._det
+
+    def _recognizer(self):
+        with self._lock:
+            if self._rec is None:
+                self._rec = self._session("recognition")
+        return self._rec
+
+    # ------------------------------------------------------------ detection (SCRFD)
+    def _detect_once(self, im: Image.Image, long_side: int):
+        """Faces in `im` as (boxes Nx4, kps Nx5x2, scores N) in `im` pixel coordinates."""
+        det = self._detector()
+        w, h = im.size
+        scale = min(1.0, long_side / max(w, h))
+        nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+        small = im.resize((nw, nh), Image.BILINEAR) if scale < 1 else im
+        W, H = (nw + 31) // 32 * 32, (nh + 31) // 32 * 32
+        canvas = np.zeros((H, W, 3), np.uint8)
+        canvas[:nh, :nw] = np.asarray(small)
+        blob = ((canvas.astype(np.float32) - 127.5) / 128.0).transpose(2, 0, 1)[None]
+        outs = det.run(None, {det.get_inputs()[0].name: blob})
+        boxes, kps, scores = [], [], []
+        for i, stride in enumerate((8, 16, 32)):
+            sc = outs[i].ravel()
+            bb = outs[i + 3] * stride
+            kp = outs[i + 6] * stride
+            gh, gw = H // stride, W // stride
+            centers = np.stack(np.mgrid[:gh, :gw][::-1], axis=-1).astype(np.float32).reshape(-1, 2) * stride
+            centers = np.repeat(centers, 2, axis=0)          # 2 anchors per cell
+            keep = sc >= FACE_DET_THRESH
+            if not keep.any():
+                continue
+            c, b, k = centers[keep], bb[keep], kp[keep]
+            boxes.append(np.stack([c[:, 0] - b[:, 0], c[:, 1] - b[:, 1], c[:, 0] + b[:, 2], c[:, 1] + b[:, 3]], 1))
+            kps.append(np.stack([c[:, 0:1] + k[:, 0::2], c[:, 1:2] + k[:, 1::2]], -1))
+            scores.append(sc[keep])
+        if not boxes:
+            return np.zeros((0, 4)), np.zeros((0, 5, 2)), np.zeros(0)
+        return np.concatenate(boxes) / scale, np.concatenate(kps) / scale, np.concatenate(scores)
+
+    @staticmethod
+    def _nms(boxes, scores, iou=FACE_NMS_IOU):
+        """Indices of the boxes kept: highest score first, dropping any that overlap a kept one by more than `iou`."""
+        order = scores.argsort()[::-1]
+        keep = []
+        area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+        while order.size:
+            i = order[0]
+            keep.append(i)
+            xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0]); yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
+            xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2]); yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
+            inter = np.clip(xx2 - xx1, 0, None) * np.clip(yy2 - yy1, 0, None)
+            o = inter / (area[i] + area[order[1:]] - inter)
+            order = order[1:][o <= iou]
+        return np.array(keep, int)
+
+    def detect(self, im: Image.Image, scales=(FACE_DET_LONG, FACE_DET_SMALL)):
+        """(boxes, kps, scores, per-scale counts) in `im` pixels, the scales' finds merged with NMS."""
+        parts = [self._detect_once(im, s) for s in scales]
+        boxes = np.concatenate([p[0] for p in parts]); kps = np.concatenate([p[1] for p in parts])
+        scores = np.concatenate([p[2] for p in parts])
+        if not len(scores):
+            return boxes, kps, scores, [0 for _ in scales]
+        keep = self._nms(boxes, scores)
+        return boxes[keep], kps[keep], scores[keep], [len(p[2]) for p in parts]
+
+    # ------------------------------------------------------------ alignment + recognition (ArcFace)
+    @staticmethod
+    def similarity(src, dst):
+        """2x3 similarity transform mapping src points onto dst (Umeyama, no reflection)."""
+        mu_s, mu_d = src.mean(0), dst.mean(0)
+        sc, dc = src - mu_s, dst - mu_d
+        cov = dc.T @ sc / len(src)
+        U, S, Vt = np.linalg.svd(cov)
+        d = np.array([1.0, -1.0 if np.linalg.det(U) * np.linalg.det(Vt) < 0 else 1.0])
+        R = U @ np.diag(d) @ Vt
+        scale = (S * d).sum() / ((sc ** 2).sum() / len(src))
+        t = mu_d - scale * R @ mu_s
+        return np.hstack([scale * R, t[:, None]])
+
+    @staticmethod
+    def align(im: Image.Image, kps) -> Image.Image:
+        """The face whose five landmarks are `kps` (pixels in `im`), warped to ArcFace's 112x112 template."""
+        M = Faces.similarity(np.asarray(kps, np.float64), ARC_DST.astype(np.float64))
+        Ai = np.linalg.inv(M[:, :2])
+        c = -Ai @ M[:, 2]
+        return im.transform((112, 112), Image.AFFINE, (Ai[0, 0], Ai[0, 1], c[0], Ai[1, 0], Ai[1, 1], c[1]),
+                            resample=Image.BILINEAR)
+
+    def embed(self, faces) -> np.ndarray:
+        """Unit 512-d vectors, one row per aligned 112 px face, in one batch."""
+        if not faces:
+            return np.zeros((0, 512), np.float32)
+        rec = self._recognizer()
+        x = np.stack([np.asarray(f, np.float32) for f in faces])
+        x = ((x - 127.5) / 127.5).transpose(0, 3, 1, 2)
+        v = rec.run(None, {rec.get_inputs()[0].name: x})[0]
+        return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+    @staticmethod
+    def sharpness(face: Image.Image) -> float:
+        """Variance of the Laplacian on the aligned 112 px face: low = out of focus or motion-blurred."""
+        g = np.asarray(face.convert("L"), np.float32)
+        lap = g[1:-1, :-2] + g[1:-1, 2:] + g[:-2, 1:-1] + g[2:, 1:-1] - 4 * g[1:-1, 1:-1]
+        return float(lap.var())
+
+    @staticmethod
+    def eye_px(kps) -> float:
+        """Distance between the two eyes (landmarks 0 and 1), in the pixels `kps` is in."""
+        return float(np.linalg.norm(kps[1] - kps[0]))
+
+    def encode(self, im: Image.Image, kps_list):
+        """(vectors Nx512, sharpness list) for the faces whose landmarks are `kps_list` (each 5x2, in
+        `im` pixels). Alignment and the vector come from `im` alone, so passing a bigger decode of
+        the photo and the landmarks scaled to it re-embeds a face at better detail."""
+        aligned = [self.align(im, k) for k in kps_list]
+        return self.embed(aligned), [self.sharpness(a) for a in aligned]
+
+    def find(self, im: Image.Image) -> "list[dict]":
+        """Every face in `im` (upright RGB): box and landmarks as fractions of the picture, so any
+        rendition of the photo can be cropped, plus the detector's score, the aligned face's
+        sharpness, the eye distance and box width in `im` pixels, and the vector."""
+        boxes, kps, scores, _ = self.detect(im)
+        vecs, sharps = self.encode(im, kps)
+        w, h = im.size
+        out = []
+        for i in range(len(scores)):
+            x0, y0, x1, y1 = (float(v) for v in boxes[i])
+            out.append({
+                # the detector can put a box edge outside the picture: clip it, but box_px stays the face's own width
+                "box": [min(1.0, max(0.0, x0 / w)), min(1.0, max(0.0, y0 / h)),
+                        min(1.0, max(0.0, x1 / w)), min(1.0, max(0.0, y1 / h))],
+                "kps": [[float(x) / w, float(y) / h] for x, y in kps[i]],
+                "score": float(scores[i]), "sharp": sharps[i], "eye_px": self.eye_px(kps[i]),
+                "box_px": x1 - x0, "vector": vecs[i]})
+        return out
 
 
 # ----------------------------------------------------------------------------
@@ -2029,6 +2233,87 @@ def cmd_embed_images(args):
         sys.exit(1)
 
 
+def cmd_faces(args):
+    """Every face in each `ok` image into `faces` (face_version FACE_VERSION): its box and landmarks
+    as fractions of the picture, quality numbers, and a 512-d ArcFace vector, for grouping faces into
+    people. Reads each photo's embedded preview as `run` does, a few at a time; detection and
+    recognition take ~0.5 s a photo on the CPU. A photo checked with no faces still gets a
+    `faces_checked` row, so the run is resumable. A photo that errors gets none, so a later run
+    retries it. Newest first."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    if not all((FACE_DIR / part / "model.onnx").exists() for part in ("detection", "recognition")):
+        sys.exit(f"No face model at {FACE_DIR}. Download detection/ and recognition/ from "
+                 f"https://huggingface.co/immich-app/{FACE_MODEL}")
+    from concurrent.futures import ThreadPoolExecutor
+    conn = connect(args.db)
+    folders = [Path(f).resolve() for f in args.folder] if args.folder else None
+    done_paths = set() if args.force else {r["path"] for r in conn.execute(
+        "SELECT path FROM faces_checked WHERE face_version=?", (FACE_VERSION,))}
+    paths = [r["path"] for r in conn.execute("SELECT path FROM images WHERE status='ok' ORDER BY path DESC")
+             if r["path"] not in done_paths]
+    if folders:
+        paths = [p for p in paths if any(_is_under(Path(p), f) for f in folders)]
+    if args.limit:
+        paths = paths[: args.limit]
+    if not paths:
+        print(f"Nothing to check (all ok images already at {FACE_VERSION}).")
+        return
+    print(f"Finding faces in {len(paths)} picture(s) with {FACE_MODEL} ({args.workers} readers) -> faces.")
+    fc = Faces(threads=args.threads)
+
+    def load(p):
+        try:
+            return p, load_source(Path(p)), None
+        except Exception as e:  # noqa: BLE001
+            return p, None, e
+
+    done = errs = nfaces = 0
+    t0 = time.time()
+    chunk = 16   # read ahead a chunk at a time, so loaded pictures (a JPEG can be 50 MB decoded) never pile up in memory
+    with ThreadPoolExecutor(args.workers) as ex:
+        for start in range(0, len(paths), chunk):
+            found = []   # (path, its faces) for the photos that read and ran well this chunk
+            for p, im, err in ex.map(load, paths[start:start + chunk]):
+                if err is None:
+                    try:
+                        found.append((p, fc.find(im)))
+                    except Exception as e:  # noqa: BLE001
+                        err = e
+                if err is not None:
+                    errs += 1
+                    print(f"{Path(p).name:24s} -> ERROR {_exc_text(err)[:70]}")
+                    continue
+            # one short write per chunk, faces and checked rows together: the ingest watcher writes to
+            # this database too, and a photo is never checked without its faces being there
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            with conn:
+                for p, found_faces in found:
+                    if args.force:   # the one case that changes face ids: the photo's old rows go, new ones come
+                        conn.execute("DELETE FROM faces WHERE path=? AND face_version=?", (p, FACE_VERSION))
+                    elif conn.execute("SELECT 1 FROM faces_checked WHERE path=? AND face_version=?",
+                                      (p, FACE_VERSION)).fetchone():
+                        continue   # another run (the watcher's) checked it meanwhile: keep its face ids
+                    conn.executemany(
+                        "INSERT INTO faces(path, face_version, x0, y0, x1, y1, kps, score, sharp, eye_px, box_px, "
+                        "vector, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        [(p, FACE_VERSION, *f["box"], json.dumps([[round(x, 5), round(y, 5)] for x, y in f["kps"]]),
+                          f["score"], f["sharp"], f["eye_px"], f["box_px"], pack_vector(f["vector"]), now)
+                         for f in found_faces])
+                    conn.execute("INSERT OR REPLACE INTO faces_checked(path, face_version, faces, checked_at) "
+                                 "VALUES(?,?,?,?)", (p, FACE_VERSION, len(found_faces), now))
+                    done += 1
+                    nfaces += len(found_faces)
+            n = min(start + chunk, len(paths))
+            if n % 128 == 0 or n == len(paths):
+                elapsed = time.time() - t0
+                print(f"[{n}/{len(paths)}] checked  ({elapsed / n * 1000:.0f}ms/photo, {nfaces} faces so far, "
+                      f"ETA {_fmt_eta(elapsed / n * (len(paths) - n))})", flush=True)
+    print(f"\nDone: {done} ok / {errs} error, {nfaces} faces, in {_fmt_eta(time.time() - t0)}.")
+    if errs:   # non-zero, so the ingest watcher logs "faces FAILED"
+        sys.exit(1)
+
+
 # ----------------------------------------------------------------------------
 # Geotags: GPS from EXIF, and an offline place name from GeoNames
 # ----------------------------------------------------------------------------
@@ -2563,6 +2848,19 @@ def build_parser() -> argparse.ArgumentParser:
     ei.add_argument("--workers", type=int, default=4, help="Photos read from disk at once (default 4).")
     ei.add_argument("--threads", type=int, default=4, help="CPU threads for the model (default 4).")
     ei.set_defaults(func=cmd_embed_images)
+
+    fa = sub.add_parser("faces", help="Find every face in each ok image and store its ArcFace vector into "
+                        "`faces`, for grouping faces into people.")
+    fa.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    fa.add_argument("--folder", type=Path, nargs="+", metavar="DIR", help="Limit to these folders.")
+    fa.add_argument("--limit", type=int, help="Check at most N images.")
+    fa.add_argument("--workers", type=int, default=4, help="Photos read from disk at once (default 4).")
+    fa.add_argument("--threads", type=int, default=4, help="CPU threads for the models (default 4).")
+    fa.add_argument("--force", action="store_true",
+                    help="Check photos already done too: their old face rows are deleted and fresh ones "
+                         "inserted, which CHANGES THEIR FACE IDS (people and labels in annotations.db point "
+                         "at them). Default: skip them, so a killed run resumes for free.")
+    fa.set_defaults(func=cmd_faces)
 
     si = sub.add_parser("shotinfo", help="Read drive mode, sequence and AF point from the camera's tags, "
                         "for Culling Bay's exact bursts and brackets and its focus check.")

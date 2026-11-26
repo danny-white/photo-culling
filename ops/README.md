@@ -154,7 +154,7 @@ If `msmtp` isn't installed or isn't configured yet, the watcher still runs fine 
   (its photos are unchanged: a current marker, an old or three-number marker that would have been
   upgraded, or a "<shoot>.visited" file naming the same photos), the watcher runs
   `run --retry-failed` and compares the folder's ok count before and after. If no photo became ok
-  it skips embed, embed-images, geotag, shotinfo, daysum, previews and the export, so the folder
+  it skips embed, embed-images, faces, geotag, shotinfo, daysum, previews and the export, so the folder
   isn't sent to Lightroom again for nothing: it logs
   `retry pending for <folder>: N photos (none recovered this time)`, or, when the tries have run
   out, writes the marker and logs `done:`. If at least one photo became ok, it does everything.

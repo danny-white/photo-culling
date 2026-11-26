@@ -1571,6 +1571,80 @@ class PipelineHealthFailures(HealthFixture):
         self.assertEqual(idx["caption_errors"], 0)
 
 
+class PipelineHealthFaces(HealthFixture):
+    """The faces step's alerts: ok photos with no faces_checked row at the current face version, and
+    the face model missing. The model folder is faked, so the real models/ doesn't matter."""
+
+    def models(self, present=True):
+        import photo_cull as pc
+        d = Path(tempfile.mkdtemp(dir=self.dir))
+        if present:
+            (d / "detection").mkdir()
+            (d / "detection" / "model.onnx").write_bytes(b"")
+        p = patch.object(pc, "FACE_DIR", d)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def check(self, paths, version=None):
+        import photo_cull as pc
+        con = pc.connect(self.db)
+        con.executemany("INSERT INTO faces_checked(path, face_version, faces, checked_at) VALUES(?,?,0,'t')",
+                        [(p, version or pc.FACE_VERSION) for p in paths])
+        con.commit()
+        con.close()
+
+    def test_photos_not_checked_for_faces_are_counted(self):
+        self.models()
+        paths = self.add("2026/2026-10-01", n=3, status="ok")
+        self.check(paths[:1])
+        a = self.alert(self.health(), "not checked for faces")
+        self.assertEqual((a["level"], a["title"]), ("warn", "2 photos not checked for faces"))
+        self.assertIn("won't show under People", a["detail"])
+        self.assertIn("photo_cull.py faces --db trial_out/trial.db", a["fix"])
+
+    def test_every_photo_checked_means_no_alert(self):
+        self.models()
+        self.check(self.add("2026/2026-10-01", n=3, status="ok"))
+        self.assertIsNone(self.alert(self.health(), "not checked for faces"))
+
+    def test_a_check_by_another_face_version_does_not_count(self):
+        self.models()
+        self.check(self.add("2026/2026-10-01", n=2, status="ok"), version="old-model")
+        self.assertEqual(self.alert(self.health(), "not checked for faces")["title"], "2 photos not checked for faces")
+
+    def test_photos_that_did_not_tag_and_ones_from_the_last_half_hour_are_not_counted(self):
+        import photo_cull as pc
+        from datetime import datetime, timezone
+        self.models()
+        self.add("2026/2026-10-01", n=2, status="error")
+        con = pc.connect(self.db)
+        con.execute("INSERT INTO images(path, filename, status, processed_at) VALUES('/x/new.ARW', 'new.ARW', 'ok', ?)",
+                    (datetime.now(timezone.utc).isoformat(timespec="seconds"),))
+        con.commit()
+        con.close()
+        self.assertIsNone(self.alert(self.health(), "not checked for faces"))
+
+    def test_a_missing_face_model_is_its_own_alert(self):
+        self.models(present=False)
+        self.add("2026/2026-10-01", n=2, status="ok")
+        d = self.health()
+        a = self.alert(d, "Face model missing")
+        self.assertEqual(a["level"], "warn")
+        self.assertIn("huggingface.co/immich-app/buffalo_l", a["fix"])
+        self.assertIsNone(self.alert(d, "not checked for faces"))     # the count waits for the model
+
+    def test_a_faces_failure_in_the_log_is_resolved_once_the_photos_are_checked(self):
+        from datetime import datetime
+        self.models()
+        paths = self.add("2026/2026-10-01", n=2, status="ok")
+        at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.log.write_text("first line is skipped as a possible partial line\n"
+                            f"[{at}] faces FAILED for /x/2026/2026-10-01 (non-fatal, continuing)\n")
+        self.assertEqual([(r["step"], r["resolved"]) for r in self.health()["recent"]], [("faces", False)])
+        self.check(paths)
+        self.assertEqual([(r["step"], r["resolved"]) for r in self.health()["recent"]], [("faces", True)])
+
+
 class PipelineHealthWatcher(HealthFixture):
     """The ingest log: is the watcher alive, and which of its lines count as failures."""
 

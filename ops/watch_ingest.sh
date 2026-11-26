@@ -374,6 +374,12 @@ for folder in "${todo[@]}"; do
         log "embed-images FAILED for $folder (non-fatal, continuing)"
     fi
 
+    # Best-effort face finding (SCRFD + ArcFace, CPU), so a later phase can group faces into people.
+    # Not fatal; `faces` with no --folder backfills.
+    if ! "$PY" photo_cull.py faces --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
+        log "faces FAILED for $folder (non-fatal, continuing)"
+    fi
+
     # Best-effort GPS + nearest town, for Culling Bay Mobile's places. Not fatal either.
     if ! "$PY" photo_cull.py geotag --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
         log "geotag FAILED for $folder (non-fatal, continuing)"

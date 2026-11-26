@@ -240,8 +240,8 @@ class NewAndBusyFolders(WatcherCase):
         self.assertEqual(self.log_lines("done: "), [f"done: {d} -> {self.root}/inbox/pending.tsv"])
         # the follow-up steps run in order, then the export, then the check that it is finished
         names = [re.sub(r"^photo_cull\.py ", "", c).split()[0] for c in self.calls()]
-        self.assertEqual(names, ["folder-state", "folder-state", "run", "embed", "embed-images", "geotag", "shotinfo",
-                                 "daysum", "review/previews.py", "export", "folder-state"])
+        self.assertEqual(names, ["folder-state", "folder-state", "run", "embed", "embed-images", "faces", "geotag",
+                                 "shotinfo", "daysum", "review/previews.py", "export", "folder-state"])
 
     def test_a_marked_folder_is_left_alone(self):
         d = self.folder("2026-10-01")
@@ -1015,7 +1015,7 @@ class ReplacedInPlace(WatcherCase):
 class RetryOnly(WatcherCase):
     """A visit whose only reason is failed photos with tries left runs the retries and sends the
     folder to Lightroom again only if a photo was recovered."""
-    STEPS = ("embed", "embed-images", "geotag", "shotinfo", "daysum", "review/previews.py", "export")
+    STEPS = ("embed", "embed-images", "faces", "geotag", "shotinfo", "daysum", "review/previews.py", "export")
 
     def finished_with_retries(self, rows=3, retryable=2):
         """A finished folder (current marker) that then gets failed rows again."""
