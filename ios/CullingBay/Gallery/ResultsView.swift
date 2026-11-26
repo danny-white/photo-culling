@@ -14,9 +14,15 @@ struct ViewerLaunch: Identifiable {
 /// `onOpen` pushes the screen a viewer button asks for (Similar, Whole day) onto whichever tab's
 /// stack this is in. A person or a group puts its own header in `accessory` and turns off the title
 /// (`showsHeader`); `reloadKey` loads the photos again when it changes, as when a review adds some.
+///
+/// `tileMenu` gives each tile a long-press menu (and the same items as VoiceOver actions); it gets
+/// the photo and the feed, so an item can take the tile out of the grid. Only the person's screen
+/// passes one. A grid that is selecting photos has no menu, so a long press can't get in the way of
+/// Select.
 @MainActor
 struct ResultsView<Accessory: View>: View {
     @Environment(AppServices.self) private var services
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var feed: FeedModel
     @State private var viewer: ViewerLaunch?
     @State private var export: ExportLaunch?
@@ -25,12 +31,14 @@ struct ResultsView<Accessory: View>: View {
     private let onOpen: (FeedModel.Source) -> Void
     private let showsHeader: Bool
     private let reloadKey: [Int]
+    private let tileMenu: ((Photo, FeedModel) -> AnyView)?
     private let accessory: Accessory
 
     private let columns = [GridItem(.adaptive(minimum: 112), spacing: 3)]
 
     init(
         source: FeedModel.Source, services: AppServices, showsHeader: Bool = true, reloadKey: [Int] = [],
+        tileMenu: ((Photo, FeedModel) -> AnyView)? = nil,
         onOpen: @escaping (FeedModel.Source) -> Void, @ViewBuilder accessory: () -> Accessory
     ) {
         _feed = State(initialValue: FeedModel(
@@ -38,6 +46,7 @@ struct ResultsView<Accessory: View>: View {
         self.onOpen = onOpen
         self.showsHeader = showsHeader
         self.reloadKey = reloadKey
+        self.tileMenu = tileMenu
         self.accessory = accessory()
     }
 
@@ -138,8 +147,11 @@ struct ResultsView<Accessory: View>: View {
                         onLoad: index == 0 ? { firstTileLoaded() } : nil)
                 }
                 .buttonStyle(.plain)
+                .modifier(TileMenu(photo: photo, feed: feed, menu: tileMenu))
             }
         }
+        // A tile taken out or put back slides; a load replacing the photos doesn't.
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: feed.edits)
     }
 
     @ToolbarContentBuilder
@@ -210,6 +222,24 @@ struct ResultsView<Accessory: View>: View {
 extension ResultsView where Accessory == EmptyView {
     init(source: FeedModel.Source, services: AppServices, onOpen: @escaping (FeedModel.Source) -> Void) {
         self.init(source: source, services: services, onOpen: onOpen) { EmptyView() }
+    }
+}
+
+/// The long-press menu of a tile, and the same items as VoiceOver actions on it. Without a `menu` the
+/// tile is left as it is. While the grid is selecting there are no items, so no menu comes up.
+private struct TileMenu: ViewModifier {
+    let photo: Photo
+    let feed: FeedModel
+    let menu: ((Photo, FeedModel) -> AnyView)?
+
+    func body(content: Content) -> some View {
+        if let menu {
+            content
+                .contextMenu { if !feed.isSelecting { menu(photo, feed) } }
+                .accessibilityActions { if !feed.isSelecting { menu(photo, feed) } }
+        } else {
+            content
+        }
     }
 }
 

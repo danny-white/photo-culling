@@ -5,6 +5,10 @@ import SwiftUI
 /// photos as a results screen (so the viewer and Save work as they do anywhere). The menu renames
 /// them, merges them into someone, opens Manage faces or removes the name. State lives in
 /// `PersonModel`; the photos in `FeedModel` over `.person`.
+///
+/// A long press on a photo offers "Not <name>" (they come off that photo at once, and a toast with Undo
+/// stays a few seconds) and "Show faces in this photo" (the (i) sheet, to pick when it holds several
+/// people).
 struct PersonScreen: View {
     @Environment(AppServices.self) private var services
     @Environment(PeopleRouter.self) private var router
@@ -17,6 +21,10 @@ struct PersonScreen: View {
     @State private var confirmsRemove = false
     /// The person who already has the name Danny tried to give.
     @State private var nameTakenBy: Person?
+    /// The photo whose faces the (i) sheet is open for, from a tile's long-press menu.
+    @State private var detailsFor: PhotoInfoTarget?
+    @State private var toast: PersonToast?
+    @State private var toastCount = 0
 
     init(id: Int, services: AppServices) {
         self.id = id
@@ -27,10 +35,16 @@ struct PersonScreen: View {
     var body: some View {
         ResultsView(
             source: .person(id, name: model.name), services: services, showsHeader: false,
-            reloadKey: [model.person?.photos ?? 0, model.person?.faces ?? 0],
+            reloadKey: model.feedKey,
+            tileMenu: { photo, feed in AnyView(tileMenu(photo, feed)) },
             onOpen: { router.push(.results($0)) }
         ) {
             header
+        }
+        .overlay(alignment: .bottom) {
+            PersonToastView(toast: toast) { toast = nil }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { menu }
@@ -43,6 +57,9 @@ struct PersonScreen: View {
             case nil: break
             }
         }
+        // Faces fixed in the sheet may have taken them off the photo: read the person again, and the grid
+        // reads itself again if their count moved.
+        .sheet(item: $detailsFor, onDismiss: { Task { await model.load() } }) { PhotoInfoSheet(target: $0) }
         .sheet(item: $reviewing, onDismiss: { Task { await model.load() } }) { person in
             ReviewSheet(person: person, services: services) { model.update($0) }
         }
@@ -148,6 +165,47 @@ struct PersonScreen: View {
         }
         .disabled(model.person == nil || model.isWorking)
         .accessibilityLabel("Person options")
+    }
+
+    // MARK: A photo's long-press menu
+
+    private func tileMenu(_ photo: Photo, _ feed: FeedModel) -> some View {
+        Group {
+            Button("Not \(model.name)", systemImage: "person.crop.circle.badge.xmark", role: .destructive) {
+                notThem(photo, in: feed)
+            }
+            .disabled(model.isWorking)
+            Button("Show faces in this photo", systemImage: "info.circle") {
+                detailsFor = PhotoInfoTarget(id: photo.id, file: photo.file)
+            }
+        }
+    }
+
+    /// Takes them off this photo (or the burst the tile stands for). There is no confirm: the toast's
+    /// Undo is the way back.
+    private func notThem(_ photo: Photo, in feed: FeedModel) {
+        let name = model.name
+        Task {
+            switch await model.removeFromPhoto(photo, in: feed) {
+            case .removed(let removal):
+                show(PeopleFormat.removedFromPhoto(name)) { undo(removal, in: feed) }
+            case .notInPhoto:
+                show(PeopleFormat.notInPhoto(name))
+            case .failed:
+                if !model.message.isEmpty { show(model.message) }
+            }
+        }
+    }
+
+    private func undo(_ removal: PersonModel.PhotoRemoval, in feed: FeedModel) {
+        Task {
+            if !(await model.undoRemoval(removal, in: feed)), !model.message.isEmpty { show(model.message) }
+        }
+    }
+
+    private func show(_ text: String, undo: (() -> Void)? = nil) {
+        toastCount += 1
+        toast = PersonToast(id: toastCount, text: text, undo: undo)
     }
 
     private func rename() {

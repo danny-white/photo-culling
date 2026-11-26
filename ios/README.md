@@ -49,7 +49,11 @@ Scope and decisions: https://claude.ai/artifact/FQv95YRVDg1DK6tBvruvob (picks ma
   suggestions to review) and a grid of the groups nobody has named ("Alex?" when one looks like a person, else
   "N photos · M days"), pull to refresh, and a name filter. `PersonScreen` is the big circle, the name, a
   "Review N suggestions" banner and the person's photos as the Gallery's `ResultsView` over `FeedModel.Source.person` (viewer
-  and Save included), with a menu to Rename, Merge with…, Manage faces and Remove name. `GroupScreen` is the same for a group
+  and Save included), with a menu to Rename, Merge with…, Manage faces and Remove name. A long press on one of their photos
+  (`ResultsView`'s optional `tileMenu`, which only this screen passes, and which is also given as VoiceOver actions and
+  is off while the grid is selecting) offers "Not Alex" (`PersonModel.removeFromPhoto`: the tile slides out, their count
+  drops and a `PersonToast` with Undo says "Removed Alex from this photo"; with "1/burst" on it takes them off every frame of
+  the burst the tile stands for) and "Show faces in this photo" (the (i) sheet). `GroupScreen` is the same for a group
   (Add name, "Is this Alex?" Yes/No, Not someone I know) over `.group`. `ReviewSheet` is "Is this Alex?" on a grid of large
   crops (a tap puts a red ✕ on one, Confirm sends the batch and loads the next). `ManageFacesView` is a person's faces with
   Select, Not Alex, Move to… and Not a face, and a long press for Make cover and Show photo. `PersonPickerSheet` is the one
