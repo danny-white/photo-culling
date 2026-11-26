@@ -30,7 +30,8 @@ struct PhotoInfoButton: View {
 /// A photo's camera details: ISO, shutter, aperture, lens, size, when and where. They come from
 /// the PC when the sheet opens (`CullingBayClient.info`) and are never saved on the phone. It opens
 /// at the medium detent and can be pulled up to large. Nothing leaves the phone but that one
-/// request, and Open in Maps, which only happens on a tap.
+/// request, the faces in the photo (the People section, which can put a wrong name right) and Open
+/// in Maps, which only happens on a tap.
 @MainActor
 struct PhotoInfoSheet: View {
     @Environment(AppServices.self) private var services
@@ -40,6 +41,11 @@ struct PhotoInfoSheet: View {
     @State private var phase = Phase.loading
     /// Counts Try again, so the load starts over.
     @State private var attempt = 0
+    /// The faces in the photo, for the People section. Made when the sheet opens.
+    @State private var faces: PhotoFacesModel?
+    /// The face "This is…" was chosen for, and the person who already has the name typed for it.
+    @State private var assigning: PhotoFace?
+    @State private var assigningTaken: (face: PhotoFace, existing: Person)?
 
     private enum Phase {
         case loading
@@ -61,6 +67,26 @@ struct PhotoInfoSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .task(id: attempt) { await load() }
+        .task {
+            let model = PhotoFacesModel(photoID: target.id, client: services.client)
+            faces = model
+            await model.load()
+        }
+        .sheet(item: $assigning) { face in
+            PersonPickerSheet(title: "Who is this?", allowsNew: true, services: services) { choice in
+                assign(face, choice)
+            }
+        }
+        .alert(
+            "“\(assigningTaken?.existing.name ?? "")” is already someone",
+            isPresented: Binding(get: { assigningTaken != nil }, set: { if !$0 { assigningTaken = nil } }),
+            presenting: assigningTaken
+        ) { taken in
+            Button("This is \(taken.existing.name)") {
+                Task { await faces?.isThis(taken.face, person: taken.existing) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     @ViewBuilder
@@ -99,6 +125,9 @@ struct PhotoInfoSheet: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
                 }
             }
+            if let faces {
+                PhotoPeopleSection(model: faces, onChoose: { assigning = $0 })
+            }
             ForEach(PhotoInfoFormat.sections(info)) { section in
                 Section(section.title) {
                     ForEach(section.rows) { row in
@@ -118,6 +147,22 @@ struct PhotoInfoSheet: View {
         let name = file.addingPercentEncoding(withAllowedCharacters: safe) ?? ""
         let position = String(format: "%.6f,%.6f", gps.latitude, gps.longitude)
         return URL(string: "https://maps.apple.com/?ll=\(position)&q=\(name)") ?? URL(string: "https://maps.apple.com/")!
+    }
+
+    // MARK: People
+
+    /// Says who a face is: someone Danny picked, or a new name.
+    private func assign(_ face: PhotoFace, _ choice: PersonPickerModel.Choice) {
+        switch choice {
+        case .person(let person):
+            Task { await faces?.isThis(face, person: person) }
+        case .new(let name):
+            Task {
+                if case .taken(let existing)? = await faces?.isThisNew(face, named: name) {
+                    assigningTaken = (face, existing)
+                }
+            }
+        }
     }
 
     // MARK: Loading

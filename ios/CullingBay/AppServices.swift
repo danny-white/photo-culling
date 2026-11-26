@@ -4,10 +4,10 @@ import Foundation
 import Observation
 
 /// The app's one client, image loader and perf reporter, plus the Home model that rides on them,
-/// the Cull tab's write queue and days list, and the Practice tab's challenges, and the link that
-/// says whether the PC can be reached. Views read it from the environment. Changing the server
-/// builds all of them again and bumps `generation`, which the root view uses to start the
-/// Gallery, the Cull tab and the Practice tab over.
+/// the Cull tab's write queue and days list, the Practice tab's challenges, the People tab's
+/// list, and the link that says whether the PC can be reached. Views read it from the environment.
+/// Changing the server builds all of them again and bumps `generation`, which the root view uses
+/// to start the Gallery, the Cull tab, the Practice tab and the People tab over.
 @MainActor
 @Observable
 final class AppServices {
@@ -28,6 +28,8 @@ final class AppServices {
     private(set) var cullQueue: CullWriteQueue
     private(set) var cullDays: CullDaysModel
     private(set) var practice: PracticeModel
+    /// The People tab's list. Nothing of it is kept on the phone: People needs the PC.
+    private(set) var people: PeopleHomeModel
     /// Days kept on the phone, so they open with no connection (Settings > Offline).
     private(set) var offline: OfflineManager
     /// Every full-resolution crop of the focus check goes through this, a couple at a time, so
@@ -52,6 +54,7 @@ final class AppServices {
         self.cullQueue = connection.cullQueue
         self.cullDays = connection.cullDays
         self.practice = connection.practice
+        self.people = connection.people
         self.offline = connection.offline
         wireLink()
     }
@@ -115,6 +118,7 @@ final class AppServices {
         cullQueue = connection.cullQueue
         cullDays = connection.cullDays
         practice = connection.practice
+        people = connection.people
         offline = connection.offline
         wireLink()
         // This server may still have taps waiting from an earlier visit.
@@ -153,6 +157,7 @@ final class AppServices {
         let cullQueue: CullWriteQueue
         let cullDays: CullDaysModel
         let practice: PracticeModel
+        let people: PeopleHomeModel
         let offline: OfflineManager
     }
 
@@ -196,6 +201,7 @@ final class AppServices {
             cullQueue: queue, cullDays: cullDays,
             practice: PracticeModel(
                 client: client, store: FilePracticeDraftStore(directory: practiceStoreDirectory(for: url))),
+            people: PeopleHomeModel(client: client),
             offline: offline)
     }
 

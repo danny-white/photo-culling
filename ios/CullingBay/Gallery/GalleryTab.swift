@@ -22,7 +22,7 @@ struct GalleryTab: View {
         NavigationStack(path: $router.path) {
             GalleryHomeView()
                 .navigationDestination(for: FeedModel.Source.self) { source in
-                    ResultsView(source: source, services: services)
+                    ResultsView(source: source, services: services, onOpen: { router.push($0) })
                 }
         }
         .environment(router)

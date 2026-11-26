@@ -1,13 +1,14 @@
 import SwiftUI
 
-/// Three tabs in one app: Gallery and Cull (decision N15), and Practice.
+/// Four tabs in one app: Gallery and Cull (decision N15), Practice, and People.
 struct RootView: View {
     private enum Tab {
-        case gallery, cull, practice
+        case gallery, cull, practice, people
     }
 
     @Environment(AppServices.self) private var services
-    @State private var tab = LaunchOptions.startsOnPractice
+    @State private var tab = LaunchOptions.startsOnPeople
+        ? Tab.people : LaunchOptions.startsOnPractice
         ? Tab.practice : LaunchOptions.startsOnCull ? Tab.cull : Tab.gallery
 
     var body: some View {
@@ -25,6 +26,10 @@ struct RootView: View {
                 .id(services.generation)
                 .tabItem { Label("Practice", systemImage: "slider.horizontal.3") }
                 .tag(Tab.practice)
+            PeopleTab()
+                .id(services.generation)
+                .tabItem { Label("People", systemImage: "person.2") }
+                .tag(Tab.people)
         }
         .sheet(isPresented: $services.showsSettings) {
             SettingsView()

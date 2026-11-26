@@ -8,29 +8,44 @@ struct ViewerLaunch: Identifiable {
     let index: Int
 }
 
-/// One results screen: a search, a "like", or a day. State lives in `FeedModel`; this lays it out.
-/// Mirrors `renderGrid` in `gallery.js`.
+/// One results screen: a search, a "like", a day, a person or an unnamed group. State lives in
+/// `FeedModel`; this lays it out. Mirrors `renderGrid` in `gallery.js`.
+///
+/// `onOpen` pushes the screen a viewer button asks for (Similar, Whole day) onto whichever tab's
+/// stack this is in. A person or a group puts its own header in `accessory` and turns off the title
+/// (`showsHeader`); `reloadKey` loads the photos again when it changes, as when a review adds some.
 @MainActor
-struct ResultsView: View {
+struct ResultsView<Accessory: View>: View {
     @Environment(AppServices.self) private var services
-    @Environment(GalleryRouter.self) private var router
     @State private var feed: FeedModel
     @State private var viewer: ViewerLaunch?
     @State private var export: ExportLaunch?
     @State private var loadStart = ContinuousClock.now
     @State private var reportedReady = false
+    private let onOpen: (FeedModel.Source) -> Void
+    private let showsHeader: Bool
+    private let reloadKey: [Int]
+    private let accessory: Accessory
 
     private let columns = [GridItem(.adaptive(minimum: 112), spacing: 3)]
 
-    init(source: FeedModel.Source, services: AppServices) {
+    init(
+        source: FeedModel.Source, services: AppServices, showsHeader: Bool = true, reloadKey: [Int] = [],
+        onOpen: @escaping (FeedModel.Source) -> Void, @ViewBuilder accessory: () -> Accessory
+    ) {
         _feed = State(initialValue: FeedModel(
             source: source, client: services.client, settings: services.settings))
+        self.onOpen = onOpen
+        self.showsHeader = showsHeader
+        self.reloadKey = reloadKey
+        self.accessory = accessory()
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
-                header
+                if showsHeader { header }
+                accessory
                 content
             }
             .padding(.horizontal, 3)
@@ -48,8 +63,7 @@ struct ResultsView: View {
         }
         .fullScreenCover(item: $viewer) { launch in
             ViewerView(
-                photos: launch.photos, index: launch.index, source: feed.source,
-                onOpen: { router.push($0) })
+                photos: launch.photos, index: launch.index, source: feed.source, onOpen: onOpen)
         }
         .sheet(item: $export) { launch in
             ExportSheet(launch: launch)
@@ -59,6 +73,10 @@ struct ResultsView: View {
         .onChange(of: services.link.recoveries) {
             guard case .failed = feed.phase else { return }
             startTiming()
+            Task { await feed.load() }
+        }
+        .onChange(of: reloadKey) {
+            guard feed.phase != .idle else { return }
             Task { await feed.load() }
         }
     }
@@ -186,6 +204,12 @@ struct ResultsView: View {
         let item = PerfMarks.resultsReady(ms: ms, source: feed.source, count: feed.photos.count)
         let perf = services.perf
         Task { await perf.mark(item) }
+    }
+}
+
+extension ResultsView where Accessory == EmptyView {
+    init(source: FeedModel.Source, services: AppServices, onOpen: @escaping (FeedModel.Source) -> Void) {
+        self.init(source: source, services: services, onOpen: onOpen) { EmptyView() }
     }
 }
 

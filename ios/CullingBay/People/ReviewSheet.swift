@@ -1,0 +1,184 @@
+import CullingBayCore
+import SwiftUI
+
+/// "Is this Alex?": a grid of large face crops that may be one person. Every face counts as yes; a tap
+/// puts a red ✕ on it (no). Confirm sends the batch and shows the next until none are left. Unnamed
+/// groups that look like them come first, each with its own Yes and No. State lives in `ReviewModel`.
+struct ReviewSheet: View {
+    @Environment(AppServices.self) private var services
+    @Environment(\.dismiss) private var dismiss
+    @State private var model: ReviewModel
+    /// Called as the sheet goes away, with the person as the server last said, so their screen shows
+    /// the new counts.
+    let onFinish: (Person) -> Void
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+
+    init(person: Person, services: AppServices, onFinish: @escaping (Person) -> Void) {
+        self.onFinish = onFinish
+        let people = services.people
+        _model = State(initialValue: ReviewModel(
+            person: person, client: services.client, onDecline: { [people] in people.declineMaybe(forGroup: $0) }))
+    }
+
+    var body: some View {
+        NavigationStack {
+            content
+                .navigationTitle("Review")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+        }
+        .presentationDragIndicator(.visible)
+        .task { await model.load() }
+        .onDisappear { onFinish(model.person) }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch model.phase {
+        case .loading:
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .failed(let message):
+            VStack(spacing: 12) {
+                Text(message).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Button("Try again") { Task { await model.load() } }
+                    .buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .done:
+            done
+        case .reviewing:
+            reviewing
+        }
+    }
+
+    // MARK: Done
+
+    private var done: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 44)).foregroundStyle(.green)
+            Text("All done").font(.title3.bold())
+            if model.confirmedTotal + model.removedTotal > 0 {
+                Text("\(model.confirmedTotal) confirmed as \(model.person.name), \(model.removedTotal) not.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text("No suggestions for \(model.person.name) right now.").foregroundStyle(.secondary)
+            }
+            Button("Done") { dismiss() }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 8)
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Reviewing
+
+    private var reviewing: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(model.title).font(.title2.bold())
+                if !model.faces.isEmpty {
+                    Text("Every face counts as \(model.person.name). Tap the ones that are not.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(model.groups) { group in
+                    groupRow(group)
+                }
+                if !model.faces.isEmpty {
+                    LazyVGrid(columns: columns, spacing: 10) {
+                        ForEach(model.faces) { face in
+                            faceCell(face)
+                        }
+                    }
+                }
+                if !model.message.isEmpty {
+                    Text(model.message).font(.footnote).foregroundStyle(.red)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .padding(.bottom, 16)
+        }
+        .safeAreaInset(edge: .bottom) {
+            if !model.faces.isEmpty { confirmBar }
+        }
+    }
+
+    private func groupRow(_ group: FaceGroup) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                FaceCircle(face: group.cover).frame(width: 56, height: 56)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("These photos might be \(model.person.name)").font(.subheadline.weight(.semibold))
+                    Text(PeopleFormat.groupCaption(group)).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 10) {
+                Button("No") { Task { await model.answer(group: group, yes: false) } }
+                    .buttonStyle(.bordered)
+                Button("Yes") { Task { await model.answer(group: group, yes: true) } }
+                    .buttonStyle(.borderedProminent)
+                Spacer(minLength: 0)
+            }
+        }
+        .disabled(model.isWorking)
+        .padding(12)
+        .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func faceCell(_ face: FaceSuggestion) -> some View {
+        let isNo = model.isNo(face.id)
+        return Button { model.toggle(face.id) } label: {
+            FaceCircle(face: face.id, size: .large)
+                .opacity(isNo ? 0.45 : 1)
+                .overlay {
+                    if isNo {
+                        Image(systemName: "xmark")
+                            .font(.title.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(12)
+                            .background(Color.red, in: Circle())
+                    }
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Face \(face.id)")
+        .accessibilityValue(isNo ? "Not \(model.person.name)" : model.person.name)
+        .accessibilityHint("Double tap to switch")
+    }
+
+    private var confirmBar: some View {
+        VStack(spacing: 6) {
+            if model.moreAfterThis > 0 {
+                Text("\(model.moreAfterThis) more after these").font(.caption).foregroundStyle(.secondary)
+            }
+            Button {
+                Task { await model.confirm() }
+            } label: {
+                Text(confirmTitle).fontWeight(.semibold).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.isWorking)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    /// `Confirm 58 as Alex`, or `Confirm 56 as Alex, 2 not`.
+    private var confirmTitle: String {
+        let base = "Confirm \(model.yesCount) as \(model.person.name)"
+        return model.noCount > 0 ? "\(base), \(model.noCount) not" : base
+    }
+}

@@ -11,6 +11,9 @@ enum ImagePixels {
     static let view = 1616
     static let large = 3000
     static let tile = 2400
+    /// A face's picture, `small` and `large`.
+    static let face = 160
+    static let faceLarge = 480
 }
 
 /// A decoded picture that can cross from a background task to the main actor. The image is
