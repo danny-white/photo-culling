@@ -124,4 +124,4 @@ private struct ProgressBody: Encodable, Sendable {
     let lead: Int?
 }
 
-private struct EmptyBody: Encodable, Sendable {}
+struct EmptyBody: Encodable, Sendable {}

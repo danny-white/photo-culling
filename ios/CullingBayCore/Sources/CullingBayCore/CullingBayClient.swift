@@ -259,8 +259,8 @@ public actor CullingBayClient {
     /// Sends a JSON write (`POST` or `PUT`) with the `X-Culling-Bay` header the server requires.
     /// Writes never use the ETag cache. After a 2xx the cached cull day(s) in `stale` are
     /// dropped, so the next read doesn't offer a tag for a day that has just changed. A 409
-    /// becomes `.conflict`, a 503 `.unavailable`, any other non-2xx `.http`, each with the
-    /// server's `error` text.
+    /// becomes `.conflict` (or `PersonNameTaken`, when it names the person who has the name), a
+    /// 503 `.unavailable`, any other non-2xx `.http`, each with the server's `error` text.
     func writeJSON<Body: Encodable & Sendable, T: Decodable & Sendable>(
         method: String, path: String, body: Body, staling stale: Stale
     ) async throws -> T {
@@ -297,6 +297,9 @@ public actor CullingBayClient {
             return value
         case 409:
             let details = try? JSONDecoder().decode(WriteErrorBody.self, from: data)
+            if let person = details?.person {
+                throw PersonNameTaken(existing: person, message: details?.error)
+            }
             throw CullingBayError.conflict(message: details?.error, applied: details?.applied)
         case 503:
             throw CullingBayError.unavailable(message: Self.errorMessage(in: data))
@@ -384,10 +387,12 @@ public actor CullingBayClient {
         let error: String?
     }
 
-    /// A 409 from a write also says how many decisions are already in Lightroom.
+    /// A 409 from a write also says how many decisions are already in Lightroom, or, for a People
+    /// write whose name is taken, who has it.
     private struct WriteErrorBody: Decodable {
         let error: String?
         let applied: Int?
+        let person: Person?
     }
 
     private static func decode<T: Decodable>(_ data: Data) throws -> T {
