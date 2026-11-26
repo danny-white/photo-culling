@@ -181,6 +181,8 @@ private struct CullStripMain: View {
     @Environment(AppServices.self) private var services
     let session: CullSessionModel
     let picker: CullPickerModel
+    /// The photo the (i) sheet is open for: the frame on the big picture when the button was tapped.
+    @State private var detailsFor: PhotoInfoTarget?
 
     var body: some View {
         let item = picker.viewed
@@ -195,20 +197,30 @@ private struct CullStripMain: View {
             overlays(item)
         }
         .clipped()
+        .sheet(item: $detailsFor) { PhotoInfoSheet(target: $0) }
     }
 
     private func overlays(_ item: CullPickerFrame) -> some View {
         ZStack {
+            // The badges and the label let touches through to the photo; only the (i) button beside
+            // the label takes one.
             VStack(alignment: .leading, spacing: 4) {
                 CullBadgesView(badges: item.badges)
+                    .allowsHitTesting(false)
                 Spacer(minLength: 0)
-                Text(CullFormat.stem(item.frame.file) + " · \(item.index + 1)/\(picker.frames.count)")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.85))
+                HStack(spacing: 0) {
+                    Text(CullFormat.stem(item.frame.file) + " · \(item.index + 1)/\(picker.frames.count)")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .allowsHitTesting(false)
+                    PhotoInfoButton { detailsFor = PhotoInfoTarget(id: item.id, file: item.frame.file) }
+                        .foregroundStyle(Color.white.opacity(0.85))
+                }
+                // The button's 44 pt would lift the label; this keeps the label where it was.
+                .padding(.vertical, -14)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(10)
-            .allowsHitTesting(false)
             if let mark = item.mark {
                 CullMarkPill(mark: mark)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)

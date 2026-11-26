@@ -37,7 +37,9 @@ Scope and decisions: https://claude.ai/artifact/FQv95YRVDg1DK6tBvruvob (picks ma
   `CullingBayCore`. The shell is `CullingBayApp`, `RootView` (Gallery and Cull tabs) and
   `SettingsView` (a sheet with Done; the server address is a screen of its own with Save); `Gallery/` has the home, results and viewer screens and the save sheet;
   `Cull/` has the days list, the cards, the burst picker, the focus check and the end-of-day review; `Images/` loads and decodes
-  pictures; `Platform/` holds the PhotoKit and UIKit calls.
+  pictures; `Platform/` holds the PhotoKit and UIKit calls; `Shared/` has the (i) sheet of a photo's camera details (ISO,
+  shutter, aperture, lens, size, when and where), opened from the Cull card, the burst picker and the Gallery viewer. It asks
+  the PC when it opens and saves nothing on the phone.
 
 ## Phases
 

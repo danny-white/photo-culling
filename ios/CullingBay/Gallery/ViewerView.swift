@@ -12,6 +12,8 @@ struct ViewerView: View {
     @State private var showsInfo = true
     @State private var loadingHD = false
     @State private var export: ExportLaunch?
+    /// The photo the Details sheet is open for. (`showsInfo` above means the bars are showing.)
+    @State private var detailsFor: PhotoInfoTarget?
     /// The strip of photos (previous, current, next) is this far off centre while you swipe.
     @State private var stripOffset: CGFloat = 0
     /// A page turn is sliding the strip; the swap happens when it ends.
@@ -48,6 +50,7 @@ struct ViewerView: View {
         .sheet(item: $export) { launch in
             ExportSheet(launch: launch)
         }
+        .sheet(item: $detailsFor) { PhotoInfoSheet(target: $0) }
     }
 
     // MARK: Strip
@@ -148,8 +151,18 @@ struct ViewerView: View {
                         }
                     }
                 }
+                ViewerButton(title: "Details", systemImage: "info.circle") {
+                    if let photo = viewer.current {
+                        detailsFor = PhotoInfoTarget(id: photo.id, file: photo.file)
+                    }
+                }
+                .accessibilityLabel("Photo details")
             }
             .padding(.top, 4)
+            // Five labels share the width of an iPhone 17. "Whole day" is the longest, and from the next
+            // size up it is cut short, so the row stops growing here (the larger sizes still read in full
+            // in the text above, and VoiceOver reads each button's own label).
+            .dynamicTypeSize(...DynamicTypeSize.xLarge)
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, alignment: .leading)

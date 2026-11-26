@@ -16,28 +16,42 @@ struct CullCardsView: View {
     let session: CullSessionModel
     @State private var chrome = true
     @State private var arrival = CullArrival.decided
+    /// The photo the (i) sheet is open for: the frame the card showed when the button was tapped.
+    @State private var detailsFor: PhotoInfoTarget?
 
     var body: some View {
         VStack(spacing: 0) {
             if chrome { topBar }
             stage
             if let card = session.card, chrome {
+                // The line stays centred and one line tall. The 44 pt button stands on its end and
+                // reaches up over the photo's edge, not down: the star row is right below, and a
+                // tap that slipped onto its fifth star would keep the photo with five.
                 Text(card.fileLine)
                     .font(.system(.caption2, design: .monospaced))
                     .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 44)
                     .padding(.top, 6)
                     .padding(.bottom, 6)
                     .accessibilityHidden(true)
+                    .overlay(alignment: .bottomTrailing) {
+                        PhotoInfoButton(iconAlignment: .bottom) {
+                            detailsFor = PhotoInfoTarget(id: card.frame.id, file: card.frame.file)
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 4)
+                    }
                 CullControlsView(session: session, card: card)
                     .padding(.bottom, 4)
             }
         }
         .statusBarHidden(!chrome)
         .task(id: session.cursor) { await prefetch() }
+        .sheet(item: $detailsFor) { PhotoInfoSheet(target: $0) }
     }
 
     // MARK: Top
