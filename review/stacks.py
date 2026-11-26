@@ -32,10 +32,12 @@ BRACKET_LUM_SPREAD = 60.0    # mean luminance (0-255) between darkest and bright
 SOFT_RELATIVE = 0.35         # soft = under 35% of the sharpest normally exposed frame in its burst
 BLOWN_PCT = 15.0             # photo_cull.BLOWN_PCT_SEVERE: share of pure-white pixels
 DARK_LUM = 35.0              # photo_cull.MEAN_LUM_LOW: overall very dark
-KEEP_PER_HOUR = 10          # the soft budget: stacks to keep per hour of shooting. Your median was
-                             # 12.6, so 10 pushes on about half your days (15 rarely did; round two D15)
+KEEP_SHARE = 3               # the soft goal: a third of the day's stacks, rounded up. Danny's 14
+                             # finished days kept a median of ~30% of their stacks (25 Nov 2026)
+KEEP_PER_HOUR = 10          # but no more than this many per hour of shooting. His median was 12.6
+                             # an hour, so 10 pushes on about half his days (15 rarely did; round two D15)
 SHOOTING_GAP_CAP_S = 600     # a pause longer than 10 minutes counts as 10: lunch is not shooting
-KEEP_FLOOR = 5               # even a five-minute shoot may keep five
+KEEP_FLOOR = 5               # the hours cap is never below five: even a five-minute shoot may keep five
 PANO_MIN_FRAMES = 3
 PANO_PHASH_BITS = 20         # adjacent frames differ by at least this many of 64 phash bits
 PANO_MIN_SHIFT = 0.08        # and slide at least this fraction of the frame, all the same way
@@ -331,13 +333,40 @@ def shooting_hours(rows: list[dict]) -> float:
     return sum(min(b - a, SHOOTING_GAP_CAP_S) for a, b in zip(ts, ts[1:])) / 3600
 
 
-def keep_budget(rows: list[dict], stack_count: int | None = None) -> int:
-    """The soft limit: KEEP_PER_HOUR stacks per hour of shooting, at least KEEP_FLOOR, and never more
-    than the day has stacks (a one-photo day asks for one, not five), so at least 1 for any day
-    with photos. stack_count: the day's stacks, when the caller has built them already."""
+def keep_goal(rows: list[dict], stack_count: int | None = None) -> dict:
+    """The soft goal of stacks to keep, and how it was worked out: a third of the day's stacks
+    (KEEP_SHARE, rounded up), but no more than KEEP_PER_HOUR per hour of shooting (a cap that is
+    never below KEEP_FLOOR), so at least 1 for any day with photos and 0 for none.
+
+    Danny's choice on 25 Nov 2026. The hours rule alone asked a small day to keep every stack (the
+    floor of 5 met the stack count: 3 of 3) and ignored how many moments a day held; on his 14
+    finished days this one never asks for every stack of a day with 3 or more, and pushes on about
+    half of them. A pano or bracket is one stack, so keeping it counts once.
+
+    -> the `budget` of GET /m/api/day: {stacks, per_hour, hours, basis}. `basis` says which limit
+    set the goal, for the bar's note: "a third of 33 stacks", "10 an hour for 1.2 h of shooting",
+    "the minimum of 5, for 11 min of shooting". stack_count: the day's stacks, when the caller has
+    built them already."""
     if stack_count is None:
         stack_count = len(build_stacks(rows))
-    return min(stack_count, max(KEEP_FLOOR, math.ceil(KEEP_PER_HOUR * shooting_hours(rows))))
+    hours = shooting_hours(rows)
+    by_share = math.ceil(stack_count / KEEP_SHARE)
+    by_hours = max(KEEP_FLOOR, math.ceil(KEEP_PER_HOUR * hours))
+    goal = min(by_share, by_hours)
+    if stack_count == 0:
+        basis = ""
+    elif by_share <= by_hours:
+        basis = "the day’s one stack" if stack_count == 1 else f"a third of {stack_count} stacks"
+    else:
+        spent = f"{hours:.1f} h" if hours >= 1 else f"{max(1, round(hours * 60))} min"
+        basis = (f"{KEEP_PER_HOUR} an hour for {spent} of shooting" if by_hours > KEEP_FLOOR
+                 else f"the minimum of {KEEP_FLOOR}, for {spent} of shooting")
+    return {"stacks": goal, "per_hour": KEEP_PER_HOUR, "hours": round(hours, 2), "basis": basis}
+
+
+def keep_budget(rows: list[dict], stack_count: int | None = None) -> int:
+    """keep_goal's number alone."""
+    return keep_goal(rows, stack_count)["stacks"]
 
 
 def build_stacks(rows: list[dict], measure=None) -> list[dict]:

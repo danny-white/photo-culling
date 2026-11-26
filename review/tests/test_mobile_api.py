@@ -104,11 +104,12 @@ class MobileApi(unittest.TestCase):
         self.assertEqual(len(st), 16)
         self.assertTrue(all(f["af"] and 0 <= f["af"][0] <= 1 for s in st for f in s["frames"]))
         self.assertIsNone(body["progress"])
-        self.assertEqual(body["budget"], {"stacks": 5, "per_hour": 10, "hours": 0.19})   # an 11-minute shoot
+        self.assertEqual(body["budget"], {"stacks": 5, "per_hour": 10, "hours": 0.19,   # an 11-minute shoot
+                                          "basis": "the minimum of 5, for 11 min of shooting"})
         self.assertTrue(all(f["decision"] is None for s in st for f in s["frames"]))
         self.assertNotIn("path", st[0]["frames"][0])            # library paths stay on the server
 
-    def test_a_small_day_never_asks_to_keep_more_stacks_than_it_has(self):
+    def test_a_small_day_asks_for_a_third_of_its_stacks(self):
         small = [d for d in self.client.get("/m/api/days").get_json()["days"] if 0 < d["stacks"] < 5]
         if not small:
             self.skipTest("no day with fewer than five stacks in this library")
@@ -116,7 +117,8 @@ class MobileApi(unittest.TestCase):
             with self.subTest(d["day"]):
                 body = self.client.get(f"/m/api/day/{d['day']}").get_json()
                 self.assertEqual(len(body["stacks"]), d["stacks"])
-                self.assertEqual(body["budget"]["stacks"], d["stacks"])   # not the floor of 5
+                self.assertEqual(body["budget"]["stacks"], -(-d["stacks"] // 3))   # not every stack
+                self.assertTrue(body["budget"]["basis"])
 
     def test_ping_answers_with_no_body(self):
         r = self.client.get("/m/api/ping")
@@ -627,7 +629,7 @@ class MobileApi(unittest.TestCase):
              "mean_lum": ((int, float), None), "place": (str, None)}
     LR = {"pick": int, "rating": int, "by": str, "stars_by": str}
     DECISION = {"flag": str, "stars": (int, None), "note": str, "state": str, "outcome": (str, None)}
-    BUDGET = {"stacks": int, "per_hour": int, "hours": (int, float)}
+    BUDGET = {"stacks": int, "per_hour": int, "hours": (int, float), "basis": str}
     PROGRESS = {"pass": int, "cursor": int}
     CULL_DAY = {"day": str, "folder": str, "date": (str, None), "summary": (str, None), "budget": dict,
                 "stacks": list, "progress": (dict, None)}

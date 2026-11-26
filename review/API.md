@@ -144,7 +144,7 @@ decision's `state` is current.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `budget` | `{stacks, per_hour, hours}` | Soft limit of stacks to keep: `per_hour` (10) per hour of shooting, at least 5, and never more than the day's stack count (so 1 for a one-photo day; at least 1 for any day with photos). `hours` is the shooting time (pauses over 10 min count as 10), 2 decimals. |
+| `budget` | `{stacks, per_hour, hours, basis}` | The soft goal of stacks to keep (since 25 Nov 2026): a third of the day's stacks, rounded up, but no more than `per_hour` (10) per hour of shooting, a cap that is never below 5. So at least 1 for any day with photos, and 0 for none. `hours` is the shooting time (pauses over 10 min count as 10), 2 decimals. `basis` says which limit set the goal, for the note: `a third of 33 stacks`, `10 an hour for 1.2 h of shooting`, `the minimum of 5, for 11 min of shooting`, `the day’s one stack`; empty for a day with no stacks. |
 | `progress` | `{pass, cursor}?` | Where the last session stopped; null until the first progress save, including after Send. When present, `pass` and `cursor` are ints. |
 
 Stack (stacks are in shot order):

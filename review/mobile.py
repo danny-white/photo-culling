@@ -1037,8 +1037,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         return jsonify({
             "day": day, "folder": day.rsplit("/", 1)[-1], "date": day_date(day),
             "summary": day_summaries().get(f"{LIBRARY_ROOT}/{day}"),
-            "budget": {"stacks": stacks.keep_budget(rows, len(day_stacks)), "per_hour": stacks.KEEP_PER_HOUR,
-                       "hours": round(stacks.shooting_hours(rows), 2)},
+            "budget": stacks.keep_goal(rows, len(day_stacks)),
             "stacks": day_stacks,
             "progress": progress,
         })

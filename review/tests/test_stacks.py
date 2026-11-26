@@ -151,28 +151,47 @@ class Badges(unittest.TestCase):
 
 
 class Budget(unittest.TestCase):
+    """The soft goal: a third of the stacks, capped at 10 an hour of shooting (never below 5)."""
+
     def test_pauses_are_capped(self):
         rows = [row("A.ARW", 0), row("B.ARW", 1800), row("C.ARW", 3600 * 5)]   # two long pauses
         self.assertAlmostEqual(stacks.shooting_hours(rows), 20 / 60)          # 10 + 10 minutes
-        self.assertEqual(stacks.keep_budget(rows), 3)                         # 10 x 1/3 h, floored to 5, capped at 3 stacks
 
-    def test_ten_an_hour(self):
-        rows = [row(f"{i}.ARW", i * 60) for i in range(121)]                  # a frame a minute for 2 h
-        self.assertEqual(stacks.keep_budget(rows), 20)
+    def test_a_third_of_the_stacks(self):
+        rows = [row(f"{i}.ARW", i * 170) for i in range(33)]                  # 33 stacks in 1.5 h
+        self.assertEqual(len(stacks.build_stacks(rows)), 33)
+        goal = stacks.keep_goal(rows)
+        self.assertEqual(goal["stacks"], 11)                                  # not 10 x 1.5 h = 16
+        self.assertEqual(goal["basis"], "a third of 33 stacks")
+        self.assertEqual((goal["per_hour"], goal["hours"]), (10, 1.51))
+        self.assertEqual(stacks.keep_budget(rows), 11)
 
-    def test_the_floor_applies_when_there_are_stacks_to_spare(self):
-        rows = [row(f"{i}.ARW", i * 170) for i in range(8)]                   # 8 stacks in 20 minutes
-        self.assertEqual(len(stacks.build_stacks(rows)), 8)
-        self.assertEqual(stacks.keep_budget(rows), 5)
+    def test_ten_an_hour_caps_a_busy_shoot(self):
+        rows = [row(f"{i}.ARW", i * 60) for i in range(121)]                  # 121 stacks in 2 h
+        goal = stacks.keep_goal(rows)
+        self.assertEqual(goal["stacks"], 20)                                  # not a third, 41
+        self.assertEqual(goal["basis"], "10 an hour for 2.0 h of shooting")
 
-    def test_a_day_never_asks_for_more_stacks_than_it_has(self):
-        self.assertEqual(stacks.keep_budget([row("A.ARW", 0)]), 1)            # a one-photo day: keep it, not "of 5"
-        self.assertEqual(stacks.keep_budget([row("A.ARW", None)]), 1)         # no capture times at all
+    def test_the_hours_cap_is_never_below_five(self):
+        rows = [row(f"{i}.ARW", i * 60) for i in range(18)]                   # 18 stacks in 17 minutes
+        goal = stacks.keep_goal(rows)
+        self.assertEqual(goal["stacks"], 5)                                   # a third is 6; 10 x 0.28 h is 3
+        self.assertEqual(goal["basis"], "the minimum of 5, for 17 min of shooting")
+
+    def test_a_small_day_is_not_asked_to_keep_everything(self):
         three = [row("A.ARW", 0), row("B.ARW", 60), row("C.ARW", 120)]
-        self.assertEqual(stacks.keep_budget(three), 3)
-        self.assertEqual(stacks.keep_budget(three, 3), 3)                     # the caller may pass the count it has
-        self.assertEqual(stacks.keep_budget(three, 2), 2)
-        self.assertEqual(stacks.keep_budget([]), 0)                           # nothing to keep
+        self.assertEqual(stacks.keep_budget(three), 1)                        # was 3 of 3
+        self.assertEqual(stacks.keep_goal(three)["basis"], "a third of 3 stacks")
+        self.assertEqual(stacks.keep_budget(three, 3), 1)                     # the caller may pass the count it has
+        self.assertEqual(stacks.keep_budget(three, 4), 2)
+        self.assertEqual(stacks.keep_budget(three, 2), 1)
+
+    def test_any_day_with_photos_keeps_at_least_one(self):
+        self.assertEqual(stacks.keep_budget([row("A.ARW", 0)]), 1)            # a one-photo day: keep it
+        self.assertEqual(stacks.keep_goal([row("A.ARW", 0)])["basis"], "the day’s one stack")
+        self.assertEqual(stacks.keep_budget([row("A.ARW", None)]), 1)         # no capture times at all
+        empty = stacks.keep_goal([])
+        self.assertEqual((empty["stacks"], empty["basis"]), (0, ""))          # nothing to keep
 
     def test_a_burst_is_one_stack(self):
         burst = [row(f"{i}.ARW", i * 0.2) for i in range(10)]                 # ten frames in two seconds

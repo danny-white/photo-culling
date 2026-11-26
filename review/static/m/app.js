@@ -3,7 +3,7 @@
    Plain JavaScript, no build step. Talks to /m/api (review/mobile.py); every tap is saved on the
    PC at once, through a retry queue that survives a dropped connection or a reload.
    One pass per day: days -> cards (details rail, burst picker, focus check) -> rejects review,
-   with a soft budget of 10 kept stacks an hour of shooting. */
+   with a soft goal of stacks to keep: a third of the day's, at most 10 an hour of shooting. */
 (() => {
 'use strict';
 if (window.cbPhone) return;   // a phone gets desktop.js's page pointing to the app
@@ -729,16 +729,19 @@ async function sendAll() {
 
 function vLoading(msg) { return top(backBtn('days', 'Days'), 'Culling Bay') + '<div class="empty-state">' + esc(msg) + '</div>'; }
 
-// The budget: 10 stacks an hour of shooting (from the server), counted per stack, so a whole
+// The goal (the server's budget): a third of the day's stacks, at most 10 an hour of shooting, and
+// `basis` says which set it. It is counted per stack, so a whole
 // panorama or bracket is one. Stacks you kept in Lightroom count too. It is soft: going over
 // shows in amber, and the review lists your kept stacks to trim.
 const budgetOf = () => (S.day && S.day.budget ? S.day.budget.stacks : 0);
+// `Goal 11: a third of 33 stacks`; a server from before 25 Nov has no basis.
+const goalWhy = () => { const g = S.day.budget; return g.basis ? 'Goal ' + g.stacks + ': ' + g.basis : g.per_hour + ' stacks an hour of shooting (' + g.hours + ' h)'; };
 const keptCount = () => S.stacks.filter(s => { const st = status(s); return st.done && st.v !== 'reject'; }).length;
 function budgetBar() {
   const b = budgetOf();
   if (!b) return '';
   const n = keptCount(), over = n - b;
-  return '<div class="budget' + (over > 0 ? ' over' : '') + '" id="budget" title="' + esc(S.day.budget.per_hour + ' stacks an hour of shooting (' + S.day.budget.hours + ' h)') + '"><span>' +
+  return '<div class="budget' + (over > 0 ? ' over' : '') + '" id="budget" title="' + esc(goalWhy()) + '"><span>' +
     (over > 0 ? 'Kept ' + n + ' · ' + over + ' over ' + b : 'Kept ' + n + ' of ' + b) + '</span><span class="budget-bar"><i style="width:' + Math.min(100, n / b * 100).toFixed(1) + '%"></i></span></div>';
 }
 const overNote = () => { const b = budgetOf(), over = keptCount() - b; return b && over > 0 ? ' · ' + over + ' over this shoot’s ' + b : ''; };
@@ -949,8 +952,8 @@ function vSummary() {
   const trim = over > 0 ? '<p class="sec">Kept · ' + keptN + ' of ' + b + '</p><div class="sm-grid">' + mine.map(([s, i]) => '<button class="sm-th kept" data-act="drop" data-stack="' + i +
       '" aria-label="Drop ' + esc(stem(shown(s).file)) + '"><img src="' + img(shown(s).id, 'thumb') + '" alt="" loading="lazy">' +
       (s.frames.length > 1 ? '<span class="sm-lab">' + s.frames.filter(f => isPick(S.dec[f.id])).length + ' of ' + s.frames.length + '</span>' : '') + '</button>').join('') +
-      '</div><p class="note">' + over + ' over this shoot’s budget of ' + b + ' (' + S.day.budget.per_hour + ' stacks an hour of shooting). ' + 'Click a stack to drop it.</p>'
-    : b ? '<p class="note">Kept ' + keptN + ' of this shoot’s budget of ' + b + '.</p>' : '';
+      '</div><p class="note">' + over + ' over this shoot’s goal. ' + esc(goalWhy()) + '. Click a stack to drop it.</p>'
+    : b ? '<p class="note">Kept ' + keptN + ' of this shoot’s goal of ' + b + ' (' + esc(S.day.budget.basis || S.day.budget.per_hour + ' an hour of shooting') + ').</p>' : '';
   const sendLabel = unsent ? 'Send ' + unsent + ' to Lightroom' : queued ? 'Waiting for Lightroom' : landed ? 'In Lightroom' : 'Send to Lightroom';
   return top(backBtn('back-cull', 'Cards'), dayTitle(S.day), open < 0 ? 'Day finished' : 'Rejects so far',
       '<div class="tools"><button class="ico" data-act="grid" aria-label="Show every photo in a grid">' + IC.grid + '</button></div>') +
