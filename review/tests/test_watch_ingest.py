@@ -240,8 +240,8 @@ class NewAndBusyFolders(WatcherCase):
         self.assertEqual(self.log_lines("done: "), [f"done: {d} -> {self.root}/inbox/pending.tsv"])
         # the follow-up steps run in order, then the export, then the check that it is finished
         names = [re.sub(r"^photo_cull\.py ", "", c).split()[0] for c in self.calls()]
-        self.assertEqual(names, ["folder-state", "folder-state", "run", "embed", "embed-images", "faces", "geotag",
-                                 "shotinfo", "daysum", "review/previews.py", "export", "folder-state"])
+        self.assertEqual(names, ["folder-state", "folder-state", "run", "embed", "embed-images", "faces", "faces-group",
+                                 "geotag", "shotinfo", "daysum", "review/previews.py", "export", "folder-state"])
 
     def test_a_marked_folder_is_left_alone(self):
         d = self.folder("2026-10-01")
@@ -400,6 +400,17 @@ class RetryBackoff(WatcherCase):
         self.poll()
         self.assertIsNone(self.marker_text(d))
         self.assertEqual(self.log_lines("export FAILED for "), [f"export FAILED for {d} -- leaving unmarked, will retry next poll"])
+
+    def test_a_failed_faces_group_is_logged_and_the_folder_still_finishes(self):
+        d = self.folder("2026-10-01")
+        (self.stub / "rc.faces-group").write_text("1")
+        self.poll()
+        self.assertEqual(self.log_lines("faces-group FAILED for "),
+                         [f"faces-group FAILED for {d} (non-fatal, continuing)"])
+        self.assertEqual(self.marker_text(d), self.signature(d))
+        names = self.step_names()
+        self.assertEqual(names[names.index("faces-group"):names.index("faces-group") + 2], ["faces-group", "geotag"])
+        self.assertIn(f"photo_cull.py faces-group --db {self.db}", self.calls())    # the whole library: no --folder
 
     def test_unreadable_state_leaves_it_unmarked(self):
         d = self.folder("2026-10-01")
@@ -1015,7 +1026,8 @@ class ReplacedInPlace(WatcherCase):
 class RetryOnly(WatcherCase):
     """A visit whose only reason is failed photos with tries left runs the retries and sends the
     folder to Lightroom again only if a photo was recovered."""
-    STEPS = ("embed", "embed-images", "faces", "geotag", "shotinfo", "daysum", "review/previews.py", "export")
+    STEPS = ("embed", "embed-images", "faces", "faces-group", "geotag", "shotinfo", "daysum", "review/previews.py",
+             "export")
 
     def finished_with_retries(self, rows=3, retryable=2):
         """A finished folder (current marker) that then gets failed rows again."""

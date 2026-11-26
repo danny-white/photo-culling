@@ -257,6 +257,18 @@ CREATE TABLE IF NOT EXISTS faces_checked (
     checked_at    TEXT,
     PRIMARY KEY (path, face_version)
 );
+-- Which group each face is in (cmd_faces_group). Label-blind: it never reads what Danny named, so
+-- regrouping can't undo a correction. grp is the group's smallest face id; NULL = in no group.
+-- One row per face at FACE_VERSION, so the table is also the set of faces the grouping saw.
+CREATE TABLE IF NOT EXISTS face_groups (
+    face_id       INTEGER PRIMARY KEY,
+    grp           INTEGER
+);
+-- faces_count, faces_max_id, version (FACE_GROUP_VERSION) and computed_at of the last grouping run.
+CREATE TABLE IF NOT EXISTS face_groups_meta (
+    k             TEXT PRIMARY KEY,
+    v             TEXT
+);
 """
 
 
@@ -949,6 +961,15 @@ FACE_DET_LONG = 1600     # detect on the picture at up to this long side ...
 FACE_DET_SMALL = 640     # ... plus a 640 pass for very large faces; the two are merged with NMS
 FACE_DET_THRESH = 0.5
 FACE_NMS_IOU = 0.4
+# Face groups (`faces-group`): how the faces of the whole library are clustered into people-to-be.
+# Measured on a 300-photo spike (review/PEOPLE.md): the same person across days sat 0.55-0.88 alike,
+# different people at most 0.24, and sisters photographed together 0.48-0.50.
+FACE_GROUP_VERSION = "g1"
+FACE_GOOD_SCORE = 0.7    # a good face: detector score at least this ...
+FACE_GOOD_SHARP = 40.0   # ... and aligned-face sharpness at least this. Only good faces are clustered.
+FACE_DAY_CUT = 0.6       # within one folder, good faces join at cosine distance up to this (average linkage)
+FACE_ACROSS_CUT = 0.55   # across folders, day-clusters' mean vectors join at cosine distance up to this
+FACE_ATTACH_SIM = 0.45   # a loose face joins the nearest group's mean at cosine similarity of at least this
 ARC_DST = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
                     [41.5493, 92.3655], [70.7299, 92.2041]], np.float32)   # ArcFace's 112x112 landmark template
 
@@ -2314,6 +2335,157 @@ def cmd_faces(args):
         sys.exit(1)
 
 
+def group_faces(vecs: np.ndarray, folders: np.ndarray, good: np.ndarray, ids: np.ndarray, say=lambda msg: None):
+    """Cluster faces into groups: (grp, stats). `vecs` are the faces' unit vectors (n x 512), `folders`
+    an int per face for the folder (day) it was shot in, `good` which faces are clustered at all and
+    `ids` the face ids. grp[i] is the group's smallest face id, or -1 for a face in no group.
+
+      1. per folder, the good faces cluster by average linkage on cosine distance, cut at FACE_DAY_CUT;
+      2. across folders, each day-cluster of 2+ faces is its normalised mean, and those means cluster the
+         same way, cut at FACE_ACROSS_CUT. Two day-clusters from one folder are 2.0 apart, so people
+         photographed together never join (stage 1 already kept them apart);
+      3. the rest (faces alone in their day-cluster, and weak faces) join the nearest group's mean at
+         FACE_ATTACH_SIM or more, else stay out.
+    `say` gets a progress line per stage."""
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import squareform
+    n = len(ids)
+    gi = np.full(n, -1, np.int64)               # group number (0..G-1) per face, -1 for none
+    stats = {"good": int(good.sum()), "folders": 0, "day_clusters": 0, "multi": 0, "groups": 0, "attached": 0}
+
+    # 1. per folder
+    good_idx = np.flatnonzero(good)
+    order = good_idx[np.argsort(folders[good_idx], kind="stable")]
+    runs = np.split(order, np.flatnonzero(np.diff(folders[order])) + 1) if len(order) else []
+    multi: list[tuple[int, np.ndarray]] = []    # (folder, member indices) of the day-clusters with 2+ faces
+    day_clusters = 0
+    for r, run in enumerate(runs, 1):
+        if len(run) == 1:
+            labels = np.ones(1, int)
+        else:
+            labels = fcluster(linkage(vecs[run], method="average", metric="cosine"), t=FACE_DAY_CUT, criterion="distance")
+        by_label = np.argsort(labels, kind="stable")
+        for part in np.split(by_label, np.flatnonzero(np.diff(labels[by_label])) + 1):
+            day_clusters += 1
+            if len(part) >= 2:
+                multi.append((int(folders[run[0]]), run[part]))
+        if r % 200 == 0 and r != len(runs):
+            say(f"[1/3] per day: {r}/{len(runs)} folders")
+    stats.update(folders=len(runs), day_clusters=day_clusters, multi=len(multi))
+    say(f"[1/3] per day: {len(runs)} folders -> {day_clusters} day-clusters, {len(multi)} with 2 or more faces")
+
+    # 2. across folders
+    k = len(multi)
+    if k:
+        means = np.stack([vecs[m].mean(axis=0) for _, m in multi])
+        means /= np.maximum(np.linalg.norm(means, axis=1, keepdims=True), 1e-12)
+        if k == 1:
+            across = np.ones(1, int)
+        else:
+            fol = np.array([f for f, _ in multi])
+            dist = np.clip(1.0 - means @ means.T, 0.0, 2.0)
+            dist[fol[:, None] == fol[None, :]] = 2.0
+            np.fill_diagonal(dist, 0.0)
+            across = fcluster(linkage(squareform(dist, checks=False), method="average"), t=FACE_ACROSS_CUT,
+                              criterion="distance")
+            del dist
+        for (_, members), g in zip(multi, across):
+            gi[members] = g - 1
+    G = int(gi.max()) + 1 if k else 0
+    stats["groups"] = G
+    say(f"[2/3] across days: {k} day-clusters -> {G} groups")
+
+    # 3. the rest join the nearest group
+    if G:
+        sel = np.flatnonzero(gi >= 0)
+        o = sel[np.argsort(gi[sel], kind="stable")]
+        sums = np.add.reduceat(vecs[o], np.flatnonzero(np.r_[True, np.diff(gi[o]) != 0]), axis=0)
+        sums /= np.maximum(np.linalg.norm(sums, axis=1, keepdims=True), 1e-12)
+        loose = np.flatnonzero(gi < 0)
+        for start in range(0, len(loose), 4096):
+            part = loose[start:start + 4096]
+            sims = vecs[part] @ sums.T
+            best = sims.argmax(axis=1)
+            near = sims[np.arange(len(part)), best] >= FACE_ATTACH_SIM
+            gi[part[near]] = best[near]
+            stats["attached"] += int(near.sum())
+    say(f"[3/3] attach: {stats['attached']} loose faces joined a group, {int((gi < 0).sum())} are in none")
+
+    grp = np.full(n, -1, np.int64)
+    if G:
+        key = np.full(G, np.iinfo(np.int64).max, np.int64)
+        member = gi >= 0
+        np.minimum.at(key, gi[member], ids[member])
+        grp[member] = key[gi[member]]
+    return grp, stats
+
+
+def cmd_faces_group(args):
+    """Group every face at FACE_VERSION by who it looks like (see group_faces) into `face_groups`, which
+    the review server's People index reads. It never reads what Danny named, so a rerun can't undo a
+    correction. It looks at the whole library, not a folder, because a new shoot can join an old group.
+    Skipped when the faces are the same as at the last run (same count and highest id), unless --force."""
+    if not args.db.exists():
+        sys.exit(f"No database at {args.db}. Run `photo_cull.py run <folder>` first.")
+    conn = connect(args.db)
+    try:
+        _faces_group(conn, args)
+    finally:
+        conn.close()
+
+
+def _faces_group(conn, args):
+    t0 = time.time()
+    count, top = conn.execute("SELECT COUNT(*), MAX(id) FROM faces WHERE face_version=?", (FACE_VERSION,)).fetchone()
+    if not count:
+        print(f"No faces at {FACE_VERSION} yet. Run `faces` first.")
+        return
+    meta = {r["k"]: r["v"] for r in conn.execute("SELECT k, v FROM face_groups_meta")}
+    if (not args.force and meta.get("version") == FACE_GROUP_VERSION and meta.get("faces_count") == str(count)
+            and meta.get("faces_max_id") == str(top)):
+        print(f"Nothing to do: the {count} faces are as they were at the last grouping ({meta.get('computed_at')}).")
+        return
+
+    print(f"Loading {count} faces ...", flush=True)
+    ids, scores, sharps, folder_of = [], [], [], []
+    vecs = np.zeros((count + 4096, 512), np.float32)   # the backfill may add rows while we read: room for a few
+    folders: dict[str, int] = {}
+    n = 0
+    for r in conn.execute("SELECT id, path, score, sharp, vector FROM faces WHERE face_version=? ORDER BY id",
+                          (FACE_VERSION,)):
+        if n == len(vecs):
+            vecs = np.concatenate([vecs, np.zeros_like(vecs)])
+        blob, usable = r["vector"], r["vector"] is not None and len(r["vector"]) == 512 * 4
+        if usable:
+            vecs[n] = unpack_vector(blob)
+        ids.append(r["id"])
+        scores.append(r["score"] if usable and r["score"] is not None else -1.0)   # no vector, or no score: never "good"
+        sharps.append(r["sharp"] if r["sharp"] is not None else -1.0)
+        folder_of.append(folders.setdefault(os.path.dirname(r["path"]), len(folders)))
+        n += 1
+    vecs = vecs[:n]
+    ids, scores, sharps, folder_of = (np.array(a) for a in (ids, scores, sharps, folder_of))
+    norms = np.linalg.norm(vecs, axis=1)
+    vecs /= np.maximum(norms, 1e-12)[:, None]
+    good = (scores >= FACE_GOOD_SCORE) & (sharps >= FACE_GOOD_SHARP) & (norms > 0)
+    print(f"Grouping {n} faces ({int(good.sum())} good) from {len(folders)} folders.", flush=True)
+
+    grp, _ = group_faces(vecs, folder_of, good, ids, say=lambda m: print(m, flush=True))
+
+    sizes = np.unique(grp[grp >= 0], return_counts=True)[1]
+    computed_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")   # a rerun in the same second still differs
+    with conn:   # one transaction: the server sees the old grouping or the new one, never half
+        conn.execute("DELETE FROM face_groups")
+        conn.executemany("INSERT INTO face_groups(face_id, grp) VALUES(?,?)",
+                         [(int(i), int(g) if g >= 0 else None) for i, g in zip(ids, grp)])
+        conn.execute("DELETE FROM face_groups_meta")
+        conn.executemany("INSERT INTO face_groups_meta(k, v) VALUES(?,?)",
+                         [("faces_count", str(n)), ("faces_max_id", str(int(ids.max()))),
+                          ("version", FACE_GROUP_VERSION), ("computed_at", computed_at)])
+    print(f"\nDone: {len(sizes)} groups ({int((sizes >= 3).sum())} with 3 or more faces), "
+          f"{int(sizes.sum())} of {n} faces grouped, in {_fmt_eta(time.time() - t0)}.")
+
+
 # ----------------------------------------------------------------------------
 # Geotags: GPS from EXIF, and an offline place name from GeoNames
 # ----------------------------------------------------------------------------
@@ -2861,6 +3033,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "inserted, which CHANGES THEIR FACE IDS (people and labels in annotations.db point "
                          "at them). Default: skip them, so a killed run resumes for free.")
     fa.set_defaults(func=cmd_faces)
+
+    fg = sub.add_parser("faces-group", help="Group every face (from `faces`) by who it looks like into "
+                        "`face_groups`, for Culling Bay's People. Skipped when no face was added.")
+    fg.add_argument("--db", type=Path, default=Path(DB_DEFAULT))
+    fg.add_argument("--force", action="store_true",
+                    help="Group again even if the faces are the same as at the last run.")
+    fg.set_defaults(func=cmd_faces_group)
 
     si = sub.add_parser("shotinfo", help="Read drive mode, sequence and AF point from the camera's tags, "
                         "for Culling Bay's exact bursts and brackets and its focus check.")

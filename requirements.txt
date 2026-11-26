@@ -13,3 +13,4 @@ Flask>=3.0         # local review + run-monitor web app (review/server.py)
 waitress>=3        # serves it, keeping connections open (the dev server closes every one)
 onnxruntime>=1.20  # CLIP picture embeddings on the CPU (photo_cull.py embed-images; model in models/, see CLIP_DIR)
 tokenizers>=0.20   # CLIP's text half, for typed searches against the pictures
+scipy>=1.11        # hierarchical clustering of face vectors (photo_cull.py faces-group)

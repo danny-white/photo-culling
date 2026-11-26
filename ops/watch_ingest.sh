@@ -380,6 +380,12 @@ for folder in "${todo[@]}"; do
         log "faces FAILED for $folder (non-fatal, continuing)"
     fi
 
+    # Best-effort grouping of faces into people-to-be. It looks at the whole library, not this folder
+    # (a new shoot can join an old group), and does nothing when no face was added. Not fatal.
+    if ! "$PY" photo_cull.py faces-group --db "$DB" >> "$LOG" 2>&1; then
+        log "faces-group FAILED for $folder (non-fatal, continuing)"
+    fi
+
     # Best-effort GPS + nearest town, for Culling Bay Mobile's places. Not fatal either.
     if ! "$PY" photo_cull.py geotag --db "$DB" --folder "$folder" >> "$LOG" 2>&1; then
         log "geotag FAILED for $folder (non-fatal, continuing)"
