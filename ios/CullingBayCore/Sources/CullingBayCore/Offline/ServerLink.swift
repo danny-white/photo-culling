@@ -31,8 +31,9 @@ public protocol WorkOfflineSetting: AnyObject {
 /// it cannot.
 ///
 /// Traffic teaches it too: a request that fails at the network level makes it `unreachable` at
-/// once, and any HTTP answer makes it `online`, unless Work offline is on. A cancelled request
-/// says nothing.
+/// once, and any HTTP answer makes it `online`, unless Work offline is on. A request that only
+/// timed out asks for a probe instead: a slow answer (a cold RAW decode on a busy NAS) is not a
+/// lost PC, and the probe settles which it was. A cancelled request says nothing.
 @MainActor
 @Observable
 public final class ServerLink {
@@ -94,6 +95,8 @@ public final class ServerLink {
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     /// Which of `pollDelays` the next poll waits.
     @ObservationIgnored private var pollStep = 0
+    /// A probe is out (for tests).
+    var probeIsOut: Bool { probeTask != nil }
 
     /// `network` is the real transport, which the probe goes out on. `setting` says whether Work
     /// offline was left on; with it on, the link starts `forcedOffline` and never probes.
@@ -110,6 +113,9 @@ public final class ServerLink {
         gate = ServerLinkGate(state: first, sleep: sleep)
         gate.setListener { [weak self] in
             Task { @MainActor in self?.follow() }
+        }
+        gate.setDoubter { [weak self] in
+            Task { @MainActor in self?.doubt() }
         }
     }
 
@@ -211,6 +217,13 @@ public final class ServerLink {
     }
 
     // MARK: Probing
+
+    /// A request timed out while the PC was thought reachable: probe now (unless one is out) to
+    /// learn whether it was only slow. The state stays as it is until the probe answers.
+    private func doubt() {
+        guard state == .online, !isStopped else { return }
+        startProbe()
+    }
 
     /// Starts a probe unless one is out already, and puts the polls back to the shortest wait.
     private func probeNow() {
@@ -320,18 +333,25 @@ public final class ServerLink {
         return (error as? URLError)?.code == .cancelled
     }
 
-    /// A request that got no answer from the network: a timeout, a refused or lost connection, no
-    /// network, a name that would not resolve. Not an HTTP status, and not a cancelled request.
+    /// A request that got no answer from the network: a refused or lost connection, no network, a
+    /// name that would not resolve. Not a timeout (`isTimeout`), not an HTTP status, and not a
+    /// cancelled request.
     public nonisolated static func isNetworkFailure(_ error: any Error) -> Bool {
         guard let error = error as? URLError else { return false }
         switch error.code {
-        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost, .dnsLookupFailed,
+        case .cannotFindHost, .cannotConnectToHost, .networkConnectionLost, .dnsLookupFailed,
              .notConnectedToInternet, .internationalRoamingOff, .callIsActive, .dataNotAllowed,
              .cannotLoadFromNetwork, .secureConnectionFailed:
             return true
         default:
             return false
         }
+    }
+
+    /// A request that waited its whole time limit for an answer. The PC may be gone, or only slow
+    /// (a RAW decode, a big download), so it calls for a probe, not a verdict.
+    public nonisolated static func isTimeout(_ error: any Error) -> Bool {
+        (error as? URLError)?.code == .timedOut
     }
 }
 
@@ -343,6 +363,7 @@ public final class ServerLinkGate: Sendable {
         var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
         var nextWaiter = 0
         var listener: (@Sendable () -> Void)?
+        var doubter: (@Sendable () -> Void)?
     }
 
     private let shared: Mutex<Shared>
@@ -358,6 +379,17 @@ public final class ServerLinkGate: Sendable {
     /// Told when traffic changes the state.
     func setListener(_ listener: @escaping @Sendable () -> Void) {
         shared.withLock { $0.listener = listener }
+    }
+
+    /// Told when a request timed out, so the link can probe.
+    func setDoubter(_ doubter: @escaping @Sendable () -> Void) {
+        shared.withLock { $0.doubter = doubter }
+    }
+
+    /// A request timed out: ask the link to probe. The state is left as it is.
+    func doubt() {
+        let doubter = shared.withLock { $0.doubter }
+        doubter?()
     }
 
     /// Sets the state. Leaving `checking` lets the waiting requests go.
@@ -451,7 +483,13 @@ public struct ServerLinkTransport: HTTPTransport {
             gate.heard(answer: true)
             return answer
         } catch {
-            if !Task.isCancelled, ServerLink.isNetworkFailure(error) { gate.heard(answer: false) }
+            if !Task.isCancelled {
+                if ServerLink.isNetworkFailure(error) {
+                    gate.heard(answer: false)
+                } else if ServerLink.isTimeout(error) {
+                    gate.doubt()
+                }
+            }
             throw error
         }
     }

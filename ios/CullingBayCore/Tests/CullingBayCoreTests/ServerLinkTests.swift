@@ -18,6 +18,8 @@ final class FakePC: HTTPTransport, Sendable {
         case failing(URLError.Code)
         /// No answer at all until the request is cancelled, as a network that swallows packets.
         case silent
+        /// The PC answers pings at once, but every other request times out: a slow decode.
+        case slow
         case status(Int)
     }
 
@@ -56,6 +58,9 @@ final class FakePC: HTTPTransport, Sendable {
             throw URLError(.timedOut)
         case .status(let status):
             return jsonResponse(#"{"error":"busy"}"#, for: request, status: status)
+        case .slow:
+            if path == "/m/api/ping" { return (Data(), makeResponse(for: request, status: 204)) }
+            throw URLError(.timedOut)
         case .up:
             if path == "/m/api/ping" { return (Data(), makeResponse(for: request, status: 204)) }
             if path == "/m/api/days" { return jsonResponse(daysResponseJSON([dayFullJSON]), for: request) }
@@ -248,7 +253,7 @@ struct ServerLinkTests {
         #expect(rig.link.gate.state == .online)
         #expect(rig.link.state == .online)
 
-        rig.pc.mode = .failing(.timedOut)
+        rig.pc.mode = .failing(.cannotConnectToHost)
         await #expect(throws: CullingBayError.self) { try await rig.client.galleryDay(LinkRig.unsavedDay) }
         #expect(rig.link.gate.state == .unreachable)                          // at once, for the next request
         let link = rig.link
@@ -259,8 +264,40 @@ struct ServerLinkTests {
         #expect(rig.pc.log.count == before)
     }
 
+    @Test func aRequestThatOnlyTimedOutLeavesThePCOnlineWhenTheProbeFindsIt() async throws {
+        let rig = try LinkRig(.up)
+        await rig.link.start()
+        #expect(rig.link.state == .online)
+        let pings = rig.pc.pingCount
+
+        rig.pc.mode = .slow                                                     // a cold decode on a busy NAS
+        await #expect(throws: CullingBayError.self) { try await rig.client.galleryDay(LinkRig.unsavedDay) }
+        let pc = rig.pc
+        #expect(await eventually { pc.pingCount == pings + 1 })                // it asked
+        let link = rig.link
+        #expect(await eventually { await link.probeIsOut == false })
+        #expect(rig.link.gate.state == .online)                                 // and the PC answered
+        #expect(rig.link.state == .online)
+        #expect(rig.reached.count == 0)
+    }
+
+    @Test func aRequestThatTimedOutWithThePCGoneMakesItUnreachableAfterTheProbe() async throws {
+        let rig = try LinkRig(.up)
+        await rig.link.start()
+        rig.pc.mode = .failing(.timedOut)                                       // the PC has gone silent
+        await #expect(throws: CullingBayError.self) { try await rig.client.galleryDay(LinkRig.unsavedDay) }
+        let link = rig.link
+        #expect(await eventually { await link.state == .unreachable })
+        let before = rig.pc.log.count
+        await #expect(throws: unreachable) { try await rig.client.galleryDay(LinkRig.unsavedDay) }
+        #expect(rig.pc.log.count == before)                                     // the next one does not go
+    }
+
     @Test func eachKindOfNetworkFailureCounts() {
-        for code: URLError.Code in [.timedOut, .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet,
+        #expect(!ServerLink.isNetworkFailure(URLError(.timedOut)))              // a timeout asks for a probe instead
+        #expect(ServerLink.isTimeout(URLError(.timedOut)))
+        #expect(!ServerLink.isTimeout(URLError(.cannotConnectToHost)))
+        for code: URLError.Code in [.cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet,
                                     .cannotFindHost, .dnsLookupFailed] {
             #expect(ServerLink.isNetworkFailure(URLError(code)))
         }
