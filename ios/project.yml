@@ -34,6 +34,8 @@ targets:
         # XcodeGen writes literal 1.0 / 1 unless told otherwise, which would hide the build number.
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # The commit the build came from, shown in Settings; ios/build-ipa.sh passes CB_GIT_REVISION.
+        CBGitRevision: $(CB_GIT_REVISION)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         NSPhotoLibraryAddUsageDescription: Save the photos you choose to your photo library.

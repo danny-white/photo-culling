@@ -33,6 +33,13 @@ struct SettingsView: View {
                     Text("A yellow box where the camera focused, on the card, in the burst picker and in the 1:1 check. Changes at once.")
                 }
                 offlineSection
+                if let version = AppVersion.label(info: Bundle.main.infoDictionary) {
+                    Section {
+                        LabeledContent("Version", value: version)
+                    } footer: {
+                        Text("The same number as on the builds page, /m/ios/ on the PC.")
+                    }
+                }
             }
             // Offline settings apply at once, like the AF switch: each one syncs again, after a pause.
             .onChange(of: offlineEnabled) { services.offline.settingsChanged() }

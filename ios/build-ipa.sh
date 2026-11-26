@@ -43,6 +43,8 @@ if [[ -n "$(git --no-optional-locks -C "$repo" status --porcelain --untracked-fi
     revision+='-dirty'
 fi
 ssh_opts=(-o HostKeyAlias=192.168.1.75)
+# The revision reaches the Mac's shell below, so it must be the plain short hash git gives.
+[[ "$revision" =~ ^[0-9a-f]{4,40}(-dirty)?$ ]] || { printf 'Unexpected git revision: %s\n' "$revision" >&2; exit 1; }
 
 run() {
     if ((dry_run)); then
@@ -69,13 +71,14 @@ run rsync -az --exclude='.build/' --exclude='build/' --exclude='*.xcodeproj/' \
     "$repo/ios/" "$host:photo-culling-ios/"
 
 # zsh's login startup loads the Mac environment; bash runs the portable script on stdin.
-# Arguments interpolated here are integers generated above, never user shell text.
+# Arguments interpolated here are integers and the checked revision generated above, never user shell text.
 run_stdin ssh "${ssh_opts[@]}" "$host" \
-    "zsh -lc 'exec bash -s -- $build $test_core'" <<'MAC_BUILD'
+    "zsh -lc 'exec bash -s -- $build $test_core $revision'" <<'MAC_BUILD'
 set -euo pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 build=$1
 test_core=$2
+revision=$3
 cd "$HOME/photo-culling-ios"
 command -v xcodebuild >/dev/null || { echo 'Missing xcodebuild: install and select full Xcode.' >&2; exit 1; }
 xcodebuild -version || { echo 'Xcode is not ready: check xcode-select and the Xcode license.' >&2; exit 1; }
@@ -91,7 +94,7 @@ rm -rf build/CullingBay.xcarchive build/Payload
 rm -f build/CullingBay.ipa
 xcodebuild -project CullingBay.xcodeproj -scheme CullingBay -configuration Release \
     -sdk iphoneos -archivePath build/CullingBay.xcarchive archive \
-    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CURRENT_PROJECT_VERSION="$build"
+    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CURRENT_PROJECT_VERSION="$build" CB_GIT_REVISION="$revision"
 app='build/CullingBay.xcarchive/Products/Applications/CullingBay.app'
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist" > build/version.txt
 [[ -s build/version.txt ]] || { echo 'Built app has no marketing version.' >&2; exit 1; }
@@ -161,7 +164,7 @@ PUBLISH
 if ((screenshot)); then
     # Failure here must not hide a successful device build and publication.
     if run_stdin ssh "${ssh_opts[@]}" "$host" \
-        "zsh -lc 'exec bash -s -- $build'" <<'MAC_SCREENSHOT'
+        "zsh -lc 'exec bash -s -- $build $revision'" <<'MAC_SCREENSHOT'
 set -euo pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 cd "$HOME/photo-culling-ios"
@@ -169,7 +172,7 @@ rm -f build/CullingBay.png
 xcodebuild -project CullingBay.xcodeproj -scheme CullingBay -configuration Release \
     -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath build/Simulator build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-    CURRENT_PROJECT_VERSION="$1"
+    CURRENT_PROJECT_VERSION="$1" CB_GIT_REVISION="$2"
 xcrun simctl list devices available --json > build/simulators.json
 simulator=$(python3 - <<'SELECT_SIM'
 import json
