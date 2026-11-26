@@ -2254,7 +2254,7 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
     def api_faces():
         body = request.get_json()
         action, person = body.get("action"), body.get("person")
-        st = people_index.act(body.get("faces"), action, person)
+        st = people_index.act(body.get("faces"), action, person, group=body.get("group"))
         return jsonify(people_index.person_json(st, person) if action != "ignore" else {"ok": True})
 
     @bp.route("/api/photo/<int:rowid>/faces")

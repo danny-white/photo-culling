@@ -1255,6 +1255,20 @@ class PeopleWrites(RoutesCase):
         self.assertEqual(self.get("/people")[1]["groups"], [])
         self.assertEqual(self.post("/people/group/9999/hide")[0], 404)
 
+    def test_not_for_a_whole_group(self):
+        """"No, that group isn't Alex": the app names the group, not its faces."""
+        alex = self.name()
+        robin = self.key("robin")
+        before = len(self.w.ids("robin"))
+        status, p = self.post("/faces", {"group": robin, "action": "not", "person": alex["id"]})
+        self.assertEqual((status, p["id"]), (200, alex["id"]))
+        con = self.w.anno()
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM face_no WHERE person_id=?", (alex["id"],)).fetchone()[0], before)
+        group = next(g for g in self.get("/people")[1]["groups"] if g["key"] == robin)
+        self.assertNotIn("maybe", group)
+        self.assertEqual(self.post("/faces", {"group": 9999, "action": "not", "person": alex["id"]})[0], 404)
+        self.assertEqual(self.post("/faces", {"group": "x", "action": "not", "person": alex["id"]})[0], 400)
+
     def test_the_labels_land_in_annotations_db(self):
         self.name()
         con = self.w.anno()

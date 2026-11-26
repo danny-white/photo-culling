@@ -194,7 +194,8 @@ app shows), never ones already filed under someone else.
   confirmed face, no means never suggest it for them again. A face in both lists is `400`.
 - `POST /m/api/people/<id>/delete` → `{ok: true}`. Their confirmed and "not" answers are deleted; the faces
   go back to their groups.
-- `POST /m/api/faces` `{faces: [ids], action, person?}` → fix faces. `action` is:
+- `POST /m/api/faces` `{faces: [ids], action, person?}` → fix faces. Instead of `faces` (or as well), `group: key`
+  names an unnamed group's unclaimed faces: the "No" to "Is this Alex?" on a group. `action` is:
   - `not`: these faces are not `person` (the "Not Alex" of Manage faces): no longer theirs, never suggested for
     them again. Answers with `person`'s Person.
   - `move`: they are `person` (`moved`). Answers with `person`'s Person.

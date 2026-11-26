@@ -845,15 +845,19 @@ class PeopleIndex:
             return sql
         return self._write(plan)
 
-    def act(self, faces, action, person=None) -> State:
-        """`not` (these faces are not `person`), `move` (they are `person`, `moved`) or `ignore` (not a face)."""
+    def act(self, faces, action, person=None, group=None) -> State:
+        """`not` (these faces are not `person`), `move` (they are `person`, `moved`) or `ignore` (not a face).
+        The faces are `faces`, or a `group`'s unclaimed ones, or both: "No, that group isn't Alex" names the
+        group, since the app knows its key but not its faces."""
         if action not in ("not", "move", "ignore"):
             raise PeopleError(400, "action must be not, move or ignore")
         if action != "ignore" and not _int(person):
             raise PeopleError(400, "person must be a person id")
 
         def plan(st):
-            who = self._need_faces(st, faces)
+            if faces is None and group is None:
+                raise PeopleError(400, "faces or group is required")
+            who = self._who(st, group, faces)
             if not who:
                 raise PeopleError(400, "faces must not be empty")
             if action != "ignore":
