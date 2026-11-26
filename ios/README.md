@@ -48,9 +48,10 @@ Scope and decisions: https://claude.ai/artifact/FQv95YRVDg1DK6tBvruvob (picks ma
   import runs, a grid of the named people (face crop in a circle, name, photo count, an orange dot when there are
   suggestions to review) and a grid of the groups nobody has named ("Alex?" when one looks like a person, else
   "N photos · M days"), pull to refresh, and a name filter. `PersonScreen` is the big circle, the name, a
-  "Review N suggestions" banner and the person's photos as the Gallery's `ResultsView` over `FeedModel.Source.person` (viewer
-  and Save included), with a menu to Rename, Merge with…, Manage faces and Remove name. A long press on one of their photos
-  (`ResultsView`'s optional `tileMenu`, which only this screen passes, and which is also given as VoiceOver actions and
+  "Review N suggestions" banner (and, under it, a quieter "Maybe not Alex? Check N faces" one when the PC has doubts
+  about faces it filed as them, which opens the same review sheet on them, least sure first) and the person's photos as
+  the Gallery's `ResultsView` over `FeedModel.Source.person` (viewer and Save included), with a menu to Rename, Merge with…, Manage faces and
+  Remove name. A long press on one of their photos (`ResultsView`'s optional `tileMenu`, which only this screen passes, and which is also given as VoiceOver actions and
   is off while the grid is selecting) offers "Not Alex" (`PersonModel.removeFromPhoto`: the tile slides out, their count
   drops and a `PersonToast` with Undo says "Removed Alex from this photo"; with "1/burst" on it takes them off every frame of
   the burst the tile stands for) and "Show faces in this photo" (the (i) sheet). Select on this screen adds a "Not Alex"
@@ -58,11 +59,11 @@ Scope and decisions: https://claude.ai/artifact/FQv95YRVDg1DK6tBvruvob (picks ma
   `PersonModel.removeFromPhotos` takes them off every selected photo in one write and one toast, with one Undo, says
   "Removed Alex from 12 photos" (photos that didn't have their face stay, and are counted in the toast). `GroupScreen` is
   the same for a group (Add name, "Is this Alex?" Yes/No, Not someone I know) over `.group`. `ReviewSheet` is "Is this
-  Alex?" on a grid of large crops (a tap puts a red ✕ on one, "None are Alex" puts one on every face and then reads "Clear
-  all", Confirm sends the batch and loads the next). `ManageFacesView` is a person's faces with Select, Not Alex, Move to… and Not a
-  face, and a long press for Make cover and Show photo. `PersonPickerSheet` is the one
-  picker for naming, moving, merging and "This is…". `PhotoPeopleSection` is the (i) sheet's People section: each face in the
-  photo with a menu (Not Alex, This is…, Not a face). Face crops are `GET /m/api/face/<id>` through the same `RemoteImage` and
+  Alex?" (or, from the second banner, "Maybe not Alex?") on a grid of large crops (a tap puts a red ✕ on one, "None are
+  Alex" puts one on every face and then reads "Clear all", Confirm sends the batch and loads the next). `ManageFacesView`
+  is a person's faces with Select, Not Alex, Move to… and Not a face, and a long press for Make cover and Show photo.
+  `PersonPickerSheet` is the one picker for naming, moving, merging and "This is…". `PhotoPeopleSection` is the (i)
+  sheet's People section: each face in the photo with a menu (Not Alex, This is…, Not a face). Face crops are `GET /m/api/face/<id>` through the same `RemoteImage` and
   loader as the thumbnails. People needs the PC and keeps nothing on the phone: offline it shows the Work offline capsule or
   the "Can't reach the PC" line with Try now, and a write that cannot be sent says so. `-CBStartTab people` and
   `-CBOpenPerson <id>` open it in the simulator (`LaunchOptions`).

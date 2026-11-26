@@ -194,6 +194,7 @@ Follow the app's existing split: screen state lives in `CullingBayCore` as `@Mai
 - **Person screen** (pushed):
   - the header: a big circle, the name and the photo count;
   - a "Review N more photos" banner when there are suggestions;
+  - under it, a quieter "Maybe not <name>? Check 250 faces" banner (grey, `person.crop.circle.badge.questionmark`) when `doubts` > 0; it opens the review sheet on the faces the PC filed as them with the weakest matches;
   - then the photos as ResultsView for `.person`.
   - Select: the selection bar gets a "Not <first name>" button (red, next to Clear and Save to phone) that takes the person off every selected photo in one write. No confirm: one toast says "Removed <name> from 12 photos" (and "(2 didn't have <name>'s face)" when some had none; those stay), with one Undo for all of them. When none of the photos had their face the toast says so and the selection stays.
   - Toolbar menu: Rename, Merge with… (person picker), Manage faces, Remove name (with a confirm).
@@ -204,7 +205,7 @@ Follow the app's existing split: screen state lives in `CullingBayCore` as `@Mai
   - Hide ("Not someone I know");
   - then the photos as ResultsView for `.group`.
 - **Review screen** (sheet):
-  - "Is this <name>?" above a 3-column grid of large face crops;
+  - "Is this <name>?" above a 3-column grid of large face crops (from the Person screen's "Maybe not <name>?" banner it is "Maybe not <name>?" over the faces filed as them, least sure first, from `GET /people/<id>/doubts`, with the same grid, gestures and Confirm);
   - tapping toggles a red ✕ overlay;
   - "None are <name>" under the subtitle puts the ✕ on every face of the batch (for when none of them are); it then reads "Clear all" and takes them all off. It sends nothing;
   - Confirm sends the batch: "Confirm 58 as <name>", "Confirm 56 as <name>, 2 not", or "Confirm 8 as not <name>" when every face is a no;

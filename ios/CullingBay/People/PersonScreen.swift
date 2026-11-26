@@ -1,7 +1,8 @@
 import CullingBayCore
 import SwiftUI
 
-/// One person: a big circle, their name and photo count, a banner to review suggestions, and their
+/// One person: a big circle, their name and photo count, a banner to review suggestions (and, when the
+/// PC has doubts about faces it filed as them, a quieter one to check those), and their
 /// photos as a results screen (so the viewer and Save work as they do anywhere). The menu renames
 /// them, merges them into someone, opens Manage faces or removes the name. State lives in
 /// `PersonModel`; the photos in `FeedModel` over `.person`.
@@ -16,7 +17,8 @@ struct PersonScreen: View {
     @Environment(PeopleRouter.self) private var router
     let id: Int
     @State private var model: PersonModel
-    @State private var reviewing: Person?
+    /// Which review sheet is open: "Is this Alex?" or "Maybe not Alex?".
+    @State private var reviewing: ReviewTarget?
     @State private var merging = false
     @State private var renaming = false
     @State private var renameText = ""
@@ -63,8 +65,8 @@ struct PersonScreen: View {
         // Faces fixed in the sheet may have taken them off the photo: read the person again, and the grid
         // reads itself again if their count moved.
         .sheet(item: $detailsFor, onDismiss: { Task { await model.load() } }) { PhotoInfoSheet(target: $0) }
-        .sheet(item: $reviewing, onDismiss: { Task { await model.load() } }) { person in
-            ReviewSheet(person: person, services: services) { model.update($0) }
+        .sheet(item: $reviewing, onDismiss: { Task { await model.load() } }) { target in
+            ReviewSheet(person: target.person, kind: target.kind, services: services) { model.update($0) }
         }
         .sheet(isPresented: $merging) {
             PersonPickerSheet(
@@ -118,22 +120,20 @@ struct PersonScreen: View {
                     .padding(.top, 8)
                 Text(model.name).font(.title2.bold())
                 Text(model.photoCaption).font(.subheadline).foregroundStyle(.secondary)
-                if let banner = model.reviewBanner, let person = model.person {
-                    Button { reviewing = person } label: {
-                        HStack {
-                            Image(systemName: "questionmark.circle.fill")
-                            Text(banner).fontWeight(.semibold)
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity)
-                        .background(Color.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 12))
-                        .foregroundStyle(Color.orange)
+                if let person = model.person {
+                    if let banner = model.reviewBanner {
+                        reviewBannerButton(
+                            banner, icon: "questionmark.circle.fill", fill: Color.orange.opacity(0.18),
+                            ink: Color.orange, target: ReviewTarget(person: person, kind: .suggestions),
+                            hint: "Answers “Is this \(person.name)?” for faces that may be them")
                     }
-                    .buttonStyle(.plain)
-                    .padding(.top, 8)
-                    .accessibilityHint("Answers “Is this \(person.name)?” for faces that may be them")
+                    if let banner = model.checkBanner {
+                        reviewBannerButton(
+                            banner, icon: "person.crop.circle.badge.questionmark",
+                            fill: Color(.secondarySystemFill), ink: Color.primary,
+                            target: ReviewTarget(person: person, kind: .doubts),
+                            hint: "Checks the faces filed as \(person.name) that the PC is least sure of")
+                    }
                 }
             }
             if !model.message.isEmpty {
@@ -146,6 +146,28 @@ struct PersonScreen: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 6)
         .padding(.bottom, 8)
+    }
+
+    /// A full-width banner that opens the review sheet: orange for suggestions, quieter for the faces the PC
+    /// filed as them but is least sure of.
+    private func reviewBannerButton(
+        _ text: String, icon: String, fill: Color, ink: Color, target: ReviewTarget, hint: String
+    ) -> some View {
+        Button { reviewing = target } label: {
+            HStack {
+                Image(systemName: icon)
+                Text(text).fontWeight(.semibold)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity)
+            .background(fill, in: RoundedRectangle(cornerRadius: 12))
+            .foregroundStyle(ink)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 8)
+        .accessibilityHint(hint)
     }
 
     // MARK: Menu
@@ -255,4 +277,13 @@ struct PersonScreen: View {
             if case .taken(let existing) = await model.rename(to: text) { nameTakenBy = existing }
         }
     }
+}
+
+/// What the review sheet is open for: the person, and whether it asks about faces that may be them or about
+/// faces already filed as them.
+private struct ReviewTarget: Identifiable {
+    let person: Person
+    let kind: ReviewModel.Kind
+
+    var id: Int { person.id * 2 + (kind == .doubts ? 1 : 0) }
 }

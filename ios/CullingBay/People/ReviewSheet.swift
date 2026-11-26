@@ -5,6 +5,9 @@ import SwiftUI
 /// puts a red ✕ on it (no), and "None are Alex" puts one on every face at once (then "Clear all" takes
 /// them off). Confirm sends the batch and shows the next until none are left. Unnamed groups that look
 /// like them come first, each with its own Yes and No. State lives in `ReviewModel`.
+///
+/// With `kind` `.doubts` it is "Maybe not Alex?" instead: the same grid and gestures over the faces the
+/// server filed as them on the weakest matches, least sure first. The words come from the model.
 struct ReviewSheet: View {
     @Environment(AppServices.self) private var services
     @Environment(\.dismiss) private var dismiss
@@ -15,9 +18,12 @@ struct ReviewSheet: View {
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
 
-    init(person: Person, services: AppServices, onFinish: @escaping (Person) -> Void) {
+    init(
+        person: Person, kind: ReviewModel.Kind = .suggestions, services: AppServices,
+        onFinish: @escaping (Person) -> Void
+    ) {
         self.onFinish = onFinish
-        _model = State(initialValue: ReviewModel(person: person, client: services.client))
+        _model = State(initialValue: ReviewModel(person: person, client: services.client, kind: kind))
     }
 
     var body: some View {
@@ -67,7 +73,7 @@ struct ReviewSheet: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
-                Text("No suggestions for \(model.person.name) right now.").foregroundStyle(.secondary)
+                Text(model.emptyText).foregroundStyle(.secondary)
             }
             Button("Done") { dismiss() }
                 .buttonStyle(.borderedProminent)
@@ -85,7 +91,7 @@ struct ReviewSheet: View {
                 Text(model.title).font(.title2.bold())
                 if !model.faces.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Every face counts as \(model.person.name). Tap the ones that are not.")
+                        Text(model.subtitle)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
