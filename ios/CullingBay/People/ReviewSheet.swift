@@ -113,26 +113,24 @@ struct ReviewSheet: View {
     }
 
     private func groupRow(_ group: FaceGroup) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                FaceCircle(face: group.cover).frame(width: 56, height: 56)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("These photos might be \(model.person.name)").font(.subheadline.weight(.semibold))
-                    Text(PeopleFormat.groupCaption(group)).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
+        HStack(spacing: 10) {
+            FaceCircle(face: group.cover).frame(width: 44, height: 44)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Might be \(model.person.name)").font(.subheadline.weight(.semibold))
+                Text(PeopleFormat.groupCaption(group)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            HStack(spacing: 10) {
-                Button("No") { Task { await model.answer(group: group, yes: false) } }
-                    .buttonStyle(.bordered)
-                Button("Yes") { Task { await model.answer(group: group, yes: true) } }
-                    .buttonStyle(.borderedProminent)
-                Spacer(minLength: 0)
-            }
+            Spacer(minLength: 0)
+            Button("No") { Task { await model.answer(group: group, yes: false) } }
+                .buttonStyle(.bordered)
+            Button("Yes") { Task { await model.answer(group: group, yes: true) } }
+                .buttonStyle(.borderedProminent)
         }
+        .controlSize(.small)
         .disabled(model.isWorking)
-        .padding(12)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
     }
 
     private func faceCell(_ face: FaceSuggestion) -> some View {

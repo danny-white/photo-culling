@@ -69,9 +69,12 @@ struct PersonPickerSheet: View {
             }
         case .loaded:
             if model.matches.isEmpty {
-                Section {
-                    Text(model.text.isEmpty ? "Nobody is named yet." : "No one is called that yet.")
-                        .foregroundStyle(.secondary)
+                // With a "New person" row showing, saying nobody is called that adds nothing.
+                if !(allowsNew && model.newName != nil) {
+                    Section {
+                        Text(model.text.isEmpty ? "Nobody is named yet." : "No one is called that yet.")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             } else {
                 Section("People") {

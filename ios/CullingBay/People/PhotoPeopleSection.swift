@@ -55,6 +55,8 @@ struct PhotoPeopleSection: View {
             }
             .contentShape(Rectangle())
         }
+        // A menu in a form draws its label in the accent colour; the name reads better in the text colour.
+        .tint(.primary)
         .disabled(model.isWorking)
         .accessibilityLabel(PhotoFacesModel.label(for: face))
         .accessibilityHint("Opens the choices for this face")
