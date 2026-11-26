@@ -118,6 +118,10 @@ class MobileApi(unittest.TestCase):
                 self.assertEqual(len(body["stacks"]), d["stacks"])
                 self.assertEqual(body["budget"]["stacks"], d["stacks"])   # not the floor of 5
 
+    def test_ping_answers_with_no_body(self):
+        r = self.client.get("/m/api/ping")
+        self.assertEqual((r.status_code, r.data), (204, b""))
+
     H = {"X-Culling-Bay": "1"}
 
     def need_nas(self, *rowids):

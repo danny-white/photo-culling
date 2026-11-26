@@ -1989,6 +1989,12 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
                 info_cache.popitem(last=False)
         return jsonify(info)
 
+    @bp.route("/api/ping")
+    def api_ping():
+        """The iPhone app's connection check: 204 and no body. It touches no database or file, so
+        an answer means only that the PC can be reached."""
+        return "", 204
+
     @bp.route("/api/warm")
     def api_warm():
         """Decode-ahead on request. A day saved on the phone (offline days) shows its cards from
