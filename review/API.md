@@ -118,8 +118,11 @@ show until the next run.
 
 - `GET /m/api/people` → `{people: [Person], groups: [Group], faces_checked, photos_ok}`. `people` has the
   named people, most photos first. `groups` has the unnamed groups worth naming: 3 or more faces nobody has
-  claimed (a suggested face is not claimed), the groups seen on the most days first (friends and family above
-  a one-day crowd), then most photos, at most 300. `faces_checked` is the number of photos checked for faces
+  claimed (a suggested face is not claimed), the groups with a good (sharp, surely-a-face) face on the most days
+  first (friends and family above a one-day crowd), then most good faces, at most 300. A group that is
+  probably not a person (under 2 good unclaimed faces, or a mean as alike to the mean of all faces as a
+  wheel, the backs of heads or blur are) is left out, though its faces stay unclaimed and
+  `people/group/<key>` still opens it. `faces_checked` is the number of photos checked for faces
   and `photos_ok` the number of photos in the library, so the app can say "faces found in N of M photos".
 - `GET /m/api/people/<id>` → `{id, name, total, photos: [Photo]}`, newest first (404 for an unknown person).
   `?best=1` and `?bursts=` work as in Gallery; `total` counts the person's photos before them.

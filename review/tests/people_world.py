@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -40,6 +41,14 @@ DAYS = {
     "2026/2026-01-03": {"sam": 6, "robin": 4},
     "2026/2026-01-04": {"alex": 5, "casey": 1},
 }
+
+
+def without_junk_rule(case):
+    """Switch off the rule that hides junk groups (people.JUNK_SIM) for one test. It judges a group against the
+    mean of the whole library; in these tiny made-up libraries (four people) every real person is a big part
+    of it, so it would hide them. JunkGroups in test_people.py tests the rule on a library big enough."""
+    import people
+    case.enterContext(mock.patch.object(people, "JUNK_SIM", 9.0))
 
 
 class World:

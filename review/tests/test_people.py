@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "review"))
 import people  # noqa: E402
 import photo_cull as pc  # noqa: E402
 from review.tests.helpers import FakePC  # noqa: E402
-from review.tests.people_world import D, World, mix, unit  # noqa: E402
+from review.tests.people_world import D, NOISE, World, mix, unit, without_junk_rule  # noqa: E402
 
 
 # ======================================================================= faces-group
@@ -198,18 +198,22 @@ def like(e, parts):
     return (v + np.sqrt(max(left, 0.0)) * e[parts["rest"]]).astype(np.float32)
 
 
-def make_state(vecs, *, grp=None, folder=None, yes=(), no=(), ignored=()):
-    """A State over faces numbered 1..n (photo id 10 * face id): yes [(face, person)], no [(face, person)]."""
+def make_state(vecs, *, grp=None, folder=None, yes=(), no=(), ignored=(), good=None, junk_rule=False):
+    """A State over faces numbered 1..n (photo id 10 * face id): yes [(face, person)], no [(face, person)];
+    good: which faces are good (all, if not given). The junk-group rule is off unless junk_rule: a few
+    orthogonal test vectors are a big part of the "library" it compares a group with."""
     n = len(vecs)
     ids = np.arange(1, n + 1)
     base = people.Base(ids, ids * 10, np.zeros(n, np.int64) if folder is None else np.array(folder),
                        np.full(n, -1) if grp is None else np.array(grp), np.zeros(n), np.zeros((n, 4), np.float32),
-                       np.ones(n, np.float32), np.asarray(vecs, np.float32), "k")
+                       np.ones(n, np.float32), np.asarray(vecs, np.float32), "k",
+                       None if good is None else np.array(good, bool))
     who = {p for _, p in list(yes) + list(no)}
     labels = people.Labels({p: {"name": f"Person {p}", "cover_face": None, "created_at": "t", "updated_at": "t"}
                             for p in who},
                            [(f, p, "named") for f, p in yes], list(no), list(ignored))
-    return people.compute(base, labels)
+    with mock.patch.object(people, "JUNK_SIM", people.JUNK_SIM if junk_rule else 9.0):
+        return people.compute(base, labels)
 
 
 class Rules(unittest.TestCase):
@@ -318,6 +322,38 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(st.unassigned[4]), 2)
         self.assertNotIn("maybe", st.groups[0])
 
+    def test_a_group_needs_two_good_unclaimed_faces_to_be_listed(self):
+        e = basis(14)
+        grp = [1] * 5 + [2] * 5 + [3] * 4
+        good = [True] + [False] * 4 + [True, True] + [False] * 3 + [True] * 4
+        st = make_state(e, grp=grp, good=good)
+        self.assertEqual([g["key"] for g in st.groups], [3, 2])               # group 1 has one good face: not listed
+        self.assertEqual(len(st.unassigned[1]), 5)                            # ... but its faces are still unclaimed
+        # and a good face somebody has claimed does not count
+        st = make_state(e, grp=[1, 1, 1, 1] + [-1] * 10, good=[True, True, False, False] + [True] * 10, yes=[(1, 7)],
+                        no=[(2, 7), (3, 7), (4, 7)])
+        self.assertEqual(st.groups, [])                                       # three left, one of them good
+
+    def test_groups_are_ordered_by_the_days_they_have_a_good_face_on(self):
+        e = basis(32)
+        # A: 6 good faces on one day and 10 others on five more; B: 4 good faces on three days; C: 3 good on
+        # one day; D: 6 good on two days; E: the same as C
+        grp = [1] * 16 + [2] * 4 + [3] * 3 + [4] * 6 + [5] * 3
+        folder = [0] * 6 + [1, 1, 2, 2, 3, 3, 4, 4, 5, 5] + [0, 0, 1, 2] + [0] * 3 + [0, 0, 0, 1, 1, 1] + [7] * 3
+        good = [True] * 6 + [False] * 10 + [True] * 4 + [True] * 3 + [True] * 6 + [True] * 3
+        st = make_state(e, grp=grp, folder=folder, good=good)
+        self.assertEqual([g["key"] for g in st.groups], [2, 4, 1, 3, 5])      # 3, 2, 1 (6 good), 1 (3 good), 1 (key 5)
+        a = st.groups[2]
+        self.assertEqual((a["faces"], a["photos"], a["days"]), (16, 16, 6))   # the counts still count every face
+        self.assertEqual(set(a), {"key", "faces", "photos", "days", "cover"})
+
+    def test_the_junk_direction_is_the_mean_of_every_face(self):
+        e = basis(4)
+        base = make_state(e).base
+        np.testing.assert_allclose(base.junk_dir, unit(e.sum(axis=0)), atol=1e-6)
+        self.assertAlmostEqual(float(np.linalg.norm(base.junk_dir)), 1.0, places=5)
+        self.assertEqual(people.Base.empty().junk_dir.shape, (512,))
+
     def test_a_group_may_be_a_named_person(self):
         e = basis(20)
         near = [like(e, {0: 0.42 + 0.03 * i, "rest": 5 + i}) for i in range(3)]       # suggestions for person 1
@@ -346,6 +382,7 @@ def HOW(st, i):
 # ======================================================================= PeopleIndex on a made-up library
 class IndexCase(unittest.TestCase):
     def setUp(self):
+        without_junk_rule(self)
         self.w = World()
         self.addCleanup(self.w.close)
 
@@ -393,6 +430,17 @@ class Naming(IndexCase):
         self.assertEqual({(r["person_id"], r["how"]) for r in rows}, {(pid, "named")})
         self.assertEqual([r["name"] for r in self.w.labels("people")], ["Alex"])
         self.assertEqual([g["key"] for g in st.groups], [self.key("sam"), self.key("robin")])   # no longer unnamed
+
+    def test_a_deleted_persons_id_is_never_reused(self):
+        ix = self.grouped()
+        alex, _ = ix.create("Alex", group=self.key("alex"))
+        sam, _ = ix.create("Sam", group=self.key("sam"))
+        ix.delete(sam)                                                       # the highest id goes ...
+        robin, _ = ix.create("Robin", group=self.key("robin"))
+        self.assertGreater(robin, sam)                                       # ... and does not come back
+        ix.merge(robin, alex)                                                # a merge deletes one too
+        casey, _ = ix.create("Casey", faces=[self.w.ids("casey")[0]])
+        self.assertGreater(casey, robin)
 
     def test_naming_faces_and_a_group_together(self):
         ix = self.grouped()
@@ -805,6 +853,88 @@ class Concurrency(IndexCase):
         self.assertEqual(sorted(p["name"] for p in ix.people_json(ix.state())), ["Alex", "Robin", "Sam"])
 
 
+# ======================================================================= groups that are not people
+class JunkGroups(unittest.TestCase):
+    """Unnamed groups that are probably not people are left out of the list. 14 people (a library the junk
+    rule can judge: it compares a group with the mean of every face), a junk cluster, a "dog" and two groups
+    with too few good faces. Written by hand as the groups, so the clustering does not matter."""
+
+    def setUp(self):
+        days = {}
+        for k in range(14):
+            for d in {k % 7, (k + 3) % 7}:
+                days.setdefault(f"2026/2026-03-{d + 1:02d}", {})[f"p{k}"] = 4
+        self.w = w = World(days=days)
+        self.addCleanup(w.close)
+        rng = w.rng
+        groups = {min(ids): ids for ids in (w.ids(f"p{k}") for k in range(14))}
+        self.people_keys = set(groups)
+        everyone = unit(np.mean([w.vector(f["id"]) for f in w.faces], axis=0))
+        day = lambda i, n: f"2026/2026-03-{i % n + 1:02d}"
+        # junk: 30 weak faces (a wheel, the backs of heads, blur) around one direction near the library's mean
+        self.junk = [w.add_face(None, day(i, 6), vector=mix(rng, [(everyone, 1.0)], NOISE), score=0.55, sharp=20.0)
+                     for i in range(30)]
+        # a dog: tight and unlike anything else; 3 of its 12 faces are good, on three different days
+        dog = unit(rng.normal(size=D))
+        self.dog = [w.add_face(None, day(i, 4), vector=mix(rng, [(dog, 1.0)], NOISE), score=0.9 if i < 3 else 0.5)
+                    for i in range(12)]
+        # a tight cluster with only one good face
+        thing = unit(rng.normal(size=D))
+        self.thing = [w.add_face(None, day(i, 3), vector=mix(rng, [(thing, 1.0)], NOISE), score=0.9 if i == 0 else 0.5)
+                      for i in range(6)]
+        # weak faces of p5, in a group of their own
+        self.weak = [w.add_face("p5", day(i, 3), score=0.5) for i in range(5)]
+        w.commit()
+        groups.update({min(g): g for g in (self.junk, self.dog, self.thing, self.weak)})
+        w.write_groups(groups)
+        self.ix = w.index()
+
+    def mean_vs_junk_dir(self, st, ids):
+        return float(unit(np.mean([self.w.vector(f) for f in ids], axis=0)) @ st.base.junk_dir)
+
+    def test_the_numbers_the_rule_rests_on_hold_in_this_library(self):
+        st = self.ix.state()
+        self.assertGreaterEqual(self.mean_vs_junk_dir(st, self.junk), people.JUNK_SIM)
+        for k in range(14):
+            self.assertLess(self.mean_vs_junk_dir(st, self.w.ids(f"p{k}")[:8]), people.JUNK_SIM - 0.1)
+        self.assertLess(self.mean_vs_junk_dir(st, self.dog), people.JUNK_SIM - 0.1)
+
+    def test_junk_and_groups_with_too_few_good_faces_are_not_listed_and_a_dog_is(self):
+        st = self.ix.state()
+        listed = {g["key"] for g in st.groups}
+        self.assertNotIn(min(self.junk), listed)
+        self.assertNotIn(min(self.thing), listed)                             # one good face
+        self.assertNotIn(min(self.weak), listed)                              # none
+        self.assertIn(min(self.dog), listed)                                  # 3 good of 12: a dog may get a name
+        self.assertEqual(listed, self.people_keys | {min(self.dog)})
+        dog = next(g for g in st.groups if g["key"] == min(self.dog))
+        self.assertEqual((dog["faces"], dog["days"]), (12, 4))
+
+    def test_the_dog_with_good_faces_on_three_days_comes_before_people_on_two(self):
+        st = self.ix.state()
+        self.assertEqual(st.groups[0]["key"], min(self.dog))
+
+    def test_a_hidden_group_still_opens_and_can_still_be_named_or_hidden(self):
+        c = self.w.client()
+        listed = {g["key"] for g in c.get("/m/api/people").get_json()["groups"]}
+        self.assertNotIn(min(self.junk), listed)
+        r = c.get(f"/m/api/people/group/{min(self.junk)}")
+        self.assertEqual((r.status_code, r.get_json()["total"]), (200, 30))
+        self.assertEqual(len(self.ix.state().unassigned[min(self.junk)]), 30)  # still unclaimed
+        r = c.post("/m/api/people", json={"name": "Rex", "group": min(self.thing)}, headers=H)
+        self.assertEqual((r.status_code, r.get_json()["faces"]), (201, 6))
+        r = c.post(f"/m/api/people/group/{min(self.junk)}/hide", json={}, headers=H)
+        self.assertEqual(r.status_code, 200)
+
+    def test_a_hidden_groups_faces_are_still_filed_one_by_one_by_their_looks(self):
+        p5 = self.w.ids("p5")[:8]                                              # the good ones, in p5's own group
+        pid, st = self.ix.create("P5", group=min(p5))
+        for f in self.weak:
+            i = st.base.idx_of[f]
+            self.assertEqual((int(st.res.pid[i]), HOW(st, i)), (pid, "auto"))
+        self.assertNotIn(min(self.weak), {g["key"] for g in st.groups})
+
+
 # ======================================================================= the /m/api routes
 H = {"X-Culling-Bay": "1"}
 
@@ -813,6 +943,7 @@ class RoutesCase(unittest.TestCase):
     group_it = True
 
     def setUp(self):
+        without_junk_rule(self)
         self.w = World()
         self.addCleanup(self.w.close)
         if self.group_it:

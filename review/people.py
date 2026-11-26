@@ -45,6 +45,11 @@ TOP_K = 3                # s_P is the mean of the top 3 similarities to P's conf
 MAX_CONFIRMED = 300      # ... out of at most this many, a fixed spread by face id
 MIN_UNNAMED = 3          # an unnamed group has at least this many unassigned faces
 MAYBE_SIM = 0.40         # a group "may be" a person whose mean is this alike
+MIN_GOOD = 2             # an unnamed group is worth listing only with this many good unclaimed faces ...
+# ... and only if its mean is under this alike to the mean of every face in the library. Measured on 10.7k
+# real faces: a group of 273 (a car wheel, the backs of heads, hats, blur) had 1% good faces and sat 0.64 from
+# the library's mean; real people sat 0.04-0.41, and a dog (to stay visible: it may get a name) 0.17.
+JUNK_SIM = 0.55
 GROUPS_OUT = 300         # unnamed groups in the list
 SUGGESTIONS_OUT = 60     # suggested faces for one person
 FACES_PAGE = 100         # faces per page on the fix screen, unless asked for more
@@ -55,7 +60,7 @@ EMPTY = np.zeros(0, np.int64)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS people(
-  id          INTEGER PRIMARY KEY,
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,   -- never reused, so a deleted person's id can't come back
   name        TEXT NOT NULL,
   cover_face  INTEGER,                 -- faces.id Danny chose; NULL = the best confirmed face
   created_at  TEXT NOT NULL,
@@ -188,9 +193,14 @@ class Base:
     """The faces as trial.db held them at the last grouping run, in face-id order. Never changed after
     it is built, so States made from it share it."""
 
-    def __init__(self, ids, photo, folder, grp, ts, box, quality, vecs, key):
+    def __init__(self, ids, photo, folder, grp, ts, box, quality, vecs, key, good=None):
+        """good: which faces are good (detector score and sharpness, as faces-group counts them); all of them
+        if not given. junk_dir: the unit mean of every face's vector, the direction junk faces share."""
         self.ids, self.photo, self.folder, self.grp, self.ts = ids, photo, folder, grp, ts
         self.box, self.quality, self.vecs, self.key = box, quality, vecs, key
+        self.good = np.ones(len(ids), bool) if good is None else good
+        mean = vecs.mean(axis=0, dtype=np.float64) if len(vecs) else np.zeros(vecs.shape[1])
+        self.junk_dir = (mean / (np.linalg.norm(mean) or 1.0)).astype(np.float32)
         self.idx_of = {f: i for i, f in enumerate(ids.tolist())}
         by_photo = collections.defaultdict(list)
         for i, p in enumerate(photo.tolist()):
@@ -255,7 +265,10 @@ class State:
 
     def _groups(self):
         """The unnamed groups: those with MIN_UNNAMED or more faces nobody has claimed (a suggested face is
-        unclaimed), each with the person its mean most resembles, if any."""
+        unclaimed), each with the person its mean most resembles, if any. A group that is probably not a person
+        is left out of the list: under MIN_GOOD good unclaimed faces, or a mean JUNK_SIM alike to the library's.
+        Its faces stay unclaimed (they can still be suggested or filed one by one, and `unassigned` has it).
+        The list is ordered by the days the group has a good face on, then its good faces, then its key."""
         b, res = self.base, self.res
         free = (res.pid < 0) & ~self.ignored & (b.grp >= 0)
         self.unassigned = {}          # group key -> its unclaimed faces
@@ -276,20 +289,23 @@ class State:
         for key, part in self.unassigned.items():
             if len(part) < MIN_UNNAMED:
                 continue
+            good = part[b.good[part]]
+            m = b.vecs[part].mean(axis=0)
+            m /= np.linalg.norm(m) or 1.0
+            if len(good) < MIN_GOOD or float(m @ b.junk_dir) >= JUNK_SIM:
+                continue
             g = {"key": key, "faces": len(part), "photos": len(np.unique(b.photo[part])),
                  "days": len(np.unique(b.folder[part])), "cover": int(b.ids[part[np.argmax(b.quality[part])]])}
             if means:
-                m = b.vecs[part].mean(axis=0)
-                m /= np.linalg.norm(m) or 1.0
                 refused = collections.Counter(p for i in part.tolist() for p in no_of_face.get(i, ())) \
                     if no_of_face else collections.Counter()
                 best = max(((float(m @ v), p) for p, v in means.items() if 2 * refused[p] < len(part)),
                            default=(-1.0, None))
                 if best[0] >= MAYBE_SIM:
                     g["maybe"] = {"id": best[1], "name": self.people[best[1]]["name"]}
-            groups.append(g)
-        groups.sort(key=lambda g: (-g["days"], -g["photos"], g["key"]))   # many days first: friends over a one-day crowd
-        self.groups = groups
+            groups.append(((-len(np.unique(b.folder[good])), -len(good), key), g))
+        groups.sort(key=lambda t: t[0])       # good days first: friends and family over a one-day crowd
+        self.groups = [g for _, g in groups]
 
     def name_sets(self) -> dict[str, frozenset]:
         """{lower-case name: the ids of the photos that person is in}, for the search."""
@@ -377,7 +393,7 @@ class PeopleIndex:
             except sqlite3.OperationalError:
                 return Base.empty(key)
             vecs = np.zeros((total + 1024, 512), np.float32)
-            cols = {k: [] for k in ("ids", "photo", "folder", "grp", "ts", "box", "quality")}
+            cols = {k: [] for k in ("ids", "photo", "folder", "grp", "ts", "box", "quality", "good")}
             folders: dict[str, int] = {}
             n = 0
             for r in con.execute(
@@ -399,13 +415,14 @@ class PeopleIndex:
                 cols["box"].append([r[5], r[6], r[7], r[8]])
                 # a cover wants a big, sharp, surely-a-face: each factor capped so none runs away
                 cols["quality"].append((r[9] or 0.0) * min(r[11] or 0.0, 400.0) / 400.0 * min(r[10] or 0.0, 200.0) / 200.0)
+                cols["good"].append((r[9] or 0.0) >= self.pc.FACE_GOOD_SCORE and (r[10] or 0.0) >= self.pc.FACE_GOOD_SHARP)
                 n += 1
         finally:
             con.close()
         return Base(np.array(cols["ids"], np.int64), np.array(cols["photo"], np.int64),
                     np.array(cols["folder"], np.int64), np.array(cols["grp"], np.int64),
                     np.array(cols["ts"], np.float64), np.array(cols["box"], np.float32).reshape(-1, 4),
-                    np.array(cols["quality"], np.float32), vecs[:n], key)
+                    np.array(cols["quality"], np.float32), vecs[:n], key, np.array(cols["good"], bool))
 
     def _connect(self) -> sqlite3.Connection:
         con = self.anno()

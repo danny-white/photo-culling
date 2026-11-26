@@ -48,7 +48,7 @@ aligned 112 px face). In the spike, 685 of 1,458 faces were good.
 
 ```sql
 CREATE TABLE IF NOT EXISTS people(
-  id          INTEGER PRIMARY KEY,
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,   -- never reused, so a deleted person's id can't come back
   name        TEXT NOT NULL,
   cover_face  INTEGER,                 -- faces.id Danny chose; NULL = the best confirmed face
   created_at  TEXT NOT NULL,
@@ -94,7 +94,7 @@ band becomes "Is this P?". Recalibrate on the full library once the backfill is 
 the number of different days they appear on, then by photos. One-day crowds such as the
 2026-02-11 parade sink below friends and family. Cap the list at 300. Each group gets
 `maybe: {id, name}` when its mean is at least 0.40 alike to a named person's mean, so the app
-can ask "Is this Sarah?" on the group.
+can ask "Is this Alex?" on the group.
 
 **Speed.** Keep one float32 score array per person (n_faces long) in memory. A label change for
 P recomputes only P's array: 70k faces × ≤300 confirmed is ~0.2 s. Rebuild everything when
