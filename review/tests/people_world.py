@@ -195,17 +195,20 @@ class World:
         import people
         return people.PeopleIndex(db_ro=self.db_ro, anno=self.anno, pc=pc, refresh_s=refresh_s)
 
-    def client(self, refresh_s=0, pc_module=None):
-        """A Flask test client over this world: the /m blueprint with fake pictures (a grey 64 x 48)."""
+    def client(self, refresh_s=0, pc_module=None, **blueprint):
+        """A Flask test client over this world: the /m blueprint with fake pictures (a grey 64 x 48). Any
+        other keyword goes to make_blueprint (people_feed_s, for one); the blueprint is `self.bp`."""
         from flask import Flask
         import mobile
         static = self.dir / "static"
         static.mkdir(exist_ok=True)
         app = Flask(__name__)
-        app.register_blueprint(mobile.make_blueprint(
+        args = dict(
             db_ro=self.db_ro, anno=self.anno, pc=pc_module or FakePC(), cache_dir=self.dir / "cache", static_dir=static,
             state_dir=self.dir / "state", inbox=self.dir / "inbox", check_mount=False, ingest_log=self.dir / "ingest.log",
-            ollama_url="http://127.0.0.1:9", people_refresh_s=refresh_s))
+            ollama_url="http://127.0.0.1:9", people_refresh_s=refresh_s)
+        self.bp = mobile.make_blueprint(**{**args, **blueprint})
+        app.register_blueprint(self.bp)
         (self.dir / "cache").mkdir(exist_ok=True)
         self.app = app
         return app.test_client()

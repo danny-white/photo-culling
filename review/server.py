@@ -545,7 +545,8 @@ def main():
     install_compression(app)    # after perf, so its line has the compressed size
     app.register_blueprint(mobile.make_blueprint(
         db_ro=db_ro, anno=anno, pc=pc, cache_dir=CACHE, static_dir=STATIC / "m",
-        state_dir=Path(CFG["db"]).parent / "mobile", prime_search=True))
+        state_dir=Path(CFG["db"]).parent / "mobile", prime_search=True,
+        people_feed_s=mobile.people.FEED_DEBOUNCE_S))
     app.register_blueprint(make_eval_blueprint(eval_dir=HERE.parent / "eval"))
     if a.server_pidfile:
         a.server_pidfile.write_text(str(os.getpid()))

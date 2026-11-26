@@ -7,7 +7,8 @@
 PeopleIndex reads all three and answers, for every face, which person it is, which it might be, or
 which unnamed group it sits in. It also owns the label writes (the routes in mobile.py are thin), so
 the labels and the index never disagree. No Flask in here: the pure functions work on numpy arrays
-and label sets, and review/tests/test_people.py runs them without a server.
+and label sets, and review/tests/test_people.py runs them without a server. PeopleFeed, at the end, hands
+the result to Lightroom as <inbox>/people.tsv (review/tests/test_people_feed.py).
 
 Rules, in order, for one face (thresholds are measured: see PEOPLE.md):
   1. ignored                 nobody, hidden everywhere
@@ -32,6 +33,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -64,6 +66,9 @@ FACES_PAGE_MAX = 500
 NAME_MAX = 80
 REFRESH_S = 30           # how often the grouping run's stamp is looked at
 EMPTY = np.zeros(0, np.int64)
+LR_FILE = "people.tsv"       # what the Lightroom plug-in reads from the inbox
+LR_HEADER = "#people v1"     # the plug-in tells the file from pending.tsv and cull-decisions.tsv by this line
+FEED_DEBOUNCE_S = 10.0       # people.tsv is written this long after the last change
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS people(
@@ -87,6 +92,8 @@ CREATE TABLE IF NOT EXISTS face_no(        -- this face is NOT this person (neve
 CREATE TABLE IF NOT EXISTS face_ignored(   -- not a face, or a stranger: hidden everywhere
   face_id     INTEGER PRIMARY KEY,
   at          TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS people_lr(      -- every photo that has ever been written to people.tsv with a name:
+  path        TEXT PRIMARY KEY);         -- it keeps a row (maybe an empty one) so Lightroom can drop the keyword
 """
 
 HOW = {0: "none", 1: "confirmed", 2: "auto"}
@@ -388,6 +395,8 @@ class PeopleIndex:
         self._error: BaseException | None = None
         self._version = 0                 # bumped by every label write, so a rebuild can tell one slipped in
         self._schema = False
+        self.on_change = None             # called with no arguments when who is in which photo may have changed
+                                          # (a label write, or a rebuild after a grouping run): PeopleFeed.touch
 
     # ---------------------------------------------------------------- loading
     def _stamp(self, con) -> str | None:
@@ -525,7 +534,17 @@ class PeopleIndex:
                 if version == self._version:
                     with self.lock:
                         self._state = st
+                    self._changed()
                     return
+
+    def _changed(self) -> None:
+        """Tell on_change that the answers may differ now. Never raises into the write or the rebuild."""
+        hook = self.on_change
+        if hook is not None:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 - a broken listener must not undo a label write
+                log.warning("people change hook failed", exc_info=True)
 
     def warm(self) -> None:
         """Build the first State now (the server does it in the background), not on the first request."""
@@ -675,6 +694,7 @@ class PeopleIndex:
             new = compute(st.base, self._read_labels(), prev=st)
             with self.lock:
                 self._state = new
+            self._changed()
             return new
 
     @staticmethod
@@ -853,3 +873,167 @@ class PeopleIndex:
             return lambda con, at: con.executemany("INSERT OR IGNORE INTO face_ignored(face_id, at) VALUES(?,?)",
                                                    [(f, at) for f in self._ids(st, who)])
         return self._write(plan)
+
+
+# ------------------------------------------------------------------ the Lightroom feed
+def lr_name(name: str) -> str:
+    """A name as one people.tsv field: no `|` (it separates the names), tab or line break, replaced as
+    write_plugin_data does for keywords."""
+    return name.replace("|", "/").replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
+def lr_key(path: str) -> tuple[str, str]:
+    """(shoot folder, file name) of a library path: how the plug-in matches photos in every inbox file."""
+    p = Path(path)
+    return p.parent.name.replace("\t", " "), p.name
+
+
+class PeopleFeed:
+    """Writes who is in which photo to <inbox>/people.tsv for the Lightroom plug-in (PEOPLE.md, phase E):
+
+        #people v1
+        <shootFolder> TAB <filename> TAB <name1|name2|...>
+
+    one row per photo, rows by folder and file, names alphabetical. Confirmed and auto faces count, suggestions
+    don't. The file is the whole state each time, never a change list, so the plug-in can apply it as often as
+    it likes. It covers every photo that has ever had a named person (people_lr in annotations.db): a photo
+    whose last name was taken off keeps a row with an empty names field, which is how the plug-in knows to
+    remove the keyword it added.
+
+    touch() says something changed; the write happens `debounce_s` after the last touch, on a timer thread.
+    The file is written to a temp file in the inbox and renamed over the old one, so the plug-in never reads half
+    of it. When the inbox isn't mounted (`problem()` says why) nothing is written, and the next touch tries
+    again. PeopleIndex calls touch() through its on_change; the server also touches once at start.
+    """
+
+    def __init__(self, index: PeopleIndex, inbox, problem=None, debounce_s: float = FEED_DEBOUNCE_S):
+        """problem(): None when the inbox can be written, else the reason it can't (mobile.inbox_problem)."""
+        self.index, self.inbox, self.problem, self.debounce_s = index, Path(inbox), problem, debounce_s
+        self.writes = 0                   # files written so far
+        self._lock = threading.Lock()     # guards the timer and the flags below; never held while writing
+        self._write_lock = threading.Lock()   # one write at a time (a flush racing the timer)
+        self._timer: threading.Timer | None = None
+        self._busy = False
+        self._closed = False
+        self._writer: int | None = None   # the thread inside write(), whose own touches are no news
+
+    # ---------------------------------------------------------------- the debounce
+    def touch(self) -> None:
+        """Something changed: write people.tsv `debounce_s` from now, or later if another touch comes first.
+        (Not from the thread that is writing it: when its own State() call rebuilds the index, the write is
+        already built from that.)"""
+        if self._writer == threading.get_ident():
+            return
+        with self._lock:
+            if self._closed:
+                return
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.debounce_s, self._fire)
+            self._timer.daemon = True
+            self._timer.name = "people-feed"
+            self._timer.start()
+
+    def _fire(self) -> None:
+        with self._lock:
+            self._timer, self._busy = None, True
+        try:
+            self.write()
+        except Exception:  # noqa: BLE001 - a timer thread has nobody to raise to; the next touch tries again
+            log.warning("people.tsv not written (it is tried again at the next change)", exc_info=True)
+        finally:
+            with self._lock:
+                self._busy = False
+
+    def flush(self) -> bool:
+        """Write now, without waiting for the timer (which is cancelled). See write()."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        return self.write()
+
+    def wait(self, timeout: float = 5.0) -> bool:
+        """Block until no write is waiting or running; False if that took longer than `timeout`. For tests."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            with self._lock:
+                if self._timer is None and not self._busy:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    def close(self) -> None:
+        """Drop a waiting write and refuse new touches."""
+        with self._lock:
+            self._closed = True
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    # ---------------------------------------------------------------- what goes in the file
+    def _named(self, st: State) -> dict[str, set[str]]:
+        """{library path: the names of the people in that photo}, for every photo with one."""
+        per_photo: dict[int, set[str]] = {}
+        for p, row in st.people.items():
+            name = lr_name(row["name"])
+            for photo in np.unique(st.base.photo[st.faces[p]]).tolist():
+                per_photo.setdefault(photo, set()).add(name)
+        out: dict[str, set[str]] = {}
+        con = self.index.db_ro()
+        try:
+            for part, marks in PeopleIndex._chunks(list(per_photo)):
+                for rowid, path in con.execute(f"SELECT rowid, path FROM images WHERE rowid IN ({marks})", part):
+                    out.setdefault(path, set()).update(per_photo[rowid])
+        finally:
+            con.close()
+        return out
+
+    def _remember(self, named: dict[str, set[str]]) -> set[str]:
+        """Record the photos named now in people_lr and return every photo that ever was."""
+        con = self.index._connect()
+        try:
+            known = {r[0] for r in con.execute("SELECT path FROM people_lr")}
+            new = [p for p in named if p not in known]
+            if new:
+                con.executemany("INSERT OR IGNORE INTO people_lr(path) VALUES(?)", [(p,) for p in new])
+                con.commit()
+        finally:
+            con.close()
+        return known | set(named)
+
+    def text(self, st: State) -> str:
+        """The file for this State. Also records the photos it names in people_lr."""
+        named = self._named(st)
+        rows: dict[tuple[str, str], set[str]] = {}
+        for path in self._remember(named):
+            rows.setdefault(lr_key(path), set()).update(named.get(path, ()))
+        lines = [LR_HEADER]
+        for (folder, fname), names in sorted(rows.items()):
+            lines.append(f"{folder}\t{fname}\t" + "|".join(sorted(names, key=lambda n: (n.lower(), n))))
+        return "\n".join(lines) + "\n"
+
+    def write(self) -> bool:
+        """Write people.tsv from the current State. False, with a log line, when the inbox isn't mounted: the
+        photos that now have names are still remembered, so a later write has their rows. Raises on any other
+        trouble (the timer thread logs it)."""
+        with self._write_lock:
+            self._writer = threading.get_ident()
+            try:
+                text = self.text(self.index.state())
+                reason = self.problem() if self.problem is not None else None
+                if reason:
+                    log.warning("people.tsv not written: %s (it is written at the next change or restart)", reason)
+                    return False
+                target = self.inbox / LR_FILE
+                tmp = self.inbox / (LR_FILE + ".tmp")
+                try:
+                    tmp.write_text(text, encoding="utf-8")
+                    os.replace(tmp, target)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                self.writes += 1
+                return True
+            finally:
+                self._writer = None

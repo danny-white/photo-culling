@@ -221,7 +221,8 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
                    inbox: Path = INBOX, check_mount: bool = True, ingest_log: Path = INGEST_LOG,
                    known_unreadable: Path = KNOWN_UNREADABLE, ollama_url: str = OLLAMA_URL, ios_dir: Path | None = None,
                    raw_decoder=None, region_decoder=None, backup_status: Path | None = None,
-                   prime_search: bool = False, people_refresh_s: float = people.REFRESH_S) -> Blueprint:
+                   prime_search: bool = False, people_refresh_s: float = people.REFRESH_S,
+                   people_feed_s: float | None = None) -> Blueprint:
     """db_ro/anno: the server's connection helpers. pc: the photo_cull module (image loading).
     state_dir: where derived per-day data is cached (trial_out/mobile). inbox: where Send writes
     cull-decisions.tsv and the plugin leaves receipts; check_mount refuses to write unless it is
@@ -232,7 +233,10 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
     ops/backup.sh writes after each run, read by the pipeline-health alerts (default: next to the DB).
     prime_search: after the search index is built, also load CLIP's text half and the caption model
     in Ollama, and build the People index (the server turns it on; tests leave it off, so they don't load
-    a 250 MB model each). people_refresh_s: how often the People index looks for a new grouping run."""
+    a 250 MB model each). people_refresh_s: how often the People index looks for a new grouping run.
+    people_feed_s: write the inbox's people.tsv for the Lightroom plug-in this many seconds after the last change
+    to who is in which photo (and once at start); None writes none, as the tests want. The writer is on the
+    blueprint as `bp.people_feed`."""
     bp = Blueprint("mobile", __name__, url_prefix="/m")
     ios_dir = (ios_dir if ios_dir is not None else state_dir.parent / "ios").resolve()
     backup_status = backup_status if backup_status is not None else state_dir.parent / "backup-status.json"
@@ -633,6 +637,12 @@ def make_blueprint(*, db_ro, anno, pc, cache_dir: Path, static_dir: Path, state_
             if not any(line.split()[:2] == [INBOX_SOURCE, str(inbox)] for line in fh):
                 return f"{inbox} is not mounted from {INBOX_SOURCE}"
         return None
+
+    if people_feed_s is not None:
+        feed = people.PeopleFeed(people_index, inbox, problem=inbox_problem, debounce_s=people_feed_s)
+        people_index.on_change = feed.touch
+        feed.touch()                      # the start-up write: what a restart or a wiped inbox needs
+        bp.people_feed = feed
 
     def write_rows(lines: dict) -> None:
         """Merge lines into the inbox's cull-decisions.tsv, keyed by (folder, file). A local lock

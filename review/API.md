@@ -201,6 +201,37 @@ app shows), never ones already filed under someone else.
   - `ignore`: not a face, or a stranger: hidden everywhere. Answers `{ok: true}`.
 - `POST /m/api/people/group/<key>/hide` → `{ok: true}`: hides the group's unclaimed faces like `ignore`.
 
+### Lightroom: `people.tsv`
+
+Named people reach Lightroom Classic as `People > <name>` keywords through the AI Cull plugin (2.3.0 and later).
+The server writes the file `people.tsv` in the inbox (`AICullInbox/`, next to `pending.tsv` and
+`cull-decisions.tsv`); it is not a route. Nothing is written when the server runs without the feed (the tests).
+
+```
+#people v1
+2026-10-01<TAB>DSC05036.ARW<TAB>Alex|Sam
+2026-10-01<TAB>DSC05037.ARW<TAB>
+```
+
+- One row per photo: shoot folder name, file name, the names in it joined by `|`. Rows are in folder and file order
+  and the names alphabetical (case aside). Folder and file are what `pending.tsv` and `cull-decisions.tsv` use, so
+  the plugin matches all three the same way.
+- A photo's names are the people with a confirmed or an auto face in it. Suggestions ("Is this Alex?") don't count.
+- `|` in a name becomes `/`, and tab, CR and LF become a space, as `write_plugin_data` does for keywords.
+- The first line, `#people v1`, is how the plugin tells this file from the other two. The plugin's parsers skip `#` lines.
+- Rows cover every photo that has ever been written with a name: `people_lr(path)` in `annotations.db` remembers them
+  and never forgets. A photo whose last person was taken off (or whose person was deleted) keeps its row with an
+  empty names field, which is how the plugin knows to remove the keyword it added.
+- The whole state is written every time, never a change list.
+- It is written 10 s after the last change (`people.FEED_DEBOUNCE_S`), on a timer thread: after a label write
+  (naming, renaming, adding, merging, review, delete, not/move/ignore, hiding a group) and after the index is
+  rebuilt for a new grouping run, since new faces are filed under named people on their own. It is also written once
+  at server start, which covers a wiped inbox.
+- Written to `people.tsv.tmp` in the same directory and renamed over `people.tsv`, so the plugin never reads half a
+  file. When the inbox isn't mounted (the check Send uses) nothing is written and a line is logged; the photos named
+  so far are still remembered, and the next change or restart writes the file.
+- The plugin never moves or deletes `people.tsv`: it is the current state, and applying it again changes nothing.
+
 ## Practice
 
 The challenge list is hand-maintained in `trial_out/mobile/practice.json`. Its `path` is resolved

@@ -131,6 +131,8 @@ ingest watcher runs both per shoot), and Danny's names and corrections go to `pe
 `face_ignored` in `annotations.db`. [`people.py`](people.py) works out from those who is in which photo (auto-filing,
 "Is this ...?" suggestions, unnamed groups worth naming), and the gallery search finds photos by name. The
 design and the measurements behind its thresholds are in [`PEOPLE.md`](PEOPLE.md); the routes in [`API.md`](API.md).
+`PeopleFeed` there also writes `people.tsv` to the Lightroom inbox 10 s after who is in which photo changes, and the AI
+Cull plugin (2.3.0) turns it into `People > name` keywords (see "Lightroom: `people.tsv`" in [`API.md`](API.md)).
 
 **Lightroom read-back:** each sync, the plugin reports every selected photo's flag and rating.
 A stack you picked, or rated, in Lightroom counts as done in Culling Bay (a reject flag still
