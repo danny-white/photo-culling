@@ -18,6 +18,10 @@ Rules, in order, for one face (thresholds are measured: see PEOPLE.md):
   5. a suggestion            SUGGEST_SIM <= s_P < AUTO_SIM
   6. otherwise               a member of its (unnamed) group, if it has one
 face_no (this face is not P) takes P out of 3, 4, 5 and the runner-up check for that face.
+What Danny turns down also teaches. Once P has NEG_MIN faces in face_no, n_P(f) is the mean of f's top 3
+similarities to them (the same sum as s_P, over the faces that are not P). A face with n_P >= s_P + NEG_MARGIN,
+much more like the faces he said were not P than like P, is treated as if it were in face_no for P: so a "no"
+also keeps P off the look-alikes of the faces he refused, not only off those faces themselves.
 
 The index is built once from trial.db and rebuilt when the grouping run changes (checked at most every
 REFRESH_S; faces arriving between runs do not trigger it). A label change recomputes only the score
@@ -41,6 +45,11 @@ log = logging.getLogger(__name__)
 
 AUTO_SIM = 0.55          # s_P at least this, and a clear lead: the face is filed under P
 AUTO_MARGIN = 0.10       # ... the lead over the next best person
+NEG_MARGIN = 0.10        # n_P at least s_P plus this: the face is more like P's refused faces than like P, so not P
+NEG_MIN = 3              # ... once P has this many faces in face_no (n_P is a top-3 mean, like s_P). Measured on
+# 125 refused and 78 confirmed review answers for one person, each left out in turn: at 0.10 the rule caught 80 of
+# the 125 refusals and 1 of the 78 confirmations (at 0.05: 105 and 6; at 0.00: 118 and 6). With refusals from
+# other days only, 65 and 1.
 SUGGEST_SIM = 0.40       # s_P from here up to AUTO_SIM: "Is this P?"
 GROUP_SHARE = 2 / 3      # the group rule: this share of a group's confirmed faces are one person
 TOP_K = 3                # s_P is the mean of the top 3 similarities to P's confirmed faces ...
@@ -251,11 +260,16 @@ class Labels:
 
 
 class State:
-    """One consistent answer to "who is who", derived from a Base and a set of labels."""
+    """One consistent answer to "who is who", derived from a Base and a set of labels.
+    said_no: person id -> the faces in face_no for them. neg: person id -> n_P per face, for each person with
+    NEG_MIN of those. no: said_no plus the faces the n_P rule takes P off; what the rules used."""
 
-    def __init__(self, base: Base, labels: Labels, conf, scores, res: Resolution, yes, ignored, no):
+    def __init__(self, base: Base, labels: Labels, conf, scores, res: Resolution, yes, ignored, no,
+                 said_no=None, neg=None):
         self.base, self.labels, self.conf, self.scores, self.res = base, labels, conf, scores, res
         self.yes, self.ignored, self.no = yes, ignored, no
+        self.said_no = no if said_no is None else said_no
+        self.neg = {} if neg is None else neg
         self.people = labels.people
         self._names = None
         self._derive()
@@ -337,9 +351,20 @@ class State:
         return self._names
 
 
+def refused(scores: dict[int, np.ndarray], said_no: dict[int, np.ndarray], neg: dict[int, np.ndarray]) -> dict:
+    """face_no, plus what it teaches: for each person with an n_P array, every face whose n_P is at least
+    NEG_MARGIN over its s_P (a confirmed face among them changes nothing: the rules never refile those)."""
+    out = dict(said_no)
+    for p, n in neg.items():
+        if p in scores:
+            out[p] = np.union1d(said_no[p], np.flatnonzero(n - scores[p] >= NEG_MARGIN)).astype(np.int64)
+    return out
+
+
 def compute(base: Base, labels: Labels, prev: State | None = None) -> State:
     """The State for these faces and labels. Only the people whose confirmed faces differ from `prev`'s
-    (a State over the same Base) get their score arrays recomputed."""
+    (a State over the same Base) get their score arrays recomputed, and only those whose face_no faces
+    differ get their n_P arrays recomputed."""
     n = len(base.ids)
     idx_of = base.idx_of
     yes = np.full(n, -1, np.int64)
@@ -366,8 +391,17 @@ def compute(base: Base, labels: Labels, prev: State | None = None) -> State:
             scores[p] = prev.scores[p]
         else:
             scores[p] = person_score(base.vecs, c)
-    res = resolve(base.grp, ignored, yes, scores, no_arrays)
-    return State(base, labels, conf, scores, res, yes, ignored, no_arrays)
+    neg = {}
+    for p, f in no_arrays.items():
+        if p not in scores or len(f) < NEG_MIN:
+            continue
+        if prev is not None and prev.base is base and p in prev.neg and np.array_equal(prev.said_no[p], f):
+            neg[p] = prev.neg[p]
+        else:
+            neg[p] = person_score(base.vecs, f)
+    no = refused(scores, no_arrays, neg)
+    res = resolve(base.grp, ignored, yes, scores, no)
+    return State(base, labels, conf, scores, res, yes, ignored, no, said_no=no_arrays, neg=neg)
 
 
 def newest_first(base: Base, faces: np.ndarray) -> list[int]:

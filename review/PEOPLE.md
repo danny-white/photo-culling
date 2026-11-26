@@ -86,6 +86,22 @@ For every face (`faces` at `FACE_VERSION`, joined to `images.rowid` for its phot
    in `face_no` for P, it's a suggestion for P, ranked by s.
 6. Otherwise, if it has a `grp`, it's a member of that unnamed group.
 
+**What a "no" teaches** (added 2026-11-26). A `face_no` row takes P off that one face. Once P has
+`NEG_MIN` (3) of them, it also teaches: `n_P(f)` is the mean of f's top 3 similarities to P's refused
+faces, the same sum as `s_P`. A face with `n_P >= s_P + NEG_MARGIN` (0.10), much more like the faces
+Danny said are not P than like P, counts as a `face_no` for P in rules 3–5 and in the groups' `maybe`.
+Nothing is written: it is worked out again from the labels on every change, so it can't outlive the
+answers it comes from.
+
+Measured on the live labels that day. One person had 125 refused and 78 confirmed review answers.
+Leaving each out in turn, the rule at 0.10 caught 80 of the 125 refusals and 1 of the 78 confirmations
+(0.05: 105 and 6; 0.00: 118 and 6). Using only refusals from other days, it caught 65 and 1. On the
+library it took that person off 354 photos (1,610 to 1,256), almost all through the group rule, and their
+suggestions fell from 459 to 45. Only 5% of those faces were good faces. Nobody else changed.
+The other three people with refusals had too few, or refusals unlike each other: eight refused faces
+about 11 px across taught nothing. So a "yes" always teaches, through the confirmed set, and a "no"
+teaches once there are a few alike.
+
 Spike calibration, with half of each group "named": at 0.55, 78% of the person's other faces
 were auto-filed and none of anyone else's. At 0.45 it caught 96%, with 0.6% wrong. The 0.40–0.55
 band becomes "Is this P?". Recalibrate on the full library once the backfill is done.

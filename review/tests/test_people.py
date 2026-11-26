@@ -310,6 +310,64 @@ class Rules(unittest.TestCase):
         self.assertEqual(int(st.res.pid[8]), 1, "face_no for 2 takes 2 out, so 1 has no rival")
         self.assertEqual(int(st.res.pid[9]), -1, "the other level face has no face_no, so it stays level")
 
+    def refusal_world(self):
+        """Person 1 (faces 1-3) and a look-alike nobody has named: faces 4-9 are 0.48 like person 1 (suggestions)
+        and 0.87 like each other. Face 10 is another look of person 1 (0.60: filed). Faces 11 and 12 are 0.50 like
+        person 1 and 0.09 / 0.11 more like the look-alike than that."""
+        e = basis(24)
+        refs = [e[0]] * 3
+        sister = [like(e, {0: 0.48, 1: 0.8, "rest": 4 + i}) for i in range(6)]
+        other_look = like(e, {0: 0.60, "rest": 12})
+        edge = [like(e, {0: 0.50, 1: b, "rest": 13 + i}) for i, b in enumerate((0.4375, 0.4625))]
+        return np.stack(refs + sister + [other_look] + edge), [(1, 1), (2, 1), (3, 1)]
+
+    def test_three_refusals_teach_the_look_alikes_are_not_that_person(self):
+        v, yes = self.refusal_world()
+        st = make_state(v, yes=yes, no=[(4, 1), (5, 1), (6, 1)])
+        self.assertEqual([int(st.res.sug[i]) for i in range(6, 9)], [-1, -1, -1], "the look-alikes left are not asked about")
+        self.assertEqual((int(st.res.pid[9]), HOW(st, 9)), (1, "auto"), "another look of them is still theirs")
+        self.assertEqual(int(st.res.sug[10]), 1, "0.09 more like the refusals than like them: still asked")
+        self.assertEqual(int(st.res.sug[11]), -1, "0.11 more like the refusals: not")
+        self.assertEqual(st.said_no[1].tolist(), [3, 4, 5])                   # what was said is kept apart
+        self.assertEqual(st.no[1].tolist(), [3, 4, 5, 6, 7, 8, 11])            # from what the rules used
+
+    def test_two_refusals_teach_nothing_yet(self):
+        v, yes = self.refusal_world()
+        st = make_state(v, yes=yes, no=[(4, 1), (5, 1)])
+        self.assertEqual([int(st.res.sug[i]) for i in range(5, 12) if i != 9], [1] * 6)
+        self.assertEqual(st.neg, {})
+        self.assertEqual({k: v.tolist() for k, v in st.no.items()}, {1: [3, 4]})
+
+    def test_refusals_teach_only_about_the_person_they_were_for(self):
+        v, yes = self.refusal_world()
+        v = np.concatenate([v, v[:3]])                                       # person 2: faces 13-15, the same as person 1
+        st = make_state(v, yes=yes + [(13, 2), (14, 2), (15, 2)], no=[(4, 1), (5, 1), (6, 1)])
+        # persons 1 and 2 are level everywhere, so nobody is filed or suggested ... except where person 1 is out
+        self.assertEqual([int(st.res.sug[i]) for i in range(6, 9)], [2, 2, 2])
+        self.assertNotIn(2, st.neg)
+
+    def test_a_refused_group_is_not_asked_about_as_that_person(self):
+        v, yes = self.refusal_world()
+        grp = [-1] * 3 + [4] * 6 + [-1] * 3
+        st = make_state(v, grp=grp, yes=yes, no=[(4, 1), (5, 1)])
+        (g,) = st.groups
+        self.assertEqual(g["maybe"]["id"], 1)                                # two refused of six: still "Is this Person 1?"
+        st = make_state(v, grp=grp, yes=yes, no=[(4, 1), (5, 1), (6, 1)])
+        (g,) = st.groups
+        self.assertNotIn("maybe", g)                                         # three teach that the rest are not them either
+
+    def test_n_p_is_recomputed_only_when_the_refusals_change(self):
+        v, yes = self.refusal_world()
+        st = make_state(v, yes=yes, no=[(4, 1), (5, 1), (6, 1)])
+        more_yes = people.Labels(st.labels.people, st.labels.yes + [(10, 1, "confirmed")], st.labels.no, [])
+        st2 = people.compute(st.base, more_yes, prev=st)
+        self.assertIs(st2.neg[1], st.neg[1])
+        self.assertIsNot(st2.scores[1], st.scores[1])
+        more_no = people.Labels(st.labels.people, st.labels.yes, st.labels.no + [(7, 1)], [])
+        st3 = people.compute(st.base, more_no, prev=st)
+        self.assertIsNot(st3.neg[1], st.neg[1])
+        self.assertIs(st3.scores[1], st.scores[1])
+
     def test_unnamed_groups_are_the_unclaimed_ones_with_three_faces_most_days_first(self):
         e = basis(20)
         # group 1: 4 faces on one day; group 2: 3 faces on 3 days; group 3: 2 faces; group 4: 3 faces, one ignored
@@ -566,6 +624,28 @@ class Filing(IndexCase):
         with self.assertRaises(people.PeopleError) as cm:
             ix.review(pid, yes=[mine[2]], no=[mine[2]])
         self.assertEqual(cm.exception.status, 400)
+
+    def test_review_no_on_three_of_a_look_alike_keeps_them_off_the_rest(self):
+        """A sister nobody has named: her faces are about 0.45 like alex's (suggestions for alex) and 0.64 like
+        each other. Three noes, and her other faces are not asked about any more; alex keeps every face."""
+        ix = self.two_looks()
+        pid, st = ix.create("Alex", group=self.key("alex", "2026/2026-01-01"))
+        alex = self.w.person("alex")
+        other = unit(np.random.default_rng(11).normal(size=D))
+        other = unit(other - (other @ alex) * alex)
+        self.w.centre["sister"] = unit(0.7 * alex + np.sqrt(1 - 0.7 ** 2) * other)
+        sister = [self.w.add_face("sister", "2026/2026-01-07") for _ in range(8)]
+        self.w.commit()
+        self.regroup_same(ix)
+        st = ix.state()
+        asked = [f for f in sister if int(st.res.sug[st.base.idx_of[f]]) == pid]
+        self.assertEqual(len(asked), 8, "the premise: every face of hers is a suggestion for alex")
+        filed = ix.person_json(st, pid)["faces"]
+        st = ix.review(pid, yes=[], no=sister[:3])
+        self.assertEqual([int(st.res.sug[st.base.idx_of[f]]) for f in sister[3:]], [-1] * 5)
+        self.assertEqual(ix.person_json(st, pid)["suggestions"], 0)
+        self.assertEqual(ix.person_json(st, pid)["faces"], filed)
+        self.assertEqual(sorted(r["face_id"] for r in self.w.labels("face_no")), sorted(sister[:3]))   # only what was said
 
     def test_review_no_for_a_face_that_was_a_yes_takes_it_back(self):
         ix = self.two_looks()
