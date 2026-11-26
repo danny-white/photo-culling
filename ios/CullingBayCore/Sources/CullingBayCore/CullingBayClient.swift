@@ -49,6 +49,9 @@ public actor CullingBayClient {
     private var cacheOrder: [String] = []          // oldest first, for the size limit
     /// JSON responses kept for ETag revalidation; the oldest is dropped beyond this.
     public static let maxCachedResponses = 100
+    /// Photos' camera details already fetched, so opening the (i) sheet again is instant. In memory
+    /// only, and gone with the client when the server changes.
+    private var infoCache = PhotoInfoCache()
 
     private struct CachedResponse {
         let etag: String
@@ -193,6 +196,53 @@ public actor CullingBayClient {
             throw CullingBayError.http(status: response.statusCode, message: nil)
         }
     }
+
+    // MARK: Camera details
+
+    /// How long the PC gets to answer `info`, in seconds. Reading a RAW's tags can mean waking the NAS.
+    public static let infoTimeout: TimeInterval = 10
+
+    /// One photo's camera details (`GET /m/api/info/<id>`), for the (i) sheet. They are read from the
+    /// file on the PC, so this always goes there, even with days kept on the phone, and nothing it
+    /// answers is saved on the phone. The last 64 answers are kept in memory, so asking again for a
+    /// photo is instant; a failure is not kept.
+    ///
+    /// One try with a 10 s timeout, no URL cache, no retry and nothing in the write queue. A 503
+    /// (the photo storage cannot be reached) throws `.unavailable`; a 404 (not in the index) and a
+    /// 415 (the file's tags cannot be read) throw `.http` with that status, each with the server's
+    /// `error` text.
+    public func info(id: Int) async throws -> PhotoInfo {
+        if let known = infoCache.value(for: id) { return known }
+        var request = URLRequest(url: URLBuilding.url(base: baseURL, path: "/m/api/info/\(id)"))
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = Self.infoTimeout
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await transport.send(request)
+        } catch let error as CullingBayError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw CullingBayError.transport(error.localizedDescription)
+        }
+        switch response.statusCode {
+        case 200..<300:
+            let info: PhotoInfo = try Self.decode(data)
+            infoCache.remember(info, for: id)
+            return info
+        case 503:
+            throw CullingBayError.unavailable(message: Self.errorMessage(in: data))
+        default:
+            throw CullingBayError.http(status: response.statusCode, message: Self.errorMessage(in: data))
+        }
+    }
+
+    /// How many photos' details are kept (for tests).
+    public var cachedInfoCount: Int { infoCache.count }
 
     // MARK: Writes
 

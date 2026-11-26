@@ -250,6 +250,53 @@ struct OfflineTransportTests {
         await #expect(throws: CullingBayError.self) { try await lost.warm(ids: [5]) }
     }
 
+    @Test func aPhotosDetailsAlwaysComeFromThePCAndNothingIsSavedFromThem() async throws {
+        let root = TempRoot()
+        let store = root.store()
+        try store.begin(day: day, frames: 1, photos: [])
+        try store.writeDay(day, Data("old".utf8))
+        try store.finish(day: day)
+        try store.writeImage(Data("saved".utf8), kind: .view, id: 5)
+        let before = store.totalBytes
+        let beforeDay = store.readDay(day)
+        let base = network(body: infoSonyARWJSON)
+        let client = CullingBayClient(baseURL: testBaseURL, transport: transport(base, store))
+        let info = try await client.info(id: 5)                     // photo 5 and its day are saved on the phone
+        #expect(info.file == "DSC04912.ARW")
+        let sent = await base.requests
+        #expect(sent.count == 1)
+        #expect(sent[0].url?.path == "/m/api/info/5")
+        #expect(sent[0].timeoutInterval == CullingBayClient.infoTimeout)    // not the 6 s of a day
+        #expect(store.totalBytes == before && store.readDay(day) == beforeDay && store.records.count == 1)
+
+        // With the PC out of reach it fails, and nothing on the phone answers for it, even when the
+        // phone has the day and the picture.
+        let lost = CullingBayClient(baseURL: testBaseURL, transport: transport(network(fails: true), store))
+        await #expect(throws: CullingBayError.self) { _ = try await lost.info(id: 5) }
+        #expect(store.totalBytes == before && store.records.count == 1)
+
+        // Nor is a refusal turned into a saved copy.
+        let refused = CullingBayClient(
+            baseURL: testBaseURL, transport: transport(network(status: 503, body: #"{"error":"photo storage unavailable"}"#), store))
+        await #expect(throws: CullingBayError.unavailable(message: "photo storage unavailable")) {
+            _ = try await refused.info(id: 5)
+        }
+    }
+
+    @Test func theInfoPathIsNotOneOfTheStoresRoutes() async throws {
+        let root = TempRoot()
+        let store = root.store()
+        let base = network(body: infoSonyARWJSON)
+        let offline = transport(base, store)
+        var request = getRequest("/m/api/info/5")
+        request.timeoutInterval = 10
+        let (data, response) = try await offline.send(request)
+        #expect(data == Data(infoSonyARWJSON.utf8) && response.statusCode == 200)
+        #expect(response.value(forHTTPHeaderField: OfflineTransport.offlineHeader) == nil)
+        #expect(await base.requests.map { $0.url?.absoluteString } == [request.url?.absoluteString])
+        #expect(store.records.isEmpty && store.totalBytes == 0)
+    }
+
     @Test func aPutIsNotAGetEvenOnADayRoute() async throws {
         let root = TempRoot()
         let store = root.store()
