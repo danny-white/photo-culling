@@ -239,9 +239,11 @@ struct SyncRig {
     let sync: OfflineSync
 
     /// `root`: a folder the test has already put files in, which the store then reads.
+    /// `canReachPC`: the app's link being online; the sync starts nothing while it is not.
     init(
         _ answer: FakeDaysSource.Answer, settings: FakeOfflineSettings = FakeOfflineSettings(),
-        root: TempRoot = TempRoot(), gate: CallGate? = nil, network: (any HTTPTransport)? = nil
+        root: TempRoot = TempRoot(), gate: CallGate? = nil, network: (any HTTPTransport)? = nil,
+        canReachPC: @escaping @MainActor () -> Bool = { true }
     ) {
         self.root = root
         let store = root.store()
@@ -254,7 +256,7 @@ struct SyncRig {
         let backups = backups
         sync = OfflineSync(
             daysSource: list, store: store, downloader: downloader, settings: settings,
-            sleep: sleeper.sleep, excludeFromBackup: { backups.count += 1 })
+            sleep: sleeper.sleep, excludeFromBackup: { backups.count += 1 }, canReachPC: canReachPC)
     }
 
     /// One sync, run to its end (and any sync it queued behind it).

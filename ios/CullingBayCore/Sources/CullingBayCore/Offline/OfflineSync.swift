@@ -129,6 +129,7 @@ public final class OfflineSync {
     @ObservationIgnored private let preferences: any OfflineSettingsSource
     @ObservationIgnored private let sleep: CullSleep
     @ObservationIgnored private let excludeFromBackup: @MainActor () -> Void
+    @ObservationIgnored private let canReachPC: @MainActor () -> Bool
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var again = false
     @ObservationIgnored private var debounce: Task<Void, Never>?
@@ -145,12 +146,15 @@ public final class OfflineSync {
 
     /// `daysSource` is the client the app reads days with (through the saved days); `downloader`
     /// fetches with the real network. `excludeFromBackup` keeps the store's folder out of
-    /// backups; it is called once, by the first sync that runs with offline on.
+    /// backups; it is called once, by the first sync that runs with offline on. `canReachPC` is
+    /// the app's `ServerLink` being online: no sync starts while it is not, and the app syncs
+    /// when it is again.
     public init(
         daysSource: any OfflineDaysSource, store: any OfflineSyncStore,
         downloader: any OfflineDayDownloading, settings: any OfflineSettingsSource,
         sleep: @escaping CullSleep = CullClock.system,
-        excludeFromBackup: @escaping @MainActor () -> Void = {}
+        excludeFromBackup: @escaping @MainActor () -> Void = {},
+        canReachPC: @escaping @MainActor () -> Bool = { true }
     ) {
         self.daysSource = daysSource
         self.store = store
@@ -158,6 +162,7 @@ public final class OfflineSync {
         self.preferences = settings
         self.sleep = sleep
         self.excludeFromBackup = excludeFromBackup
+        self.canReachPC = canReachPC
         self.pins = settings.loadPins()
         self.savedDays = Set(store.savedDays)
         self.state = settings.isEnabled ? .idle : .off
@@ -166,9 +171,14 @@ public final class OfflineSync {
     // MARK: Triggers
 
     /// Brings the phone in line with the plan. Does nothing if offline is off. If a sync is
-    /// already running, another follows it, so a change made meanwhile is not lost.
+    /// already running, another follows it, so a change made meanwhile is not lost. While the PC
+    /// cannot be reached (`canReachPC`) nothing starts, and the state says the phone is offline.
     public func sync() {
         guard preferences.isEnabled else { return }
+        guard canReachPC() else {
+            if task == nil { state = .offline }
+            return
+        }
         if task != nil {
             again = true
             return
