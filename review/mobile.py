@@ -18,6 +18,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 import urllib.request
@@ -58,6 +59,14 @@ DECODES_AT_ONCE = 2      # decodes someone is waiting for (a 1:1 check, an HD zo
 WARM_WORKERS = 2         # decode-ahead: RAWs decoded in the background once their picture is asked for
 WARM_QUEUE = 4           # decode-ahead requests waiting; swiping fast drops the oldest
 WARM_ASK = 4             # photos one /m/api/warm request may name (the card on screen, the next ones)
+INFO_CACHE = 512         # /m/api/info answers kept in memory (reading a RAW's tags takes ~0.1 s on the NAS)
+# The tags /m/api/info reads with exiftool. "#" asks for the plain number; the others come as
+# exiftool's own words ("Manual", "Multi-segment", "Off, Did not fire").
+INFO_TAGS = ("FileType", "FileSize#", "ImageWidth#", "ImageHeight#", "Megapixels#", "Make", "Model",
+             "LensModel", "LensID", "ISO#", "ExposureTime#", "FNumber#", "FocalLength#",
+             "FocalLengthIn35mmFormat#", "ExposureCompensation#", "ExposureProgram", "MeteringMode", "Flash",
+             "WhiteBalance", "FocusMode", "DateTimeOriginal", "SubSecTimeOriginal", "OffsetTimeOriginal",
+             "GPSLatitude#", "GPSLongitude#")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cull_decisions(
@@ -1891,6 +1900,94 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         resp.headers["Content-Disposition"] = f'{how}; filename="{name}"'
         resp.headers["Cache-Control"] = "max-age=3600"
         return resp
+
+    info_cache: collections.OrderedDict[int, dict] = collections.OrderedDict()
+    info_lock = threading.Lock()
+
+    def read_tags(path: str) -> dict:
+        """The photo's own tags, by exiftool (it reads RAWs, HEIC and JPEG alike). OSError when the
+        file can't be reached, ValueError when exiftool can't read it."""
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        out = subprocess.run(["exiftool", "-j", "-q", "-q", *[f"-{t}" for t in INFO_TAGS], path],
+                             capture_output=True, timeout=15, check=False)
+        try:
+            tags = json.loads(out.stdout or b"[]")
+        except ValueError:
+            tags = []
+        if not tags or not isinstance(tags[0], dict):
+            raise ValueError((out.stderr or b"").decode("utf-8", "replace").strip()[:120] or "no tags")
+        return tags[0]
+
+    @bp.route("/api/info/<int:rowid>")
+    def api_info(rowid):
+        """The usual camera details of one photo, for the app's (i) sheet: file, size, camera and
+        lens, exposure, when and where. Read from the file itself when first asked (the index keeps
+        none of them) and kept in memory. Values the file lacks are null."""
+        if not 0 < rowid < 2 ** 63:
+            return jsonify({"error": "not found"}), 404
+        with info_lock:
+            if rowid in info_cache:
+                info_cache.move_to_end(rowid)
+                perf.note(info_cache="hit")
+                return jsonify(info_cache[rowid])
+        con = db_ro()
+        try:
+            r = con.execute("SELECT path, filename, place FROM images WHERE rowid=?", (rowid,)).fetchone()
+        finally:
+            con.close()
+        if r is None:
+            return jsonify({"error": "not found"}), 404
+        try:
+            with perf.stage("exiftool"):
+                t = read_tags(r["path"])
+        except (OSError, subprocess.TimeoutExpired):
+            return jsonify({"error": "photo storage unavailable"}), 503
+        except ValueError as e:
+            log.warning("info: exiftool could not read photo %s (%s): %s", rowid, r["filename"], e)
+            return jsonify({"error": f"could not read this file's details: {e}"}), 415
+
+        def num(key):
+            v = t.get(key)
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        def text(key):
+            v = t.get(key)
+            if v is None or isinstance(v, bool):
+                return None
+            return str(v).strip() or None
+
+        make, model = text("Make"), text("Model")
+        # "SONY" + "ILCE-7RM3" -> "Sony ILCE-7RM3"; "Canon" + "Canon EOS R6" -> "Canon EOS R6";
+        # "NIKON CORPORATION" + "NIKON D5100" -> "NIKON D5100".
+        brand = make.split()[0] if make else None
+        if brand and brand.isupper() and len(brand) > 3:
+            brand = brand.title()
+        if model and brand and model.lower().startswith(brand.lower()):
+            camera = model
+        else:
+            camera = " ".join(x for x in (brand, model) if x) or None
+        lens = text("LensModel") or (text("LensID") if text("LensID") and not text("LensID").isdigit() else None)
+        taken = text("DateTimeOriginal")
+        if taken and text("SubSecTimeOriginal"):
+            taken = f"{taken}.{text('SubSecTimeOriginal')}"
+        lat, lon = num("GPSLatitude"), num("GPSLongitude")
+        info = {
+            "id": rowid, "file": r["filename"], "format": text("FileType"), "bytes": num("FileSize"),
+            "width": num("ImageWidth"), "height": num("ImageHeight"), "megapixels": num("Megapixels"),
+            "camera": camera, "make": make, "model": model, "lens": lens,
+            "iso": num("ISO"), "shutter_s": num("ExposureTime"), "aperture": num("FNumber"),
+            "focal_mm": num("FocalLength"), "focal_35mm": num("FocalLengthIn35mmFormat"),
+            "ev": num("ExposureCompensation"), "program": text("ExposureProgram"),
+            "metering": text("MeteringMode"), "flash": text("Flash"), "white_balance": text("WhiteBalance"),
+            "focus_mode": text("FocusMode"), "taken": taken, "offset": text("OffsetTimeOriginal"),
+            "gps": [lat, lon] if lat is not None and lon is not None else None, "place": r["place"],
+        }
+        with info_lock:
+            info_cache[rowid] = info
+            while len(info_cache) > INFO_CACHE:
+                info_cache.popitem(last=False)
+        return jsonify(info)
 
     @bp.route("/api/warm")
     def api_warm():

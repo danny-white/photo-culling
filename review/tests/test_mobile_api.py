@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1700,3 +1701,90 @@ class PressPanos(unittest.TestCase):
         day = next(d for d in self.client.get("/m/api/days").get_json()["days"] if d["day"] == self.DAY)
         body = self.client.get(f"/m/api/day/{self.DAY}").get_json()
         self.assertEqual(day["stacks"], len(body["stacks"]))
+
+
+@unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
+class PhotoInfo(unittest.TestCase):
+    """GET /m/api/info/<id>: the camera details of one photo for the app's (i) sheet, read from the
+    file with exiftool when first asked and kept in memory."""
+
+    def setUp(self):
+        from flask import Flask
+        import mobile
+        import photo_cull as pc
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        self.fake = tmp / "fake.db"                     # rows that point at files we control
+        with closing(sqlite3.connect(self.fake)) as con, con:
+            con.execute("CREATE TABLE images (path TEXT, filename TEXT, place TEXT)")
+            con.execute("INSERT INTO images (rowid, path, filename, place) VALUES (1, ?, 'GONE.ARW', NULL)",
+                        (str(tmp / "GONE.ARW"),))
+            (tmp / "NOTRAW.ARW").write_text("not a photo")
+            con.execute("INSERT INTO images (rowid, path, filename, place) VALUES (2, ?, 'NOTRAW.ARW', NULL)",
+                        (str(tmp / "NOTRAW.ARW"),))
+        self.use_fake = False
+
+        def db_ro():
+            target = f"file:{self.fake}?mode=ro" if self.use_fake else f"file:{TRIAL_DB}?mode=ro"
+            c = sqlite3.connect(target, uri=True)
+            c.row_factory = sqlite3.Row
+            return c
+
+        (tmp / "static").mkdir()
+        (tmp / "inbox").mkdir()
+        app = Flask(__name__)
+        app.register_blueprint(mobile.make_blueprint(
+            db_ro=db_ro, anno=lambda: anno_connection(tmp / "annotations.db"), pc=pc, cache_dir=tmp,
+            static_dir=tmp / "static", state_dir=tmp / "state", inbox=tmp / "inbox", check_mount=False,
+            ingest_log=tmp / "ingest.log", ollama_url="http://127.0.0.1:9", backup_status=tmp / "b.json",
+            known_unreadable=tmp / "k.txt"))
+        self.client = app.test_client()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def rowid(self, where):
+        with closing(sqlite3.connect(f"file:{TRIAL_DB}?mode=ro", uri=True)) as con:
+            r = con.execute(f"SELECT rowid, path FROM images WHERE {where} LIMIT 1").fetchone()
+        if r is None or not Path(r[1]).exists():
+            self.skipTest("needs the NAS and a matching photo")
+        return r[0]
+
+    def test_a_sony_raw(self):
+        rid = self.rowid("filename='DSC04912.ARW' AND path LIKE '%/2026-09-29/%'")
+        info = self.client.get(f"/m/api/info/{rid}").get_json()
+        self.assertEqual((info["format"], info["camera"], info["iso"], info["aperture"]), ("ARW", "Sony ILCE-7RM3", 100, 4))
+        self.assertAlmostEqual(info["shutter_s"], 1 / 2500)
+        self.assertEqual((info["width"], info["height"]), (8000, 5320))
+        self.assertEqual(info["file"], "DSC04912.ARW")
+        self.assertGreater(info["bytes"], 40_000_000)
+        self.assertEqual(info["taken"][:19], "2026:09:29 15:35:35")
+        for key in ("lens", "focal_mm", "ev", "program", "metering", "flash", "white_balance", "offset", "gps", "place"):
+            self.assertIn(key, info)
+
+    def test_the_second_ask_is_answered_from_memory(self):
+        import mobile
+        rid = self.rowid("filename='DSC04912.ARW' AND path LIKE '%/2026-09-29/%'")
+        self.client.get(f"/m/api/info/{rid}")
+        with patch.object(mobile.subprocess, "run", side_effect=AssertionError("exiftool ran again")):
+            self.assertEqual(self.client.get(f"/m/api/info/{rid}").status_code, 200)
+
+    def test_an_iphone_photo_names_the_phone_and_has_gps(self):
+        rid = self.rowid("lower(filename) LIKE '%.heic' AND status='ok' AND gps_lat IS NOT NULL")
+        info = self.client.get(f"/m/api/info/{rid}").get_json()
+        self.assertTrue(info["camera"].startswith("Apple iPhone"))
+        self.assertEqual(len(info["gps"]), 2)
+
+    def test_unknown_missing_and_unreadable(self):
+        self.assertEqual(self.client.get("/m/api/info/999999999").status_code, 404)
+        self.use_fake = True
+        r = self.client.get("/m/api/info/1")
+        self.assertEqual((r.status_code, r.get_json()["error"]), (503, "photo storage unavailable"))
+        import mobile
+        nothing = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"Error: File format error")
+        with patch.object(mobile.subprocess, "run", return_value=nothing):
+            r = self.client.get("/m/api/info/2")                       # a failure is not remembered
+        self.assertEqual(r.status_code, 415)
+        self.assertIn("File format error", r.get_json()["error"])
+        info = self.client.get("/m/api/info/2").get_json()          # exiftool says what the file is
+        self.assertEqual((info["format"], info["camera"], info["iso"]), ("TXT", None, None))
