@@ -368,6 +368,29 @@ class Rules(unittest.TestCase):
         self.assertIsNot(st3.neg[1], st.neg[1])
         self.assertIs(st3.scores[1], st.scores[1])
 
+    def test_doubts_are_the_faces_only_the_group_rule_filed_least_sure_first(self):
+        e = basis(16)
+        refs = [e[0]] * 3                                                    # faces 1-3: person 1, in group 5
+        in_group = [like(e, {0: s, "rest": 4 + i}) for i, s in enumerate((0.30, 0.50, 0.45, 0.70))]   # faces 4-7
+        alone = like(e, {0: 0.60, "rest": 9})                               # face 8: filed by similarity, no group
+        st = make_state(np.stack(refs + in_group + [alone]), grp=[5] * 7 + [-1], yes=[(1, 1), (2, 1), (3, 1)])
+        self.assertEqual([HOW(st, i) for i in range(3, 8)], ["auto"] * 5)
+        self.assertEqual(st.doubted[1].tolist(), [3, 5, 4])                  # 0.30, 0.45, 0.50; not 0.70 or 0.60
+        ix = people.PeopleIndex(db_ro=None, anno=None, pc=None)
+        self.assertEqual(ix.person_json(st, 1)["doubts"], 3)
+        self.assertEqual(ix.doubts_of(st, 1), {"faces": [{"id": 4, "photo": 40, "sim": 0.3}, {"id": 6, "photo": 60, "sim": 0.45},
+                                                         {"id": 5, "photo": 50, "sim": 0.5}], "groups": []})
+        # answered: yes confirms the face, no takes person 1 off it; both leave the list
+        st = make_state(np.stack(refs + in_group + [alone]), grp=[5] * 7 + [-1], yes=[(1, 1), (2, 1), (3, 1), (4, 1)],
+                        no=[(6, 1)])
+        self.assertEqual((HOW(st, 3), HOW(st, 5), int(st.res.pid[5])), ("confirmed", "none", -1))
+        self.assertEqual(st.doubted[1].tolist(), [4])
+
+    def test_a_person_with_no_auto_faces_has_no_doubts(self):
+        e = basis(4)
+        st = make_state(e, yes=[(1, 7)])
+        self.assertEqual(st.doubted[7].tolist(), [])
+
     def test_unnamed_groups_are_the_unclaimed_ones_with_three_faces_most_days_first(self):
         e = basis(20)
         # group 1: 4 faces on one day; group 2: 3 faces on 3 days; group 3: 2 faces; group 4: 3 faces, one ignored
@@ -506,7 +529,7 @@ class Naming(IndexCase):
         ix = self.grouped()
         pid, st = ix.create("  Alex  ", group=self.key("alex"))
         self.assertEqual(ix.person_json(st, pid), {"id": pid, "name": "Alex", "photos": 18, "faces": 18,
-                                                    "cover": st.cover[pid], "suggestions": 0})
+                                                    "cover": st.cover[pid], "suggestions": 0, "doubts": 0})
         self.assertIn(st.cover[pid], self.w.ids("alex"))
         rows = self.w.labels("face_yes")
         self.assertEqual(sorted(r["face_id"] for r in rows), sorted(self.w.ids("alex")))
@@ -1272,7 +1295,7 @@ class PeopleWrites(RoutesCase):
 
     def test_naming_a_group_is_201_with_the_person_and_a_taken_name_is_409(self):
         body = self.name()
-        self.assertEqual(set(body), {"id", "name", "photos", "faces", "cover", "suggestions"})
+        self.assertEqual(set(body), {"id", "name", "photos", "faces", "cover", "suggestions", "doubts"})
         self.assertEqual((body["name"], body["photos"], body["faces"]), ("Alex", 18, 18))
         status, err = self.post("/people", {"name": "ALEX", "group": self.key("sam")})
         self.assertEqual((status, err["person"]), (409, body))

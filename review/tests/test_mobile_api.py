@@ -1724,7 +1724,8 @@ class PeopleContract(unittest.TestCase):
     assert_shape = MobileApi.assert_shape
     PHOTO = MobileApi.PHOTO
     H = {"X-Culling-Bay": "1"}
-    PERSON = {"id": int, "name": str, "photos": int, "faces": int, "cover": (int, None), "suggestions": int}
+    PERSON = {"id": int, "name": str, "photos": int, "faces": int, "cover": (int, None), "suggestions": int,
+              "doubts": int}
     GROUP = {"key": int, "faces": int, "photos": int, "days": int, "cover": int}
 
     def setUp(self):
@@ -1805,9 +1806,34 @@ class PeopleContract(unittest.TestCase):
         self.assert_shape(g["maybe"], {"id": int, "name": str}, "Group.maybe")
         self.assertEqual(g["maybe"]["id"], alex["id"])
         self.assertEqual(self.get("/people")["people"][0]["suggestions"], 4)
-        for url in ("/people/9999/faces", "/people/9999/suggestions"):
+        doubts = self.get(f"/people/{alex['id']}/doubts")
+        self.assertEqual(doubts, {"faces": [], "groups": []})              # every face of hers is one Danny named
+        for url in ("/people/9999/faces", "/people/9999/suggestions", "/people/9999/doubts"):
             self.error(self.get(url, 404), url)
         self.error(self.get(f"/people/{alex['id']}/faces?limit=0", 400), "bad limit")
+
+    def test_contract_doubts(self):
+        alex = self.name("Alex", "alex")
+        mine = self.w.add_lookalikes("alex", 3, "2026/2026-01-06")        # about 0.45 like her: under 0.55
+        con = sqlite3.connect(self.w.db)
+        try:
+            groups = {}
+            for face, grp in con.execute("SELECT face_id, grp FROM face_groups WHERE grp IS NOT NULL"):
+                groups.setdefault(grp, []).append(face)
+        finally:
+            con.close()
+        groups[min(self.w.ids("alex"))] += mine                              # ... but in her group: filed, and doubted
+        self.w.write_groups(groups)
+        doubts = self.get(f"/people/{alex['id']}/doubts")
+        self.assert_shape(doubts, {"faces": list, "groups": list}, "Doubts")
+        self.assertEqual((sorted(f["id"] for f in doubts["faces"]), doubts["groups"]), (sorted(mine), []))
+        for f in doubts["faces"]:
+            self.assert_shape(f, {"id": int, "photo": int, "sim": float}, "DoubtedFace")
+            self.assertLess(f["sim"], 0.55)
+        self.assertEqual([f["sim"] for f in doubts["faces"]], sorted(f["sim"] for f in doubts["faces"]))
+        person = next(p for p in self.get("/people")["people"] if p["id"] == alex["id"])
+        self.assert_shape(person, self.PERSON, "Person")
+        self.assertEqual(person["doubts"], 3)
 
     def test_contract_photo_faces(self):
         self.name("Alex", "alex")

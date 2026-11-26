@@ -2217,6 +2217,13 @@ SideStore may refuse a plain-HTTP source; test this on the phone.</p>
         person_or_404(st, pid)
         return jsonify(people_index.suggestions_of(st, pid))
 
+    @bp.route("/api/people/<int:pid>/doubts")
+    @people_errors
+    def api_person_doubts(pid):
+        st = people_index.state()
+        person_or_404(st, pid)
+        return jsonify(people_index.doubts_of(st, pid))
+
     @bp.route("/api/people/<int:pid>/add", methods=["POST"])
     @guarded
     @people_errors

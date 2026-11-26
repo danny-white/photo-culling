@@ -129,6 +129,7 @@ Reads:
 - `GET /people/group/<key>` returns `{key, total, photos: [Photo]}`.
 - `GET /people/<id>/faces?offset=&limit=` returns `{total, faces: [{id, photo, how}]}`, for the fix screen.
 - `GET /people/<id>/suggestions` returns `{faces: [{id, photo, sim}], groups: [Group]}`: up to 60 faces, plus the unnamed groups whose `maybe` is this person.
+- `GET /people/<id>/doubts` returns `{faces: [{id, photo, sim}], groups: []}` for "Maybe not <name>?": up to 60 of the faces filed under them automatically with `s_P` under 0.55 (`DOUBT_SIM`), which only the group rule filed, least sure first. Person JSON has their count as `doubts`. The answers go to `review`. (Added 2026-11-26: Danny asked for a way to catch the PC being over-eager.)
 - `GET /face/<id>?s=small|large` returns a square JPEG, 160 or 480 px. It is cut from the photo's `view` rendition with the box padded 30%, and is cacheable like `/img`.
 - `GET /photo/<id>/faces` returns `{faces: [{id, box: [x0,y0,x1,y1], person: {id, name}?, how}]}`. Ignored faces are left out.
 

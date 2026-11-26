@@ -133,6 +133,10 @@ show until the next run.
   least sure first (the likeliest mistakes), then the confirmed ones, newest photo first. `how` is `auto` or `confirmed`.
 - `GET /m/api/people/<id>/suggestions` → `{faces: [{id, photo, sim}], groups: [Group]}`: up to 60 faces that
   may be this person, most alike first (`sim` is 0.40 to 0.55), and the unnamed groups whose `maybe` is them.
+- `GET /m/api/people/<id>/doubts` → `{faces: [{id, photo, sim}], groups: []}`: for "Maybe not <name>?", up to 60
+  of the faces the server filed under this person with `sim` under 0.55 (filed only because their group is the
+  person's), least sure first. The same shape as `suggestions`, with no groups. Answer with `review`: yes confirms
+  the face, no takes the person off it; either way it leaves this list.
 - `GET /m/api/photo/<id>/faces` → `{faces: [PhotoFace]}`, left to right; `404` for an unknown photo.
 - `GET /m/api/face/<id>?s=small|large` → a square JPEG of the face, 160 or 480 px (default `small`). It is cut
   from the photo's 1616 px picture (the same file as `img?s=view`, made if missing; it never starts the RAW's
@@ -149,6 +153,7 @@ Person:
 | `faces` | int | Their faces, confirmed and auto |
 | `cover` | int? | A face id for their picture: the one Danny chose, else the best confirmed face. `null` only when they have no faces left. |
 | `suggestions` | int | Faces that may be them, for "Review N suggestions" |
+| `doubts` | int | Faces filed as them that the server is least sure of, for "Maybe not <name>?" (see `doubts`) |
 
 Group:
 

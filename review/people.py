@@ -51,6 +51,8 @@ NEG_MIN = 3              # ... once P has this many faces in face_no (n_P is a t
 # the 125 refusals and 1 of the 78 confirmations (at 0.05: 105 and 6; at 0.00: 118 and 6). With refusals from
 # other days only, 65 and 1.
 SUGGEST_SIM = 0.40       # s_P from here up to AUTO_SIM: "Is this P?"
+DOUBT_SIM = AUTO_SIM     # a face filed automatically under P with s_P under this was filed only by the group rule:
+                         # "Maybe not P?" lists them, least sure first, for Danny to check
 GROUP_SHARE = 2 / 3      # the group rule: this share of a group's confirmed faces are one person
 TOP_K = 3                # s_P is the mean of the top 3 similarities to P's confirmed faces ...
 MAX_CONFIRMED = 300      # ... out of at most this many, a fixed spread by face id
@@ -279,6 +281,7 @@ class State:
         self.faces = {}               # person id -> faces filed under them (confirmed and auto)
         self.photo_count = {}
         self.suggested = {}           # person id -> suggested faces, most alike first
+        self.doubted = {}             # person id -> their auto faces with s_P under DOUBT_SIM, least sure first
         self.cover = {}
         for p, row in self.people.items():
             f = np.flatnonzero(res.pid == p)
@@ -286,6 +289,12 @@ class State:
             self.photo_count[p] = len(np.unique(b.photo[f]))
             sg = np.flatnonzero(res.sug == p)
             self.suggested[p] = sg[np.argsort(-res.sug_sim[sg], kind="stable")]
+            auto = f[res.how[f] == 2]
+            if p in self.scores and len(auto):
+                low = auto[self.scores[p][auto] < DOUBT_SIM]
+                self.doubted[p] = low[np.argsort(self.scores[p][low], kind="stable")]
+            else:
+                self.doubted[p] = EMPTY
             pool = self.conf.get(p, EMPTY)
             if len(pool) == 0:
                 pool = f
@@ -607,7 +616,8 @@ class PeopleIndex:
     # ---------------------------------------------------------------- reads, as the API's JSON
     def person_json(self, st: State, pid: int) -> dict:
         return {"id": pid, "name": st.people[pid]["name"], "photos": st.photo_count[pid],
-                "faces": len(st.faces[pid]), "cover": st.cover[pid], "suggestions": len(st.suggested[pid])}
+                "faces": len(st.faces[pid]), "cover": st.cover[pid], "suggestions": len(st.suggested[pid]),
+                "doubts": len(st.doubted[pid])}
 
     def people_json(self, st: State) -> list[dict]:
         """Everyone named, most photos first."""
@@ -640,6 +650,14 @@ class PeopleIndex:
         return {"faces": [{"id": int(b.ids[i]), "photo": int(b.photo[i]), "sim": round(float(st.res.sug_sim[i]), 3)}
                           for i in st.suggested[pid][:SUGGESTIONS_OUT]],
                 "groups": [g for g in st.groups if g.get("maybe", {}).get("id") == pid]}
+
+    def doubts_of(self, st: State, pid: int) -> dict:
+        """For "Maybe not <name>?": up to SUGGESTIONS_OUT of the faces filed under them automatically with s_P
+        under DOUBT_SIM, least sure first, in the suggestions' shape (with no groups). The answers go to review()."""
+        b = st.base
+        return {"faces": [{"id": int(b.ids[i]), "photo": int(b.photo[i]), "sim": round(float(st.scores[pid][i]), 3)}
+                          for i in st.doubted[pid][:SUGGESTIONS_OUT]],
+                "groups": []}
 
     def photo_faces(self, st: State, photo: int) -> list[dict]:
         """The faces in one photo, left to right, with who each is. Ignored faces are left out."""
