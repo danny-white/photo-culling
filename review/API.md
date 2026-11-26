@@ -120,8 +120,8 @@ show until the next run.
   named people, most photos first. `groups` has the unnamed groups worth naming: 3 or more faces nobody has
   claimed (a suggested face is not claimed), the groups with a good (sharp, surely-a-face) face on the most days
   first (friends and family above a one-day crowd), then most good faces, at most 300. A group that is
-  probably not a person (under 2 good unclaimed faces, or a mean as alike to the mean of all faces as a
-  wheel, the backs of heads or blur are) is left out, though its faces stay unclaimed and
+  probably not a person (under 2 good unclaimed faces, or a mean very like that of the library's low-confidence
+  faces, which are mostly wheels, the backs of heads and blur) is left out, though its faces stay unclaimed and
   `people/group/<key>` still opens it. `faces_checked` is the number of photos checked for faces
   and `photos_ok` the number of photos in the library, so the app can say "faces found in N of M photos".
 - `GET /m/api/people/<id>` → `{id, name, total, photos: [Photo]}`, newest first (404 for an unknown person).

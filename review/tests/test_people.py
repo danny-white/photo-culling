@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "review"))
 import people  # noqa: E402
 import photo_cull as pc  # noqa: E402
 from review.tests.helpers import FakePC  # noqa: E402
-from review.tests.people_world import D, NOISE, World, mix, unit, without_junk_rule  # noqa: E402
+from review.tests.people_world import D, NOISE, World, mix, unit  # noqa: E402
 
 
 # ======================================================================= faces-group
@@ -198,22 +198,21 @@ def like(e, parts):
     return (v + np.sqrt(max(left, 0.0)) * e[parts["rest"]]).astype(np.float32)
 
 
-def make_state(vecs, *, grp=None, folder=None, yes=(), no=(), ignored=(), good=None, junk_rule=False):
+def make_state(vecs, *, grp=None, folder=None, yes=(), no=(), ignored=(), good=None, score=None):
     """A State over faces numbered 1..n (photo id 10 * face id): yes [(face, person)], no [(face, person)];
-    good: which faces are good (all, if not given). The junk-group rule is off unless junk_rule: a few
-    orthogonal test vectors are a big part of the "library" it compares a group with."""
+    good: which faces are good (all, if not given); score: their detector scores. Without 50 faces scoring
+    under 0.6 there is no junk direction, so the junk rule is off."""
     n = len(vecs)
     ids = np.arange(1, n + 1)
     base = people.Base(ids, ids * 10, np.zeros(n, np.int64) if folder is None else np.array(folder),
                        np.full(n, -1) if grp is None else np.array(grp), np.zeros(n), np.zeros((n, 4), np.float32),
                        np.ones(n, np.float32), np.asarray(vecs, np.float32), "k",
-                       None if good is None else np.array(good, bool))
+                       None if good is None else np.array(good, bool), None if score is None else np.array(score, float))
     who = {p for _, p in list(yes) + list(no)}
     labels = people.Labels({p: {"name": f"Person {p}", "cover_face": None, "created_at": "t", "updated_at": "t"}
                             for p in who},
                            [(f, p, "named") for f, p in yes], list(no), list(ignored))
-    with mock.patch.object(people, "JUNK_SIM", people.JUNK_SIM if junk_rule else 9.0):
-        return people.compute(base, labels)
+    return people.compute(base, labels)
 
 
 class Rules(unittest.TestCase):
@@ -347,12 +346,39 @@ class Rules(unittest.TestCase):
         self.assertEqual((a["faces"], a["photos"], a["days"]), (16, 16, 6))   # the counts still count every face
         self.assertEqual(set(a), {"key", "faces", "photos", "days", "cover"})
 
-    def test_the_junk_direction_is_the_mean_of_every_face(self):
-        e = basis(4)
-        base = make_state(e).base
-        np.testing.assert_allclose(base.junk_dir, unit(e.sum(axis=0)), atol=1e-6)
+    def test_the_junk_direction_is_the_mean_of_the_low_score_faces_and_needs_enough_of_them(self):
+        e = basis(8)
+        score = [0.9, 0.5, 0.4, 0.9, 0.3, 0.9, 0.6, np.nan]                      # low: faces 2, 3 and 5 (0.6 is not under 0.6)
+        with mock.patch.object(people, "JUNK_MIN_LOW", 3):
+            base = make_state(e, score=score).base
+        np.testing.assert_allclose(base.junk_dir, unit(e[1] + e[2] + e[4]), atol=1e-6)
         self.assertAlmostEqual(float(np.linalg.norm(base.junk_dir)), 1.0, places=5)
-        self.assertEqual(people.Base.empty().junk_dir.shape, (512,))
+        with mock.patch.object(people, "JUNK_MIN_LOW", 4):
+            self.assertIsNone(make_state(e, score=score).base.junk_dir)             # 3 low faces: too few
+        self.assertIsNone(make_state(e, score=score).base.junk_dir)                 # the real minimum is 50
+        self.assertIsNone(make_state(e).base.junk_dir)                              # no scores given
+        self.assertIsNone(people.Base.empty().junk_dir)
+
+    def test_the_junk_rule_needs_its_direction_but_the_good_face_rule_does_not(self):
+        rng = np.random.default_rng(8)
+        d = unit(rng.normal(size=D))
+        junk = np.stack([mix(rng, [(d, 1.0)], NOISE) for _ in range(55)])          # weak faces that share a direction
+        other = unit(rng.normal(size=(4, D)))
+        vecs = np.concatenate([junk, other])
+        grp = [1] * 5 + [-1] * 50 + [2] * 4
+        score = [0.5] * 55 + [0.9] * 4
+        good = [True] * 5 + [False] * 50 + [True] * 4                                # the junk group has good faces
+        st = make_state(vecs, grp=grp, good=good, score=score)
+        self.assertEqual([g["key"] for g in st.groups], [2])                         # group 1 sits on the junk direction
+        self.assertGreaterEqual(float(unit(vecs[:5].mean(axis=0)) @ st.base.junk_dir), people.JUNK_SIM)
+        self.assertEqual(len(st.unassigned[1]), 5)
+        few = np.concatenate([vecs[:5], vecs[55:]])                                  # the same five junk faces, 5 weak ones in all
+        low_few = make_state(few, grp=[1] * 5 + [2] * 4, good=[True] * 9, score=[0.5] * 5 + [0.9] * 4)
+        self.assertEqual([g["key"] for g in low_few.groups], [1, 2])
+        self.assertIsNone(low_few.base.junk_dir)
+        one_good = make_state(few, grp=[1] * 5 + [2] * 4, good=[True] + [False] * 4 + [True] * 4,
+                              score=[0.5] * 5 + [0.9] * 4)
+        self.assertEqual([g["key"] for g in one_good.groups], [2])                   # MIN_GOOD applies with no direction too
 
     def test_a_group_may_be_a_named_person(self):
         e = basis(20)
@@ -382,7 +408,6 @@ def HOW(st, i):
 # ======================================================================= PeopleIndex on a made-up library
 class IndexCase(unittest.TestCase):
     def setUp(self):
-        without_junk_rule(self)
         self.w = World()
         self.addCleanup(self.w.close)
 
@@ -855,25 +880,26 @@ class Concurrency(IndexCase):
 
 # ======================================================================= groups that are not people
 class JunkGroups(unittest.TestCase):
-    """Unnamed groups that are probably not people are left out of the list. 14 people (a library the junk
-    rule can judge: it compares a group with the mean of every face), a junk cluster, a "dog" and two groups
-    with too few good faces. Written by hand as the groups, so the clustering does not matter."""
+    """Unnamed groups that are probably not people are left out of the list. 14 people, a junk cluster of 60
+    weak faces (enough of them to give the rule its direction), a "dog" and two groups with too few good faces.
+    Written by hand as the groups, so the clustering does not matter."""
+    P0_PER_DAY = 4                  # faces of the first person on each of their two days
 
     def setUp(self):
         days = {}
         for k in range(14):
             for d in {k % 7, (k + 3) % 7}:
-                days.setdefault(f"2026/2026-03-{d + 1:02d}", {})[f"p{k}"] = 4
+                days.setdefault(f"2026/2026-03-{d + 1:02d}", {})[f"p{k}"] = self.P0_PER_DAY if k == 0 else 4
         self.w = w = World(days=days)
         self.addCleanup(w.close)
         rng = w.rng
         groups = {min(ids): ids for ids in (w.ids(f"p{k}") for k in range(14))}
         self.people_keys = set(groups)
-        everyone = unit(np.mean([w.vector(f["id"]) for f in w.faces], axis=0))
         day = lambda i, n: f"2026/2026-03-{i % n + 1:02d}"
-        # junk: 30 weak faces (a wheel, the backs of heads, blur) around one direction near the library's mean
-        self.junk = [w.add_face(None, day(i, 6), vector=mix(rng, [(everyone, 1.0)], NOISE), score=0.55, sharp=20.0)
-                     for i in range(30)]
+        # junk: 60 weak faces (a wheel, the backs of heads, blur) around one direction of their own
+        wheel = unit(rng.normal(size=D))
+        self.junk = [w.add_face(None, day(i, 6), vector=mix(rng, [(wheel, 1.0)], NOISE), score=0.55, sharp=20.0)
+                     for i in range(60)]
         # a dog: tight and unlike anything else; 3 of its 12 faces are good, on three different days
         dog = unit(rng.normal(size=D))
         self.dog = [w.add_face(None, day(i, 4), vector=mix(rng, [(dog, 1.0)], NOISE), score=0.9 if i < 3 else 0.5)
@@ -896,8 +922,9 @@ class JunkGroups(unittest.TestCase):
         st = self.ix.state()
         self.assertGreaterEqual(self.mean_vs_junk_dir(st, self.junk), people.JUNK_SIM)
         for k in range(14):
-            self.assertLess(self.mean_vs_junk_dir(st, self.w.ids(f"p{k}")[:8]), people.JUNK_SIM - 0.1)
+            self.assertLess(self.mean_vs_junk_dir(st, self.w.ids(f"p{k}")[:8]), people.JUNK_SIM - 0.2)
         self.assertLess(self.mean_vs_junk_dir(st, self.dog), people.JUNK_SIM - 0.1)
+        self.assertIsNotNone(st.base.junk_dir)
 
     def test_junk_and_groups_with_too_few_good_faces_are_not_listed_and_a_dog_is(self):
         st = self.ix.state()
@@ -919,8 +946,8 @@ class JunkGroups(unittest.TestCase):
         listed = {g["key"] for g in c.get("/m/api/people").get_json()["groups"]}
         self.assertNotIn(min(self.junk), listed)
         r = c.get(f"/m/api/people/group/{min(self.junk)}")
-        self.assertEqual((r.status_code, r.get_json()["total"]), (200, 30))
-        self.assertEqual(len(self.ix.state().unassigned[min(self.junk)]), 30)  # still unclaimed
+        self.assertEqual((r.status_code, r.get_json()["total"]), (200, 60))
+        self.assertEqual(len(self.ix.state().unassigned[min(self.junk)]), 60)  # still unclaimed
         r = c.post("/m/api/people", json={"name": "Rex", "group": min(self.thing)}, headers=H)
         self.assertEqual((r.status_code, r.get_json()["faces"]), (201, 6))
         r = c.post(f"/m/api/people/group/{min(self.junk)}/hide", json={}, headers=H)
@@ -935,6 +962,28 @@ class JunkGroups(unittest.TestCase):
         self.assertNotIn(min(self.weak), {g["key"] for g in st.groups})
 
 
+class JunkGroupsWithADominantPerson(JunkGroups):
+    """The same library, but the first person is 40% of all its faces (all of them good). The rule used to
+    compare a group with the mean of every face, which such a person pulls toward themselves until they
+    cross the limit and vanish from the list before they are named. It compares with the weak faces instead,
+    so they stay, and so does the dog."""
+    P0_PER_DAY = 60
+
+    def test_the_premise_a_dominant_person_would_have_been_judged_junk_by_the_mean_of_all_faces(self):
+        st = self.ix.state()
+        p0 = self.w.ids("p0")
+        self.assertGreater(len(p0) / len(self.w.faces), 0.35)
+        all_mean = unit(st.base.vecs.mean(axis=0))
+        self.assertGreaterEqual(float(unit(np.mean([self.w.vector(f) for f in p0], axis=0)) @ all_mean), people.JUNK_SIM)
+        self.assertLess(self.mean_vs_junk_dir(st, p0), 0.2)
+
+    def test_they_and_the_dog_stay_in_the_list_and_the_junk_does_not(self):
+        listed = {g["key"] for g in self.ix.state().groups}
+        self.assertIn(min(self.w.ids("p0")), listed)
+        self.assertIn(min(self.dog), listed)
+        self.assertNotIn(min(self.junk), listed)
+
+
 # ======================================================================= the /m/api routes
 H = {"X-Culling-Bay": "1"}
 
@@ -943,7 +992,6 @@ class RoutesCase(unittest.TestCase):
     group_it = True
 
     def setUp(self):
-        without_junk_rule(self)
         self.w = World()
         self.addCleanup(self.w.close)
         if self.group_it:

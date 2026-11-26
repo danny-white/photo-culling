@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 TRIAL_DB = ROOT / "trial_out" / "trial.db"
 DAY = "2026/2026-10-01"
 from review.tests.helpers import FakePC, anno_connection, require_nas  # noqa: E402
-from review.tests.people_world import World, without_junk_rule  # noqa: E402
+from review.tests.people_world import World  # noqa: E402
 
 
 @unittest.skipUnless(TRIAL_DB.exists(), "needs trial_out/trial.db")
@@ -1728,7 +1728,6 @@ class PeopleContract(unittest.TestCase):
     GROUP = {"key": int, "faces": int, "photos": int, "days": int, "cover": int}
 
     def setUp(self):
-        without_junk_rule(self)
         self.w = World()
         self.addCleanup(self.w.close)
         self.w.group()
