@@ -352,6 +352,7 @@ struct CullSessionModelTests {
         #expect(await rig.sleeper.requested.filter { $0 == progressDelay }.count == 3)
         #expect(rig.queue.pending == 0 && progressCalls(rig).isEmpty)       // nothing yet
         await rig.sleeper.release(progressDelay)
+        #expect(await eventually { @MainActor in !progressCalls(rig).isEmpty })   // the PUT itself, not just an empty queue
         await rig.settle()
         let saved = progressCalls(rig)
         #expect(saved.count == 1)                                           // the first two were replaced

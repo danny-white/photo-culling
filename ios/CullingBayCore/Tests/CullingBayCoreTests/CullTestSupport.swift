@@ -236,6 +236,10 @@ struct CullRig {
 
     /// Waits until the queue has nothing left (the server answers at once).
     func settle() async {
+        // A wait that was just released still has to run and queue its write. Until it has, the
+        // queue is empty too, so give it the chance before taking an empty queue to mean "sent".
+        for _ in 0..<50 { await Task.yield() }
+        try? await Task.sleep(for: .milliseconds(20))
         #expect(await eventually { await queue.pending == 0 })
     }
 
