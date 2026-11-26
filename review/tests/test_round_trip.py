@@ -1,7 +1,9 @@
 """Phone -> Lightroom -> phone, end to end: the review server records decisions and sends them,
 the real AI Cull plugin (SyncAICull.lua on the fake SDK, under lua5.1) applies them and writes a
 receipt, and the server reads the receipt back. Uses the real trial.db (read-only), a temp
-annotations.db and a temp inbox. Run from the repo root:
+annotations.db and a temp inbox. PeopleRoundTrip does the same for people: names given through the
+routes reach the plugin as people.tsv and come out as People > name keywords (a made-up library, no
+trial.db needed). Run from the repo root:
     ./venv/bin/python -m unittest discover -s review/tests -t .
 """
 import shutil
@@ -20,6 +22,18 @@ DAY = "2026/2026-10-01"
 MAC_DIR = "/Volumes/Passport/Pictures/2026/2026-10-01/"
 H = {"X-Culling-Bay": "1"}
 from review.tests.helpers import anno_connection  # noqa: E402
+
+
+def run_lightroom(tmp: Path, photos: dict, pick) -> dict:
+    """Run the plugin once on the fake SDK (lightroom-plugin/tests/run_sync.lua) and pick `pick` in its dialog.
+    photos: {path in Lightroom: (pickStatus, rating, caption[, keywords, peopleSet])} as the catalog holds them;
+    keywords are full names joined by `|` ("Family|People > Pat"). Returns {file name: [pickStatus, rating,
+    caption, keywords, peopleSet]} as the catalog holds them afterwards."""
+    spec = tmp / "photos.tsv"
+    spec.write_text("".join(f"{path}\t" + "\t".join(str(v) for v in values) + "\n" for path, values in photos.items()))
+    out = subprocess.run(["lua5.1", "lightroom-plugin/tests/run_sync.lua", str(spec), str(pick)],
+                         cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    return {parts[0]: parts[1:] for parts in (line.split("\t") for line in out.splitlines())}
 
 
 @unittest.skipUnless(TRIAL_DB.exists() and shutil.which("lua5.1"), "needs trial.db and lua5.1")
@@ -62,11 +76,7 @@ class RoundTrip(unittest.TestCase):
 
     def lightroom(self, photos, pick):
         """Run the plugin; photos: {file: (pickStatus, rating, caption)} as they are in Lightroom."""
-        spec = Path(self.tmp.name) / "photos.tsv"
-        spec.write_text("".join(f"{MAC_DIR}{f}\t{p}\t{r}\t{c}\n" for f, (p, r, c) in photos.items()))
-        out = subprocess.run(["lua5.1", "lightroom-plugin/tests/run_sync.lua", str(spec), str(pick)],
-                             cwd=ROOT, capture_output=True, text=True, check=True).stdout
-        return {parts[0]: parts[1:] for parts in (line.split("\t") for line in out.splitlines())}
+        return run_lightroom(Path(self.tmp.name), {f"{MAC_DIR}{f}": v for f, v in photos.items()}, pick)
 
     def states(self):
         fr = self.ids()
@@ -180,6 +190,92 @@ class RoundTrip(unittest.TestCase):
         r = app.test_client().post(f"/m/api/day/{DAY}/send", json={}, headers=H)
         self.assertEqual(r.status_code, 503)
         self.assertIn("not mounted", r.get_json()["error"])
+
+
+@unittest.skipUnless(shutil.which("lua5.1"), "needs lua5.1")
+class PeopleRoundTrip(unittest.TestCase):
+    """Danny names people in Culling Bay; the server writes people.tsv; the plugin turns it into People > name
+    keywords in the catalog, and takes only its own off again."""
+
+    def setUp(self):
+        from review.tests.people_world import World
+        self.w = World()
+        self.addCleanup(self.w.close)
+        self.inbox = self.w.dir / "inbox"
+        self.inbox.mkdir()
+        self.w.write_groups({min(self.w.ids(p)): self.w.ids(p) for p in ("alex", "sam", "robin")})
+        self.c = self.w.client(people_feed_s=0.05)
+        self.feed = self.w.bp.people_feed
+        self.addCleanup(self.feed.close)
+        self.assertTrue(self.feed.wait(5))              # the start-up write
+        # what Lightroom holds: every photo of the made-up library, under its Mac path
+        self.files = {}                                 # person -> [file names]
+        self.mac = {}                                   # file name -> path in Lightroom
+        for f in self.w.faces:
+            name = Path(f["path"]).name
+            self.mac[name] = f"/Volumes/Passport/Pictures/2026/{Path(f['path']).parent.name}/{name}"
+            self.files.setdefault(f["person"], []).append(name)
+        self.catalog = {n: [0, 0, "", "", ""] for n in self.mac}      # pickStatus, rating, caption, keywords, peopleSet
+
+    def name_group(self, name, person):
+        r = self.c.post("/m/api/people", json={"name": name, "group": min(self.w.ids(person))}, headers=H)
+        self.assertEqual(r.status_code, 201, r.get_json())
+        self.assertTrue(self.feed.wait(5))
+        return r.get_json()["id"]
+
+    def sync(self):
+        """Pick people.tsv in the plugin's dialog on every photo, carrying the catalog's state between runs."""
+        out = run_lightroom(self.w.dir, {self.mac[n]: tuple(v) for n, v in self.catalog.items()},
+                            self.inbox / "people.tsv")
+        self.catalog = {n: list(v) for n, v in out.items()}
+        return self.catalog
+
+    def keywords(self, name):
+        return set(filter(None, self.catalog[name][3].split("|")))
+
+    def test_names_arrive_and_go_and_your_own_keywords_stay(self):
+        alex_files, sam_files, robin_files = self.files["alex"], self.files["sam"], self.files["robin"]
+        self.catalog[alex_files[0]][3] = "People > Pat"          # keywords you added by hand
+        self.catalog[robin_files[0]][3] = "Family|People > Pat"
+        alex = self.name_group("Alex", "alex")
+        sam = self.name_group("Sam", "sam")
+        header = (self.inbox / "people.tsv").read_text().splitlines()[0]
+        self.assertEqual(header, "#people v1")
+
+        self.sync()
+        for n in alex_files:
+            self.assertIn("People > Alex", self.keywords(n), n)
+            self.assertEqual(self.catalog[n][4], "Alex")
+        for n in sam_files:
+            self.assertIn("People > Sam", self.keywords(n), n)
+        self.assertEqual(self.keywords(alex_files[0]), {"People > Alex", "People > Pat"})
+        self.assertEqual(self.keywords(robin_files[0]), {"Family", "People > Pat"})     # no row, not touched
+        self.assertEqual(self.keywords(robin_files[1]), set())
+        self.assertTrue((self.inbox / "people.tsv").exists())                              # left for the next sync
+
+        # Danny takes Alex off everything, and renames Sam
+        self.assertEqual(self.c.post(f"/m/api/people/{alex}/delete", json={}, headers=H).status_code, 200)
+        r = self.c.post(f"/m/api/people/{sam}", json={"name": "Samantha"}, headers=H)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(self.feed.wait(5))
+        rows = [line.split("\t") for line in (self.inbox / "people.tsv").read_text().splitlines()[1:]]
+        self.assertTrue(all(len(r) == 3 for r in rows))
+        self.assertEqual({r[2] for r in rows if r[1] in alex_files}, {""})                # Alex's photos keep an empty row
+
+        self.sync()
+        for n in alex_files:
+            self.assertNotIn("People > Alex", self.keywords(n), n)
+            self.assertEqual(self.catalog[n][4], "", n)
+        self.assertEqual(self.keywords(alex_files[0]), {"People > Pat"})                  # yours is still there
+        for n in sam_files:
+            self.assertEqual(self.keywords(n), {"People > Samantha"}, n)
+            self.assertEqual(self.catalog[n][4], "Samantha")
+        self.assertEqual(self.keywords(robin_files[0]), {"Family", "People > Pat"})
+
+    def test_a_second_sync_with_nothing_new_changes_nothing(self):
+        self.name_group("Alex", "alex")
+        first = {n: list(v) for n, v in self.sync().items()}
+        self.assertEqual(self.sync(), first)
 
 
 if __name__ == "__main__":
