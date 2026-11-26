@@ -144,18 +144,80 @@ Every write answers with the changed Person, or `{ok: true}`, so the app can ref
 - Words left: the normal scoring, limited to those photos.
 - Add `"people"` to `signals`.
 
+## App (phase D): CullingBayCore (Linux-tested) + SwiftUI views (Mac)
+
+Follow the app's existing split: screen state lives in `CullingBayCore` as `@MainActor
+@Observable` models with swift-testing tests (they run on the PC), and the SwiftUI views in
+`ios/CullingBay/` stay thin.
+
+### Core
+- **Models** (`Codable`, `Sendable`, `Hashable`) for each People shape in API.md: Person, FaceGroup (`key`), PersonFace (`{id, photo, how}`), Suggestion (`{id, photo, sim}`), PhotoFace (`{id, box, person?, how}`), and the `/people` envelope.
+- **Client** (`CullingBayClient+People.swift`):
+  - one method per People route, with the same ETag/`Fetched` handling the other reads use, and writes through `writeJSON`;
+  - a 409 on a name becomes a typed error carrying the existing person's id, so the UI can offer "Add to <name>?";
+  - `faceURL(id:size:)` for the crops, built like `imageURL`.
+- **`FeedModel.Source`** gains `.person(Int, name: String)` and `.group(Int)`, loaded from `/people/<id>` and `/people/group/<key>` with the same best and bursts flags. A person's photo grid is then the existing ResultsView, viewer and save included.
+- **Screen models:**
+  - `PeopleHomeModel`: loads `/people`. It holds `people`, `groups` and the "finding faces" progress (`faces_checked` of `photos_ok`), plus a name filter.
+  - `PersonModel`: one person. Holds the header and suggestion count, and does rename, merge, delete and cover.
+  - `GroupModel`: an unnamed group. Holds the `maybe` person, and does Add name (new, or an existing person via the 409 path), "Is this <maybe>?" yes/no (yes = add to that person; no = `POST /faces` action `not` for its faces and that person), and Hide.
+  - `ReviewModel`: the suggestions for one person, in batches of up to 60 faces, every face starting as "yes". Tap toggles a face to "no". Confirm sends one `review`, then loads the next batch until none are left. Suggested groups come first ("These photos might be <name>": Yes / No).
+  - `ManageFacesModel`: a person's faces, paged (offset/limit 120), with multi-select. Actions: Not <name>, Move to… (a person, or a new person), Not a face, and Make cover (single face only). Faces disappear as they're acted on.
+  - `PhotoFacesModel`: the faces in one photo, each with its fix actions. The same three actions apply to an unnamed face, as "This is…" and "Not a face".
+  - `PersonPickerModel`: named people filtered by typed text, plus "New person…".
+- **Tests**: models decode the API.md examples; each screen model's states and actions run against the existing fake transport in the tests.
+
+### Views (SwiftUI, compile on the Mac only)
+- **People tab:** the fourth tab in `RootView`, "People", with the icon `person.2`. It's a NavigationStack with:
+  - a "Finding faces… N of M photos" line while the backfill or an import is running;
+  - a **People** grid of circles, 3 per row, each with the face crop, name and photo count, plus a small dot when suggestions > 0;
+  - a **Not named yet** grid of group circles, each labelled "N photos · M days", or "<name>?" when `maybe` is set;
+  - pull to refresh;
+  - `.searchable` filtering by name.
+- **Person screen** (pushed):
+  - the header: a big circle, the name and the photo count;
+  - a "Review N more photos" banner when there are suggestions;
+  - then the photos as ResultsView for `.person`.
+  - Toolbar menu: Rename, Merge with… (person picker), Manage faces, Remove name (with a confirm).
+- **Group screen** (pushed):
+  - the header circle and "N photos · M days";
+  - Add name (a text field that lists matching existing people as you type);
+  - "Is this <maybe>?" Yes / No, when set;
+  - Hide ("Not someone I know");
+  - then the photos as ResultsView for `.group`.
+- **Review screen** (sheet):
+  - "Is this <name>?" above a 3-column grid of large face crops;
+  - tapping toggles a red ✕ overlay;
+  - Confirm sends the batch;
+  - Done when nothing is left.
+- **Manage faces** (pushed from the person menu):
+  - a face grid with Select;
+  - a bottom bar with Not <name>, Move to…, Not a face;
+  - long-press for Make cover and Show photo;
+  - auto faces have a thin outline, confirmed ones none.
+- **From any photo:** the (i) sheet (`Shared/`, opened from the Gallery viewer, the Cull card and the burst picker) gets a **People** section listing the faces in the photo.
+  - Each face shows a small crop and the name, or "Unnamed".
+  - Tapping one opens a menu: Not <name> / This is… / Not a face.
+  - This is the "flag or fix when something's wrong" path Danny asked for. A change refreshes the sheet.
+- **Launch args** for simulator screenshots (read-only, like `-CBStartTab cull`): `-CBStartTab people`, `-CBOpenPerson <id>`.
+- **Offline:** People needs the PC. Show the existing offline banner and keep nothing on the phone.
+
 ## Lightroom (phase E)
 
-A `people` column in the sync file the plugin reads. The plugin creates `People > <name>`
-keywords and records the names it set on each photo in a plugin property, so a later sync can
-remove one Danny took off in Culling Bay. It never touches keywords it didn't set.
-
-## App (phase D)
-
-A People tab, the fourth tab:
-- Named people as circles, then "Unnamed" groups with Add name.
-- A person screen: the photo grid, Rename, Merge, "Review N suggestions" (a grid of faces to
-  confirm, where tapping marks one as wrong), and "Manage faces" (multi-select, then Not <name>,
-  Move to…, Not a face).
-- From a photo: the faces in it, each with its fix menu.
-- Gallery search finds names, because the server handles them.
+- **Server:** `review/people.py` writes `AICullInbox/people.tsv` whenever named-people assignments change, debounced by 10 s. Write it atomically: a temp file, then rename.
+  - Each row: `shootFolder \t filename \t name1|name2|...`.
+  - Confirmed and auto faces both count; suggestions don't.
+  - Rows cover every photo that has ever had a named person, so a photo whose last name was removed still gets a row with an empty list.
+  - Keep that sticky set in annotations.db (`people_lr(path TEXT PRIMARY KEY)`).
+  - `|` and tabs in names are replaced, as `write_plugin_data` does.
+- **Plugin:**
+  - `CullCore.lua` gets `parsePeopleLine` and the pure set logic (`peopleChanges(desired, previouslySet, current)` → `{add, remove}`), tested under `lua5.1` like the existing rules.
+  - `Sync.lua` reads `people.tsv` when it's present, next to `pending.tsv` and `cull-decisions.tsv`.
+  - It creates the parent keyword `People` (not exported) and one child per name (exported), cached like `keywordFor`.
+  - Per photo:
+    - add the desired names it lacks;
+    - remove only the names the plugin set before, as recorded in a new plugin metadata field `peopleSet` (pipe-joined, hidden, no `dataType`: Lightroom trap) that are no longer desired;
+    - store the desired set in `peopleSet`.
+  - It never removes a keyword it didn't set.
+  - The receipt counts people added and removed.
+- **Mac install:** the plugin needs the usual Mac install. Quit Lightroom, replace the plugin folder and restart, because a new metadata field needs a full restart. Danny tests it on a scratch catalog first: a Needs-Danny issue.
