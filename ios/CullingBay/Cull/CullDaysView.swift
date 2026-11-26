@@ -280,14 +280,18 @@ struct CullDaysView: View {
     /// `section` is where the rows are, so the list can come back to one after its day is open;
     /// nil for a search's hits, which come back as they were.
     private func rows(_ rows: [CullDayRow], in section: CullDaysModel.ListSection?) -> some View {
-        // Decisions only on the phone so far, by day: the row says so until the PC has them.
+        // Decisions only on the phone so far, by day: the row says so until the PC has them, and
+        // its bar shows them in orange after the PC's green.
         let pending = services.cullQueue.pendingByDay
+        let pendingFrames = services.cullQueue.pendingFramesByDay
         return ForEach(rows) { row in
             Button {
                 openedFrom = section.map { OpenedFrom(day: row.day.day, section: $0) }
                 router.open(row.day.day, match: row.match, services: services)
             } label: {
-                CullDayRowView(row: row, pendingTaps: pending[row.day.day] ?? 0)
+                CullDayRowView(
+                    row: model.row(row, pending: pendingFrames[row.day.day] ?? []),
+                    pendingTaps: pending[row.day.day] ?? 0)
             }
             .buttonStyle(.plain)
             .padding(.bottom, 8)

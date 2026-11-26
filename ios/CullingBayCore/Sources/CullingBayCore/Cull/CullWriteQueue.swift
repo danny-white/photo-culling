@@ -47,7 +47,10 @@ public final class CullWriteQueue {
     /// counts towards the day of the queued `decide` it takes back, with that decide's frames, so
     /// the day stays marked; an undo whose decide has already been saved says nothing about its
     /// day and is left out.
-    public var pendingByDay: [String: Int] {
+    public var pendingByDay: [String: Int] { pendingFramesByDay.mapValues(\.count) }
+
+    /// Per day, the frames `pendingByDay` counts, by `CullChange.id`.
+    public var pendingFramesByDay: [String: Set<Int>] {
         var frames: [String: Set<Int>] = [:]
         var decided: [String: (day: String, ids: [Int])] = [:]
         for write in writes {
@@ -62,7 +65,7 @@ public final class CullWriteQueue {
                 break
             }
         }
-        return frames.mapValues(\.count).filter { $0.value > 0 }
+        return frames.filter { !$0.value.isEmpty }
     }
 
     /// The writes waiting, oldest first, the one in flight included: what a day opened before

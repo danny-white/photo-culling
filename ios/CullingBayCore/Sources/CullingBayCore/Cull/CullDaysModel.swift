@@ -39,11 +39,17 @@ public struct CullDayRow: Sendable, Hashable, Identifiable {
     public let place: String?
     /// Up to three photos for the row. For a search hit its matching photos come first.
     public let thumbs: [Int]
-    public let tag: Tag?
-    /// Percent of frames decided, 0 to 100.
-    public let percent: Int
-    /// Whether to draw the progress bar (`percent` wide): some frames are decided.
-    public let showsBar: Bool
+    public internal(set) var tag: Tag?
+    /// Percent of frames decided, 0 to 100: on the PC and, once `CullDaysModel.row(_:pending:)` has
+    /// laid them over the row, on the phone.
+    public internal(set) var percent: Int
+    /// Whether to draw the progress bar: some frames are decided, on the PC or on the phone.
+    public internal(set) var showsBar: Bool
+    /// The share of frames the PC has decided, 0 to 1: the bar's green part.
+    public internal(set) var pcFraction: Double
+    /// The share of frames decided on this phone and not saved to the PC yet, 0 to 1: the orange
+    /// part that follows the green one. Zero until `CullDaysModel.row(_:pending:)`.
+    public internal(set) var phoneFraction: Double
     /// For a search hit, its one line (`3 photos · “a chick in a burrow”`); it replaces `summary`.
     public let why: String?
     /// The day's summary, lines separated by `\n`; nil when `why` is shown.
@@ -52,6 +58,15 @@ public struct CullDayRow: Sendable, Hashable, Identifiable {
     public let match: CullMatch?
 
     public var id: String { day.day }
+
+    /// What VoiceOver reads for the bar: `4% on the PC, 50% on this phone, 54% in all`, or
+    /// `25% on the PC` with nothing on the phone.
+    public var barDescription: String {
+        let pc = Int((pcFraction * 100).rounded())
+        guard phoneFraction > 0 else { return "\(pc)% on the PC" }
+        let phone = Int((phoneFraction * 100).rounded())
+        return "\(pc)% on the PC, \(phone)% on this phone, \(percent)% in all"
+    }
 }
 
 /// A month in a year of the day list.
@@ -120,6 +135,9 @@ public final class CullDaysModel {
     public var searchResult: CullSearchResult? { found.map(makeResult) }
 
     @ObservationIgnored private let client: CullingBayClient
+    @ObservationIgnored private let savedDecisions: @MainActor (String) -> Set<Int>?
+    /// What the saved copy of each day says is decided, read once per days list.
+    @ObservationIgnored private var savedDecided: [String: Set<Int>?] = [:]
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private let timeZone: TimeZone
     @ObservationIgnored private let sleep: CullSleep
@@ -135,13 +153,17 @@ public final class CullDaysModel {
     static let searchDelay: Duration = .milliseconds(280)
 
     /// `openYears` restores which years were open; nil opens the newest. `now` and `timeZone`
-    /// decide what On this day and Resting mean; tests pin them.
+    /// decide what On this day and Resting mean; tests pin them. `savedDecisions` gives, for a day
+    /// saved on the phone, the frames its saved copy shows decided (`OfflineStore.decidedFrames`),
+    /// and nil for a day that is not saved.
     public init(
         client: CullingBayClient, openYears: Set<String>? = nil,
         now: @escaping () -> Date = { Date() }, timeZone: TimeZone = .current,
-        sleep: @escaping CullSleep = CullClock.system
+        sleep: @escaping CullSleep = CullClock.system,
+        savedDecisions: @escaping @MainActor (String) -> Set<Int>? = { _ in nil }
     ) {
         self.client = client
+        self.savedDecisions = savedDecisions
         self.now = now
         self.timeZone = timeZone
         self.sleep = sleep
@@ -236,6 +258,7 @@ public final class CullDaysModel {
 
     private func apply(_ list: [Day]) {
         days = list
+        savedDecided = [:]
         dayByID = Dictionary(list.map { ($0.day, $0) }, uniquingKeysWith: { first, _ in first })
         inProgress = list.filter { $0.decided > 0 && !$0.finished }.map { row($0) }
         let rest = list.filter { !($0.decided > 0 && !$0.finished) }
@@ -327,27 +350,65 @@ public final class CullDaysModel {
     /// The days with decisions not yet sent to Lightroom, newest first: Send all's list.
     public var unsentDays: [Day] { days.filter { CullSendAllModel.unsent($0) > 0 } }
 
-    private func row(_ day: Day, hit: DayMatch? = nil, query: String = "") -> CullDayRow {
-        let percent = day.frames > 0
-            ? Int((Double(day.decided) / Double(day.frames) * 100).rounded()) : 0
-        let tag: CullDayRow.Tag?
+    /// `row` with the decisions only the phone has so far laid over it, for the bar and the
+    /// percent. `pending` is the day's frames with a decision waiting in the write queue
+    /// (`CullWriteQueue.pendingFramesByDay`). A frame the PC already counts is not counted twice:
+    /// with the day saved on the phone, the frames its saved copy shows decided are left out;
+    /// without one, the phone's part is capped at what the PC's leaves.
+    public func row(_ row: CullDayRow, pending: Set<Int>) -> CullDayRow {
+        guard !pending.isEmpty || row.phoneFraction > 0 else { return row }
+        var counted = pending
+        if !pending.isEmpty, let decided = savedCopyDecided(row.day.day) { counted.subtract(decided) }
+        var laid = row
+        let progress = progress(row.day, phoneFrames: counted.count)
+        laid.pcFraction = progress.pc
+        laid.phoneFraction = progress.phone
+        laid.percent = progress.percent
+        laid.showsBar = progress.pc > 0 || progress.phone > 0
+        laid.tag = tag(row.day, percent: progress.percent, onPhone: progress.phone > 0)
+        return laid
+    }
+
+    private func savedCopyDecided(_ day: String) -> Set<Int>? {
+        if let known = savedDecided[day] { return known }
+        let decided = savedDecisions(day)
+        savedDecided[day] = decided
+        return decided
+    }
+
+    /// The PC's share of the day's frames, the phone's after it (never past the whole day), and
+    /// the two together in percent.
+    private func progress(_ day: Day, phoneFrames: Int) -> (pc: Double, phone: Double, percent: Int) {
+        guard day.frames > 0 else { return (0, 0, 0) }
+        let pc = min(1, Double(day.decided) / Double(day.frames))
+        let phone = min(Double(phoneFrames) / Double(day.frames), 1 - pc)
+        return (pc, phone, Int(((pc + phone) * 100).rounded()))
+    }
+
+    /// The tag at the end of a row. Decisions on the phone count like the PC's for the percent.
+    private func tag(_ day: Day, percent: Int, onPhone: Bool) -> CullDayRow.Tag? {
         if day.conflicts > 0 {
-            tag = .init(text: "\(day.conflicts) conflict" + (day.conflicts > 1 ? "s" : ""), style: .warn)
+            return .init(text: "\(day.conflicts) conflict" + (day.conflicts > 1 ? "s" : ""), style: .warn)
         } else if day.landed > 0 {
-            tag = .init(text: "Synced", style: .quiet)
+            return .init(text: "Synced", style: .quiet)
         } else if let sentAt = day.sentAt, !sentAt.isEmpty {
-            tag = .init(text: "Sent", style: .quiet)
+            return .init(text: "Sent", style: .quiet)
         } else if day.finished {
-            tag = .init(text: "Done", style: .quiet)
+            return .init(text: "Done", style: .quiet)
+        } else if day.decided > 0 || onPhone {
+            return .init(text: "\(percent)%", style: .normal)
         } else if lightroomCulled(day) {
-            tag = .init(text: "In Lightroom", style: .quiet)
-        } else if day.decided > 0 {
-            tag = .init(text: "\(percent)%", style: .normal)
+            return .init(text: "In Lightroom", style: .quiet)
         } else if resting(day) {
-            tag = .init(text: "Resting", style: .quiet)
-        } else {
-            tag = nil
+            return .init(text: "Resting", style: .quiet)
         }
+        return nil
+    }
+
+    private func row(_ day: Day, hit: DayMatch? = nil, query: String = "") -> CullDayRow {
+        let progress = progress(day, phoneFrames: 0)
+        let percent = progress.percent
+        let tag = tag(day, percent: percent, onPhone: false)
         var meta = ["\(day.frames) frames", "\(day.stacks) stacks"]
         if day.lrDone > 0 && day.lrDone < day.stacks { meta.append("\(day.lrDone) done in Lightroom") }
         if day.date?.isEmpty ?? true { meta.append(day.day) }
@@ -363,7 +424,7 @@ public final class CullDaysModel {
             day: day, title: CullFormat.dayTitle(date: day.date, folder: day.folder),
             meta: meta.joined(separator: " · "), place: day.place.flatMap(Self.placeLine),
             thumbs: Array(thumbs.prefix(3)), tag: tag, percent: percent, showsBar: day.decided > 0,
-            why: why, summary: summary, match: match)
+            pcFraction: progress.pc, phoneFraction: 0, why: why, summary: summary, match: match)
     }
 
     /// `town` in app.js: the first two comma-separated parts, as stored.
@@ -436,5 +497,22 @@ public final class CullDaysModel {
     private static func andList(_ items: [String]) -> String {
         items.count > 1 ? items.dropLast().joined(separator: ", ") + " and " + items[items.count - 1]
             : items.first ?? ""
+    }
+}
+
+extension OfflineStore {
+    /// The frames the saved copy of `day` shows decided (with their partners, which are decided
+    /// with them), so the Days list does not count a re-decision on the phone twice. Nil when the
+    /// day is not saved or its copy cannot be read.
+    public func decidedFrames(in day: String) -> Set<Int>? {
+        guard isSaved(day), let data = readDay(day),
+              let saved = try? JSONDecoder().decode(CullDay.self, from: data)
+        else { return nil }
+        var decided = Set<Int>()
+        for frame in saved.stacks.flatMap(\.frames) where frame.decision != nil {
+            decided.insert(frame.id)
+            decided.formUnion(frame.partnerIDs)
+        }
+        return decided
     }
 }

@@ -185,10 +185,15 @@ final class AppServices {
             client: client, store: offlineStore,
             downloader: OfflineDownloader(baseURL: url, transport: network, store: offlineStore),
             canReachPC: { link.isOnline })
+        // A day saved on the phone says which frames the PC had decided, so a tap that only
+        // changes one of them is not counted twice in the Days list's bar.
+        let cullDays = CullDaysModel(client: client, savedDecisions: { day in
+            OfflinePreferences.isEnabled ? offlineStore.decidedFrames(in: day) : nil
+        })
         return Connection(
             link: link, network: network, client: client, loader: loader, perf: perf,
             home: HomeModel(client: client, settings: settings),
-            cullQueue: queue, cullDays: CullDaysModel(client: client),
+            cullQueue: queue, cullDays: cullDays,
             practice: PracticeModel(
                 client: client, store: FilePracticeDraftStore(directory: practiceStoreDirectory(for: url))),
             offline: offline)

@@ -124,6 +124,105 @@ struct CullDaysModelTests {
         #expect(row.summary == "Dune walk\nand sunset" && row.why == nil && row.match == nil)
     }
 
+    // MARK: The bar: the PC's decisions, then the phone's
+
+    /// A model over one day, with the frames its saved copy shows decided (nil: not saved).
+    private func barModel(_ day: Day, saved: Set<Int>? = nil) async -> (CullDaysModel, CullDayRow) {
+        let list = daysJSON([day])
+        let transport = FakeTransport { request, _ in jsonResponse(list, for: request) }
+        let model = CullDaysModel(
+            client: CullingBayClient(baseURL: testBaseURL, transport: transport), now: { today },
+            timeZone: pacific, savedDecisions: { _ in saved })
+        await model.load()
+        return (model, (model.inProgress + model.years.flatMap(\.months).flatMap(\.rows))[0])
+    }
+
+    @Test func thePhonesDecisionsFollowThePCsInTheBarAndTheTag() async {
+        let (model, row) = await barModel(listDay("2026-10-01", frames: 100, decided: 4))
+        #expect(row.pcFraction == 0.04 && row.phoneFraction == 0)
+        let laid = model.row(row, pending: Set(1000..<1050))
+        #expect(laid.pcFraction == 0.04)
+        #expect(laid.phoneFraction == 0.5)
+        #expect(laid.percent == 54)
+        #expect(laid.tag == .init(text: "54%", style: .normal))
+        #expect(laid.showsBar)
+        #expect(laid.barDescription == "4% on the PC, 50% on this phone, 54% in all")
+        #expect(row.barDescription == "4% on the PC")
+        // The queue drained: the phone's part is gone.
+        #expect(model.row(laid, pending: []).phoneFraction == 0)
+        #expect(model.row(laid, pending: []).tag == .init(text: "4%", style: .normal))
+    }
+
+    @Test func reDecidingFramesTheSavedCopyShowsDecidedAddsNothing() async {
+        let (model, row) = await barModel(listDay("2026-10-01", frames: 100, decided: 4), saved: [1, 2, 3, 4, 90_001])
+        let again = model.row(row, pending: [1, 2, 3, 4, 90_001])
+        #expect(again.phoneFraction == 0)
+        #expect(again.tag == .init(text: "4%", style: .normal))
+        let more = model.row(row, pending: Set([1, 2, 3, 4] + Array(10..<20)))
+        #expect(more.phoneFraction == 0.1)
+        #expect(more.percent == 14)
+    }
+
+    @Test func withNoSavedCopyThePhonesPartStopsAtTheWholeDay() async {
+        let (model, row) = await barModel(listDay("2026-10-01", frames: 100, decided: 90))
+        let laid = model.row(row, pending: Set(1..<51))
+        #expect(laid.pcFraction == 0.9)
+        #expect(abs(laid.phoneFraction - 0.1) < 1e-9)
+        #expect(laid.percent == 100)
+        #expect(laid.tag == .init(text: "100%", style: .normal))
+    }
+
+    @Test func aDayDecidedOnlyOnThePhoneShowsItsBarAndPercent() async {
+        let (model, row) = await barModel(listDay("2026-10-01", frames: 100, decided: 0))
+        #expect(!row.showsBar && row.tag == nil)
+        let laid = model.row(row, pending: Set(1..<11))
+        #expect(laid.showsBar && laid.pcFraction == 0 && laid.phoneFraction == 0.1)
+        #expect(laid.tag == .init(text: "10%", style: .normal))
+        #expect(laid.barDescription == "0% on the PC, 10% on this phone, 10% in all")
+    }
+
+    @Test func anUndoOnlyDayCountsAsPendingByDaySays() async {
+        let day = listDay("2026-10-01", frames: 100, decided: 0)
+        let (model, row) = await barModel(day)
+        let decide = CullWrite.decide(
+            actionID: "A", day: day.day, label: "", changes: [CullChange(id: 7, flag: .pick, via: .card)])
+        let client = CullingBayClient(baseURL: testBaseURL, transport: fixedTransport())
+        // Only the undo is waiting: its decide was saved, so the day has nothing on the phone.
+        let undoOnly = CullWriteQueue(client: client, store: InMemoryCullWriteStore(writes: [.undo(actionID: "A")]))
+        #expect(undoOnly.pendingByDay[day.day] == nil)
+        let none = model.row(row, pending: undoOnly.pendingFramesByDay[day.day] ?? [])
+        #expect(!none.showsBar && none.phoneFraction == 0 && none.tag == nil)
+        // The decide and its undo both waiting: the frame counts, as the day's tag says.
+        let both = CullWriteQueue(
+            client: client, store: InMemoryCullWriteStore(writes: [decide, .undo(actionID: "A")]))
+        #expect(both.pendingByDay[day.day] == 1)
+        #expect(both.pendingFramesByDay[day.day] == [7])
+        #expect(model.row(row, pending: both.pendingFramesByDay[day.day] ?? []).phoneFraction == 0.01)
+    }
+
+    @Test func noBarWithNothingDecidedAnywhere() async {
+        let (model, row) = await barModel(listDay("2026-10-01", frames: 100, decided: 0))
+        let laid = model.row(row, pending: [])
+        #expect(!laid.showsBar && laid.pcFraction == 0 && laid.phoneFraction == 0 && laid.percent == 0)
+        let (_, empty) = await barModel(listDay("2026-10-01", frames: 0, decided: 0))
+        #expect(!model.row(empty, pending: [1, 2]).showsBar)
+    }
+
+    @Test func theSavedCopyIsReadForWhatItShowsDecided() throws {
+        let root = TempRoot()
+        let store = root.store()
+        let day = cullDay([
+            cullStack(0, .single, [cullFrame(1, decision: draft(.pick))]),
+            cullStack(1, .single, [cullFrame(2, decision: draft(.reject), partners: ["DSC00002.JPG"])]),
+            cullStack(2, .single, [cullFrame(3)]),
+        ])
+        #expect(store.decidedFrames(in: day.day) == nil)                       // not saved
+        try store.begin(day: day.day, frames: 3, photos: [1, 2, 3])
+        try store.writeDay(day.day, Data(cullJSON(day).utf8))
+        try store.finish(day: day.day)
+        #expect(store.decidedFrames(in: day.day) == [1, 2, 90_002])
+    }
+
     @Test func anUndatedRowShowsItsFolderAndId() async {
         let (model, _) = makeModel([listDay(nil, frames: 3, stacks: 3)])
         await model.load()

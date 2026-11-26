@@ -33,16 +33,20 @@ struct CullDayRowView: View {
                     Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(3)
                 }
                 if row.showsBar {
-                    ProgressView(value: Double(row.percent), total: 100)
-                        .tint(.green)
+                    CullDayBar(pc: row.pcFraction, phone: row.phoneFraction)
                         .padding(.top, 3)
-                        .accessibilityHidden(true)
+                        .accessibilityLabel("Decided")
+                        .accessibilityValue(row.barDescription)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            // Until the PC has the taps, that is the news, whatever else the row would say.
+            // Until the PC has the taps, that is the news, whatever else the row would say; the
+            // percent, which counts them, stays above it.
             if pendingTaps > 0 {
-                CullPhoneTagView(count: pendingTaps)
+                VStack(alignment: .trailing, spacing: 4) {
+                    if let tag = row.tag, tag.style == .normal { CullTagView(tag: tag) }
+                    CullPhoneTagView(count: pendingTaps)
+                }
             } else if let tag = row.tag {
                 CullTagView(tag: tag)
             }
@@ -107,6 +111,33 @@ struct CullTagView: View {
         case .quiet: Color(.tertiarySystemFill)
         case .normal: .accentColor
         }
+    }
+}
+
+/// How much of the day is decided: a gray track, green for what the PC has, then orange for what
+/// only this phone has so far, in the colours of the tags.
+struct CullDayBar: View {
+    /// The PC's share, 0 to 1.
+    let pc: Double
+    /// The phone's share after it, 0 to 1.
+    let phone: Double
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let green = width * min(max(pc, 0), 1)
+            let orange = width * min(max(phone, 0), 1 - min(max(pc, 0), 1))
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(.systemGray5))
+                HStack(spacing: 0) {
+                    Rectangle().fill(Color.green).frame(width: green)
+                    Rectangle().fill(Color.orange).frame(width: orange)
+                }
+                .clipShape(Capsule())
+            }
+        }
+        .frame(height: 4)
+        .accessibilityElement(children: .ignore)
     }
 }
 
