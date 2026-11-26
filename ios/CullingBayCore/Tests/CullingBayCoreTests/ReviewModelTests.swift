@@ -241,7 +241,7 @@ struct ReviewModelTests {
         server.reply("GET /m/api/people/2/doubts", #"{"error":"busy"}"#, status: 503)
         let model = makeDoubtsModel(server)
         await model.load()
-        #expect(model.phase == .failed("Couldn’t load the suggestions: busy"))
+        #expect(model.phase == .failed("Couldn’t load the faces to check: busy"))
     }
 
     @Test func confirmingADoubtsBatchPostsTheReviewAndReadsTheDoubtsAgain() async {

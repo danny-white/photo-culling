@@ -115,7 +115,7 @@ public final class ReviewModel {
             phase = batch.faces.isEmpty && batch.groups.isEmpty ? .done : .reviewing
         } catch {
             if error is CancellationError || Task.isCancelled { return }
-            phase = .failed(GalleryMessages.failure(error, loading: "the suggestions"))
+            phase = .failed(GalleryMessages.failure(error, loading: kind == .doubts ? "the faces to check" : "the suggestions"))
         }
     }
 
