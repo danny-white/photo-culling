@@ -1,0 +1,79 @@
+import Foundation
+
+/// The words of the People screens, and the one rule about names. Pure, so a test can pin them.
+public enum PeopleFormat {
+    /// The server takes names of 1 to 80 characters once trimmed.
+    public static let maxNameLength = 80
+
+    /// The name as it will be sent: trimmed. Nil when it is empty or longer than 80 characters.
+    public static func cleanName(_ text: String) -> String? {
+        let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (1...maxNameLength).contains(name.count) ? name : nil
+    }
+
+    /// `"37 photos · 5 days"`, under a group's picture.
+    public static func groupCaption(_ group: FaceGroup, locale: Locale = .current) -> String {
+        "\(GalleryFormat.photoCount(group.photos, locale: locale)) · \(GalleryFormat.dayCount(group.days))"
+    }
+
+    /// `"Alex?"` for a group that looks like a person, else its caption.
+    public static func groupLabel(_ group: FaceGroup, locale: Locale = .current) -> String {
+        group.maybe.map { "\($0.name)?" } ?? groupCaption(group, locale: locale)
+    }
+
+    /// `"Finding faces… 8,609 of 43,195 photos"` while photos are still being checked, else nil.
+    public static func progress(checked: Int, of total: Int, locale: Locale = .current) -> String? {
+        guard total > 0, checked < total else { return nil }
+        let formatter = NumberFormatter()
+        formatter.locale = locale
+        formatter.numberStyle = .decimal
+        func grouped(_ n: Int) -> String { formatter.string(from: NSNumber(value: n)) ?? String(n) }
+        return "Finding faces… \(grouped(checked)) of \(grouped(total)) photos"
+    }
+
+    /// `"Review 12 suggestions"`, `"Review 1 suggestion"`.
+    public static func reviewTitle(_ suggestions: Int) -> String {
+        "Review \(suggestions) suggestion" + (suggestions == 1 ? "" : "s")
+    }
+
+    /// `"31 photos"` under a person's name.
+    public static func personCaption(_ person: Person, locale: Locale = .current) -> String {
+        GalleryFormat.photoCount(person.photos, locale: locale)
+    }
+}
+
+/// The sentences a People screen shows when a write fails.
+enum PeopleMessages {
+    static let nameLength = "A name needs 1 to \(PeopleFormat.maxNameLength) characters."
+
+    static func failure(_ error: any Error) -> String {
+        if let taken = error as? PersonNameTaken {
+            return "“\(taken.existing.name)” is already someone."
+        }
+        guard let error = error as? CullingBayError else {
+            return "Couldn’t save that: \(error.localizedDescription)"
+        }
+        switch error {
+        case .transport(ServerLink.forcedMessage):
+            return "Work offline is on. Turn it off to change people."
+        case .transport:
+            return "Can’t reach the photo server. Is the PC on and in Ubuntu?"
+        case .http(404, _):
+            return "That person or face isn’t there any more."
+        case .http(let status, let message):
+            return "Couldn’t save that: \(message ?? "HTTP \(status)")"
+        case .conflict(let message, _), .unavailable(let message):
+            return "Couldn’t save that: \(message ?? "the server refused")"
+        case .decoding(let message):
+            return "Couldn’t save that: \(message)"
+        }
+    }
+}
+
+/// What a write that names someone came to: it worked, the name was already someone's (so the
+/// screen can offer to use that person), or it failed and the model's `message` says why.
+public enum PersonWrite: Sendable, Hashable {
+    case saved(Person)
+    case taken(Person)
+    case failed
+}
